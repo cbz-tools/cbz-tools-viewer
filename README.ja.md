@@ -6,6 +6,14 @@ CBZ Viewer は、Windows 向けの漫画ビューアです。CBZ / ZIP / RAR / C
 
 実行ファイルは `cbz-viewer.exe` です。
 
+---
+
+# ダウンロード
+
+最新版は [Latest Release](https://github.com/cbz-tools/cbz-tools-viewer/releases/latest) からダウンロードできます。
+
+ZIP を展開し、`cbz-viewer.exe` を直接実行してください。追加インストールは不要です。
+
 単に本を読むだけではなく、次の機能を備えています。
 
 * ライブラリ管理
@@ -131,7 +139,7 @@ EPUB対応は、画像主体のEPUBを対象としています。CBZ Viewer は 
 
 | Library | Viewer | Fullscreen |
 |---|---|---|
-| ![Library](docs/assets/screenshots/Library.png) | ![Viewer](docs/assets/screenshots/Viewer_Windowed.png) | ![Fullscreen](docs/assets/screenshots/Viewer_Fullscreen.png) |
+| [![Library](docs/assets/screenshots/Library.png)](docs/assets/screenshots/Library.png) | [![Viewer](docs/assets/screenshots/Viewer_Windowed.png)](docs/assets/screenshots/Viewer_Windowed.png) | [![Fullscreen](docs/assets/screenshots/Viewer_Fullscreen.png)](docs/assets/screenshots/Viewer_Fullscreen.png) |
 
 ### デモコンテンツについて
 

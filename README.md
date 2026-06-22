@@ -6,6 +6,14 @@ CBZ Viewer is a Windows comic book viewer. It opens CBZ, ZIP, RAR, CBR, and EPUB
 
 The executable is `cbz-viewer.exe`.
 
+---
+
+# Download
+
+Download the latest release from [Latest Release](https://github.com/cbz-tools/cbz-tools-viewer/releases/latest).
+
+Extract the ZIP and run `cbz-viewer.exe` directly. No installation is required.
+
 It includes:
 
 * Library management
@@ -127,7 +135,7 @@ When you open a single supported image file, CBZ Viewer opens the parent folder 
 
 | Library | Viewer | Fullscreen |
 |---|---|---|
-| ![Library](docs/assets/screenshots/Library.png) | ![Viewer](docs/assets/screenshots/Viewer_Windowed.png) | ![Fullscreen](docs/assets/screenshots/Viewer_Fullscreen.png) |
+| [![Library](docs/assets/screenshots/Library.png)](docs/assets/screenshots/Library.png) | [![Viewer](docs/assets/screenshots/Viewer_Windowed.png)](docs/assets/screenshots/Viewer_Windowed.png) | [![Fullscreen](docs/assets/screenshots/Viewer_Fullscreen.png)](docs/assets/screenshots/Viewer_Fullscreen.png) |
 
 ### Demo content
 
