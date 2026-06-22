@@ -45,6 +45,11 @@ stage:
   copy_back_rgb
   copy_back_rgba
 
+追加確認:
+  default stream / explicit stream
+  pinned memory / async copy
+  host submit parallel
+
 sample:
   local JPEG test dataset
 
@@ -115,8 +120,11 @@ total_ms:
   copy_back_rgba best row: 30443.877 ms
 ```
 
-比較すると、nvJPEG device_only は CPU best の約24.1% だった。
-copy_back_rgb はさらに低下し、copy_back_rgba はさらに大きく低下した。
+比較すると、nvJPEG device_only は CPU best の約0.25x だった。
+成功した GPU variant の中では pageable 経由の device_only variant が最良だった。
+copy_back_rgb は device_only より低下し、copy_back_rgba はさらに大きく低下した。
+pinned / async 系は今回の条件では nvJPEG status error 等で成功値を得られなかった。
+ZIP 入力では GPU variant の成功値を得られず、性能比較値は出ていない。ZIP 入力そのものが原因と断定せず、今回の条件では安定性を確認できなかった、という扱いに留める。
 
 ---
 
@@ -130,6 +138,10 @@ batched_initialize_ms は小さく、支配要因ではなかった
 支配的だったのは decode_submit_ms 側だった
 batch_size を 128 / 256 / 512 に増やしても改善せず、best は 64 だった
 この bench で制御しているのは GPU の CUDA thread 数ではなく nvJPEG の batch_size である
+default stream だけでなく explicit stream も確認したが、採用ラインには届かなかった
+pinned / async 系は試したが、今回の条件では nvJPEG status error 等により成功値を得られなかった
+host submit parallel も確認したが、成功した範囲では CPU full decode を超えなかった
+decode_submit_ms は nvjpegDecodeBatched 呼び出しの壁時計時間であり、純粋な GPU kernel 時間ではない
 ```
 
 ここでの結論は、GPU 一般が遅いという意味ではない。
@@ -168,6 +180,7 @@ nvJPEG device_only が CPU maximum parallel より遅い
 ```
 
 したがって、今回の用途では nvJPEG 自体が採用ラインに届いていない。
+stream / pinned / async / host submit parallel を追加確認しても、成功した範囲では CPU full decode を超えなかった。
 
 ここでの比較対象は、現行CPU経路の最大並列 decode である。
 その条件で CPU が大きく速かったため、nvJPEG を通常JPEG decode の基盤に置き換える理由がない。
