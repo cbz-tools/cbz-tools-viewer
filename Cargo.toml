@@ -1,0 +1,115 @@
+[package]
+name = "cbz-viewer"
+version = "0.1.0"
+edition = "2021"
+authors = []
+description = "High-performance CBZ/ZIP/RAR manga viewer"
+rust-version = "1.85"
+
+# §10 最適化：release ビルドでバイナリサイズ削減・速度向上
+[profile.release]
+panic = "unwind"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+debug = true
+overflow-checks = true
+opt-level = 3
+
+[profile.dev]
+opt-level = 1            # デバッグでも最低限の最適化（egui 描画をまともにする）
+
+[profile.dev.package."*"]
+opt-level = 3            # 依存 crate は最適化（デコード・resize 速度）
+
+# ─── features ──────────────────────────────────────────────────────────────
+[features]
+default = ["mozjpeg", "rar", "avif", "zlib-ng"]
+# RAR サポート（unrar_sys が C ビルド必要。vcvars 環境でのみ有効化）
+rar = ["dep:unrar", "dep:unrar_sys"]
+# AVIF デコード（libdav1d C ライブラリ必要 — vcvars 環境でのみ有効化）
+avif = ["image/avif-native"]
+# zlib-ng 高速展開（cmake + cl.exe 必要）
+zlib-ng = ["flate2/zlib-ng"]
+# JPEG 縮小デコード（mozjpeg-sys が C ビルド必要。vcvars 環境でのみ有効化）
+# 有効時: JPEG サムネイル生成が 3〜5x 高速化（DCT スケーリング 1/2・1/4・1/8）
+mozjpeg = ["dep:mozjpeg"]
+
+# ─── dependencies ────────────────────────────────────────────────────────────
+
+[dependencies]
+# --- シリアライズ（セッション永続化）---
+serde             = { version = "1", features = ["derive"] }
+serde_json        = "1"
+toml              = "0.8"
+chrono            = { version = "0.4", features = ["serde"] }
+
+# --- UI (§11) ---
+eframe            = { version = "0.34", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "default_fonts", "web_screen_reader"] }
+egui_material_icons = { version = "0.6.0", features = ["outline"] }
+
+# --- Async / 並列 (§11) ---
+tokio             = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+parking_lot       = "0.12"
+
+# --- ZIP / RAR (§11, §7) ---
+memmap2           = "0.9"
+flate2            = "1"   # 本番: --features zlib-ng で 2x 高速（cmake+cl.exe 必要）
+unrar             = { version = "0.5", optional = true }   # feature "rar" で有効化
+unrar_sys         = { version = "0.5", optional = true }   # feature "rar" で有効化
+
+# --- 画像 (§11, §8) ---
+image             = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+webp              = "0.3"   # libwebp-sys（bundled C）経由の WebP デコード／エンコード
+libwebp-sys       = "0.9.6" # animated WebP の低レベル demux / decoder API
+zune-jpeg         = "0.4"   # 純 Rust JPEG デコード（mozjpeg feature なし時に使用）
+zune-core         = "0.4"   # zune-jpeg 0.4 が要求するバージョンに合わせる
+fast_image_resize = "4"
+mozjpeg           = { version = "0.10", optional = true }  # feature "mozjpeg" で有効化（DCT 縮小デコード）
+
+# --- キャッシュ (§11, §6) ---
+lru               = "0.12"
+
+# --- ユーティリティ (§11) ---
+blake3            = "1"
+bytes             = "1"
+encoding_rs       = "0.8"     # Shift-JIS / CP932 ZIP ファイル名デコード
+natord            = "1"       # 自然順ソート
+anyhow            = "1"
+regex             = "1"
+quick-xml         = "0.38"
+tracing           = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+log               = "0.4"
+# Ctrl+C ファイルクリップボード（Windows CF_HDROP）
+clipboard-win       = "5"
+raw-window-handle   = "0.6"
+windows             = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Shell",
+] }
+windows-core        = "0.62.2"
+windows-sys         = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_Ioctl",
+] }
+wmi                = "0.18.4"
+
+[dev-dependencies]
+tempfile           = "3"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource        = "0.1"

@@ -1,0 +1,749 @@
+use crate::domain::app_settings::UiLanguage;
+use chrono::{Datelike, NaiveDate};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TextKey {
+    Settings,
+    General,
+    Library,
+    ViewerTab,
+    Display,
+    Performance,
+    ExternalTools,
+    App,
+    List,
+    CardDisplay,
+    ReadingSection,
+    Language,
+    Size,
+    BackToDefaultSize,
+    SizeMin,
+    SizeDefault,
+    SizeMax,
+    SizeRealtimeNote,
+    WheelSpeed,
+    WheelSpeedReset,
+    WheelSpeedDescription,
+    HudText,
+    HudTextReset,
+    HudTextDescription,
+    HudStyle,
+    HudStyleDefault,
+    HudStyleWhite,
+    HudStyleBlue,
+    HudStyleHighContrast,
+    HudStyleAmber,
+    HudStyleRose,
+    HudStyleViolet,
+    CardSelectionStyle,
+    CardSelectionStyleViolet,
+    CardSelectionStyleAmber,
+    CardSelectionStyleRose,
+    CardSelectionStyleHighContrast,
+    ImageFolder,
+    ImageFolderOpenAsBook,
+    ImageFolderDescription,
+    QualityGlobal,
+    QualitySpeed,
+    QualityBalanced,
+    QualityQuality,
+    QualityOriginal,
+    QualitySpeedDesc,
+    QualityBalancedDesc,
+    QualityQualityDesc,
+    QualityOriginalDesc,
+    QualityByBookNote,
+    QualityAnimationNote,
+    DefaultReadingDirection,
+    ResumeFromLastReadingPosition,
+    Reading,
+    Read,
+    DefaultLabel,
+    RightOpen,
+    LeftOpen,
+    DefaultReadingDirectionNote,
+    ReadingDirectionTooltip,
+    DisplayMode,
+    DisplayModeAuto,
+    DisplayModeSingle,
+    DisplayModeSpread,
+    CoverBlank,
+    CoverBlankHint,
+    CoverBlankAutoHint,
+    QualityLabel,
+    SlideshowPlay,
+    SlideshowPause,
+    PreviousBook,
+    NextBook,
+    Processing,
+    BackgroundWorkers,
+    BackgroundWorkersReset,
+    BackgroundWorkersDescription,
+    MemoryCache,
+    L1VramCache,
+    L2RamCache,
+    GPUKeepNote,
+    CacheResetDefault,
+    CacheUpperLimit,
+    CacheUsage,
+    DiskCache,
+    CacheClear,
+    CacheClearTooltip,
+    DangerZone,
+    Unavailable,
+    MiB,
+    Count,
+    CurrentCount,
+    ExternalToolLabel,
+    ExternalToolDelete,
+    ExternalToolAdd,
+    ExternalToolPathNote,
+    English,
+    Japanese,
+    Example,
+    Optimizer,
+    SampleExternalTool,
+    StartModeLabel,
+    BackgroundMode,
+    NormalMode,
+    NameLabel,
+    ShortcutLabel,
+    ExecutableLabel,
+    ArgumentsLabel,
+    GettingUnavailable,
+    PcResourcesLabel,
+    StandardLabel,
+    DangerZoneTitle,
+    DangerZoneEnableLabel,
+    DangerZoneEnableDescription,
+    DangerZoneBodyText,
+    InputRangeLabel,
+    LibraryTab,
+    HistoryTab,
+    Today,
+    Yesterday,
+    AddFolder,
+    AddFolderHint,
+    FolderDropHint,
+    Unread,
+    Favorites,
+    FavoritesScopeLabel,
+    Groups,
+    Uncategorized,
+    KindGroupsError,
+    NoFolder,
+    ShowLibrary,
+    Back,
+    Forward,
+    ParentFolder,
+    Reload,
+    EnterPathHint,
+    ToggleSortOrder,
+    SortLabel,
+    SearchInFolder,
+    SearchAll,
+    SortByName,
+    SortByModified,
+    SortBySize,
+    SortByPageCount,
+    Windowed,
+    Fullscreen,
+    Open,
+    OpenInExplorer,
+    MoveToFolder,
+    AddToFavorites,
+    RemoveFromFavorites,
+    SetGroup,
+    Rename,
+    Copy,
+    Delete,
+    ClearBookSettings,
+    ClearBookSettingsQuestion,
+    ClearBookSettingsQuestionMultiple,
+    ClearBookSettingsNote,
+    Reset,
+    ExternalToolsMenu,
+    MultipleSelectionUnavailable,
+    SelectedCount,
+    FilterToken,
+    CopyToken,
+    Viewer,
+    CurrentHud,
+    Confirm,
+    Cancel,
+    RenameTitle,
+    DeleteConfirmTitle,
+    DeleteQuestion,
+    GroupSettingsTitle,
+    GroupTargetsSentence,
+    ExistingGroups,
+    OrManualInput,
+    GroupNameHint,
+    ReturnToUncategorized,
+    NewFileNamePrompt,
+    NewFileNameHint,
+    IrreversibleActionNote,
+    Loading,
+    ViewerLoading,
+    FavoriteUpdating,
+    FavoriteChecking,
+    LibraryEmpty,
+    NoMatchingBooks,
+    ErrorTitle,
+    ViewerInitFailed,
+    Ok,
+    CacheClearFailed,
+    FileCount,
+    FolderCount,
+    FilesAndFoldersCount,
+    NoPreviousBook,
+    NoNextBook,
+    FavoriteUpdateFailed,
+    DeleteAndNextBook,
+    DeleteFailed,
+}
+
+pub const fn ui_language_choice_key(language: UiLanguage) -> TextKey {
+    match language {
+        UiLanguage::English => TextKey::English,
+        UiLanguage::Japanese => TextKey::Japanese,
+    }
+}
+
+pub fn tr(language: UiLanguage, key: TextKey) -> &'static str {
+    match language {
+        UiLanguage::English => english_text(key),
+        UiLanguage::Japanese => japanese_text(key).unwrap_or_else(|| english_text(key)),
+    }
+}
+
+pub fn format_history_date(language: UiLanguage, date: NaiveDate) -> String {
+    match language {
+        UiLanguage::English => format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day()),
+        UiLanguage::Japanese => {
+            format!("{}年{:02}月{:02}日", date.year(), date.month(), date.day())
+        }
+    }
+}
+
+pub fn format_page_count_label(
+    language: UiLanguage,
+    current_pages: &str,
+    page_count: u32,
+) -> String {
+    if page_count == 0 {
+        return "…".to_owned();
+    }
+    match language {
+        UiLanguage::English => format!("{current_pages} / {page_count} p."),
+        UiLanguage::Japanese => format!("{current_pages} / {page_count} p."),
+    }
+}
+
+fn english_text(key: TextKey) -> &'static str {
+    let text = match key {
+        TextKey::Settings => "Settings",
+        TextKey::Library => "Library",
+        TextKey::LibraryTab => "Library",
+        TextKey::HistoryTab => "History",
+        TextKey::Today => "Today",
+        TextKey::Yesterday => "Yesterday",
+        TextKey::AddFolder => "Add folder",
+        TextKey::AddFolderHint => "Add the current folder to Favorites",
+        TextKey::FolderDropHint => "Drop a folder here or add one",
+        TextKey::Unread => "Unread",
+        TextKey::Favorites => "Favorites",
+        TextKey::FavoritesScopeLabel => "★ Favorites",
+        TextKey::Groups => "Groups",
+        TextKey::Uncategorized => "Uncategorized",
+        TextKey::KindGroupsError => "kind_groups.toml error",
+        TextKey::NoFolder => "No folder",
+        TextKey::ShowLibrary => "Show / hide library",
+        TextKey::Back => "Back",
+        TextKey::Forward => "Forward",
+        TextKey::ParentFolder => "Parent folder",
+        TextKey::Reload => "Reload",
+        TextKey::EnterPathHint => "Enter a path and press Enter",
+        TextKey::ToggleSortOrder => "Toggle ascending/descending",
+        TextKey::SortLabel => "Sort:",
+        TextKey::SearchInFolder => " in folder",
+        TextKey::SearchAll => "Search by title or author",
+        TextKey::SortByName => "Name",
+        TextKey::SortByModified => "Modified",
+        TextKey::SortBySize => "Size",
+        TextKey::SortByPageCount => "Pages",
+        TextKey::Windowed => "Windowed",
+        TextKey::Fullscreen => "Fullscreen",
+        TextKey::Open => "Open",
+        TextKey::OpenInExplorer => "Open in Explorer",
+        TextKey::MoveToFolder => "Move to folder",
+        TextKey::AddToFavorites => "Add to Favorites",
+        TextKey::RemoveFromFavorites => "Remove from Favorites",
+        TextKey::SetGroup => "Set Group...",
+        TextKey::Rename => "Rename",
+        TextKey::Copy => "Copy",
+        TextKey::Delete => "Delete",
+        TextKey::ClearBookSettings => "Clear Book Settings",
+        TextKey::ClearBookSettingsQuestion => "Reset this book's settings?",
+        TextKey::ClearBookSettingsQuestionMultiple => "Reset settings for {} selected books?",
+        TextKey::ClearBookSettingsNote => "Reading state, resume position, and display settings return to defaults. The book, thumbnails, Page Map, favorites, and groups are not deleted.",
+        TextKey::Reset => "Reset",
+        TextKey::ExternalToolsMenu => "External Tools >",
+        TextKey::MultipleSelectionUnavailable => "  Unavailable while multiple items are selected",
+        TextKey::SelectedCount => "{} items selected",
+        TextKey::FilterToken => "Filter by \"{}\"",
+        TextKey::CopyToken => "Copy \"{}\"",
+        TextKey::Viewer => "Viewer:",
+        TextKey::CurrentHud => "Toggle HUD display (current: {})",
+        TextKey::Confirm => "Confirm",
+        TextKey::Cancel => "Cancel",
+        TextKey::RenameTitle => "Rename",
+        TextKey::DeleteConfirmTitle => "Delete",
+        TextKey::DeleteQuestion => "Delete \"{}\"?",
+        TextKey::GroupSettingsTitle => "Set Group",
+        TextKey::GroupTargetsSentence => "Set group for {} files.",
+        TextKey::ExistingGroups => "Choose from existing groups",
+        TextKey::OrManualInput => "Or enter manually",
+        TextKey::GroupNameHint => "Enter a group name...",
+        TextKey::ReturnToUncategorized => "Clear Group",
+        TextKey::NewFileNamePrompt => "Enter a new file name.",
+        TextKey::NewFileNameHint => "New file name",
+        TextKey::IrreversibleActionNote => "This action cannot be undone.",
+        TextKey::Loading => "Loading...",
+        TextKey::ViewerLoading => "Loading...",
+        TextKey::FavoriteUpdating => "Updating favorites...",
+        TextKey::FavoriteChecking => "Checking favorites...",
+        TextKey::LibraryEmpty => {
+            "The library is empty.\nDrag and drop a folder or enter a path to add one."
+        }
+        TextKey::NoMatchingBooks => "No matching books",
+        TextKey::ErrorTitle => "Error",
+        TextKey::ViewerInitFailed => "Viewer initialization failed.",
+        TextKey::Ok => "OK",
+        TextKey::CacheClearFailed => {
+            "Could not open the cache location, so cache deletion could not be performed."
+        }
+        TextKey::FileCount => "{} files",
+        TextKey::FolderCount => "{} folders",
+        TextKey::FilesAndFoldersCount => "{} files, {} folders",
+        TextKey::NoPreviousBook => "No previous book",
+        TextKey::NoNextBook => "No next book",
+        TextKey::FavoriteUpdateFailed => "Could not update favorites.",
+        TextKey::DeleteAndNextBook => "Delete and next book",
+        TextKey::DeleteFailed => "Could not delete the book.",
+        TextKey::General => "General",
+        TextKey::Display => "Display",
+        TextKey::Performance => "Performance",
+        TextKey::ExternalTools => "External Tools",
+        TextKey::ViewerTab => "Viewer",
+        TextKey::App => "App",
+        TextKey::List => "List",
+        TextKey::CardDisplay => "Card Display",
+        TextKey::ReadingSection => "Reading",
+        TextKey::Language => "Language",
+        TextKey::English => "English",
+        TextKey::Japanese => "Japanese",
+        TextKey::Size => "Card size",
+        TextKey::BackToDefaultSize => "Restore default card size",
+        TextKey::SizeMin => "Min",
+        TextKey::SizeDefault => "Default",
+        TextKey::SizeMax => "Max",
+        TextKey::SizeRealtimeNote => {
+            "Adjusts the book card size in the library grid. Changes are reflected in real time, without regeneration."
+        }
+        TextKey::WheelSpeed => "Wheel speed",
+        TextKey::WheelSpeedReset => "Restore default speed (level {} / {}x)",
+        TextKey::WheelSpeedDescription => {
+            "Current: level {} / {}x. Adjusts mouse-wheel speed for the library grid only."
+        }
+        TextKey::HudText => "HUD text",
+        TextKey::HudTextReset => "Restore default text size (level {} / {}px)",
+        TextKey::HudTextDescription => {
+            "Current: level {} / {}px. Applies to file-name display in the library grid."
+        }
+        TextKey::HudStyle => "Library Card HUD Style",
+        TextKey::HudStyleDefault => "Default",
+        TextKey::HudStyleWhite => "White",
+        TextKey::HudStyleBlue => "Blue",
+        TextKey::HudStyleAmber => "Amber",
+        TextKey::HudStyleRose => "Rose",
+        TextKey::HudStyleViolet => "Violet",
+        TextKey::HudStyleHighContrast => "High Contrast",
+        TextKey::CardSelectionStyle => "Library Card Selection Style",
+        TextKey::CardSelectionStyleViolet => "Violet",
+        TextKey::CardSelectionStyleAmber => "Amber",
+        TextKey::CardSelectionStyleRose => "Rose",
+        TextKey::CardSelectionStyleHighContrast => "High Contrast",
+        TextKey::ImageFolder => "Image folder",
+        TextKey::ImageFolderOpenAsBook => "Open image folders as books",
+        TextKey::ImageFolderDescription => {
+            "On opens image folders in the Viewer. Off navigates into the folder."
+        }
+        TextKey::QualityGlobal => "Quality (global)",
+        TextKey::QualitySpeed => "Speed",
+        TextKey::QualityBalanced => "Balanced",
+        TextKey::QualityQuality => "High Quality",
+        TextKey::QualityOriginal => "Original",
+        TextKey::QualitySpeedDesc => "Prioritizes display speed. Image quality may decrease.",
+        TextKey::QualityBalancedDesc => {
+            "Balances image quality and display speed. This is the normal recommendation."
+        }
+        TextKey::QualityQualityDesc => {
+            "Downscales with high quality to match the display size."
+        }
+        TextKey::QualityOriginalDesc => {
+            "Preserves the original resolution as much as possible."
+        }
+        TextKey::QualityByBookNote => {
+            "Book-specific settings override the global setting."
+        }
+        TextKey::QualityAnimationNote => {
+            "Some image processing does not apply to animated images."
+        }
+        TextKey::DefaultReadingDirection => "Default reading direction",
+        TextKey::ResumeFromLastReadingPosition => "Resume from last reading position",
+        TextKey::Reading => "Reading",
+        TextKey::Read => "Read",
+        TextKey::DefaultLabel => "Default",
+        TextKey::RightOpen => "Right-to-left",
+        TextKey::LeftOpen => "Left-to-right",
+        TextKey::DefaultReadingDirectionNote => "Used when no book-specific setting exists.",
+        TextKey::ReadingDirectionTooltip => "Set this book's reading direction.",
+        TextKey::DisplayMode => "Display mode",
+        TextKey::DisplayModeAuto => "AUTO",
+        TextKey::DisplayModeSingle => "Single",
+        TextKey::DisplayModeSpread => "Spread",
+        TextKey::CoverBlank => "Cover blank",
+        TextKey::CoverBlankHint => "Enabled in spread mode.",
+        TextKey::CoverBlankAutoHint => "Enabled in spread mode and can be preselected in AUTO.",
+        TextKey::QualityLabel => "Quality",
+        TextKey::SlideshowPlay => "Slideshow: Play",
+        TextKey::SlideshowPause => "Slideshow: Pause",
+        TextKey::PreviousBook => "Previous Book",
+        TextKey::NextBook => "Next Book",
+        TextKey::Processing => "Processing",
+        TextKey::BackgroundWorkers => "BG Workers",
+        TextKey::BackgroundWorkersReset => "Restore default workers",
+        TextKey::BackgroundWorkersDescription => {
+            "BG workers are the number of background workers running at the same time."
+        }
+        TextKey::MemoryCache => "Memory cache",
+        TextKey::L1VramCache => "L1 VRAM Cache",
+        TextKey::L2RamCache => "L2 RAM Cache",
+        TextKey::GPUKeepNote => "Keeps images before and after display in GPU memory.",
+        TextKey::CacheResetDefault => "Restore default",
+        TextKey::CacheUpperLimit => "Normal upper limit",
+        TextKey::CacheUsage => "Usage",
+        TextKey::DiskCache => "Disk cache",
+        TextKey::CacheClear => "Clear thumbnail cache",
+        TextKey::CacheClearTooltip => {
+            "Delete the disk cache and regenerate it when displayed"
+        }
+        TextKey::DangerZone => "Danger Zone",
+        TextKey::Unavailable => "Unavailable",
+        TextKey::MiB => "MiB",
+        TextKey::Count => "count",
+        TextKey::CurrentCount => "Current count",
+        TextKey::ExternalToolLabel => "Tool",
+        TextKey::ExternalToolDelete => "Delete",
+        TextKey::ExternalToolAdd => "Add",
+        TextKey::ExternalToolPathNote => {
+            "{path} is replaced with the full path of the target book."
+        }
+        TextKey::Example => "Example",
+        TextKey::Optimizer => "Optimizer",
+        TextKey::SampleExternalTool => "Sample external tool",
+        TextKey::StartModeLabel => "Start mode",
+        TextKey::BackgroundMode => "Background",
+        TextKey::NormalMode => "Normal",
+        TextKey::NameLabel => "Name",
+        TextKey::ShortcutLabel => "Shortcut",
+        TextKey::ExecutableLabel => "Executable",
+        TextKey::ArgumentsLabel => "Arguments",
+        TextKey::GettingUnavailable => "Unavailable",
+        TextKey::PcResourcesLabel => "PC resources",
+        TextKey::StandardLabel => "Default",
+        TextKey::DangerZoneTitle => "Danger Zone",
+        TextKey::DangerZoneEnableLabel => "Enable Danger Zone",
+        TextKey::DangerZoneEnableDescription => "Allows entering values above the normal limits.",
+        TextKey::DangerZoneBodyText => "In the danger zone, you can enter arbitrary values up to the detected resource limit. Existing values are not changed automatically.",
+        TextKey::InputRangeLabel => "Input range",
+    };
+    debug_assert!(
+        !text.is_empty(),
+        "missing English translation for {:?}",
+        key
+    );
+    text
+}
+
+fn japanese_text(key: TextKey) -> Option<&'static str> {
+    match key {
+        TextKey::Settings => Some("設定"),
+        TextKey::Library => Some("ライブラリ"),
+        TextKey::LibraryTab => Some("ライブラリ"),
+        TextKey::HistoryTab => Some("履歴"),
+        TextKey::Today => Some("今日"),
+        TextKey::Yesterday => Some("昨日"),
+        TextKey::AddFolder => Some("＋ フォルダ追加"),
+        TextKey::AddFolderHint => Some("現在のフォルダをお気に入りに追加"),
+        TextKey::FolderDropHint => Some("フォルダをドラッグ＆ドロップするか\n＋ フォルダ追加"),
+        TextKey::Unread => Some("未読"),
+        TextKey::Favorites => Some("お気に入り"),
+        TextKey::FavoritesScopeLabel => Some("★ お気に入り"),
+        TextKey::Groups => Some("グループ"),
+        TextKey::Uncategorized => Some("未分類"),
+        TextKey::KindGroupsError => Some("⚠ kind_groups.toml エラー"),
+        TextKey::NoFolder => Some("No folder"),
+        TextKey::ShowLibrary => Some("ライブラリを表示 / 非表示"),
+        TextKey::Back => Some("戻る"),
+        TextKey::Forward => Some("進む"),
+        TextKey::ParentFolder => Some("親フォルダ"),
+        TextKey::Reload => Some("再読み込み"),
+        TextKey::EnterPathHint => Some("パスを入力して Enter"),
+        TextKey::ToggleSortOrder => Some("昇順/降順を切り替え"),
+        TextKey::SortLabel => Some("並び:"),
+        TextKey::SearchInFolder => Some("内を検索"),
+        TextKey::SearchAll => Some("タイトル・作者で検索"),
+        TextKey::SortByName => Some("名前順"),
+        TextKey::SortByModified => Some("更新日"),
+        TextKey::SortBySize => Some("サイズ"),
+        TextKey::SortByPageCount => Some("ページ数"),
+        TextKey::Windowed => Some("Windowed"),
+        TextKey::Fullscreen => Some("Fullscreen"),
+        TextKey::Open => Some("開く"),
+        TextKey::OpenInExplorer => Some("Explorerで開く"),
+        TextKey::MoveToFolder => Some("フォルダへ移動"),
+        TextKey::AddToFavorites => Some("お気に入りに追加"),
+        TextKey::RemoveFromFavorites => Some("お気に入りから解除"),
+        TextKey::SetGroup => Some("グループを設定..."),
+        TextKey::Rename => Some("名前変更"),
+        TextKey::Copy => Some("コピー"),
+        TextKey::Delete => Some("削除"),
+        TextKey::ClearBookSettings => Some("本固有設定をクリア"),
+        TextKey::ClearBookSettingsQuestion => Some("この本の本固有設定を初期化しますか？"),
+        TextKey::ClearBookSettingsQuestionMultiple => {
+            Some("選択した {} 冊の本固有設定を初期化しますか？")
+        }
+        TextKey::ClearBookSettingsNote => Some(
+            "読書状態、再開位置、表示設定が既定値に戻ります。\n本、サムネイル、Page Map、お気に入り、グループは削除されません。",
+        ),
+        TextKey::Reset => Some("初期化"),
+        TextKey::ExternalToolsMenu => Some("外部ツール >"),
+        TextKey::MultipleSelectionUnavailable => Some("  複数選択中は使用不可"),
+        TextKey::SelectedCount => Some("{} 件選択中"),
+        TextKey::FilterToken => Some("\"{}\" でフィルタリング"),
+        TextKey::CopyToken => Some("\"{}\" をコピー"),
+        TextKey::Viewer => Some("Viewer:"),
+        TextKey::CurrentHud => Some("HUD 表示を切り替えます（現在: {}）"),
+        TextKey::Confirm => Some("確定"),
+        TextKey::Cancel => Some("キャンセル"),
+        TextKey::RenameTitle => Some("名前変更"),
+        TextKey::DeleteConfirmTitle => Some("削除の確認"),
+        TextKey::DeleteQuestion => Some("「{}」を削除しますか？"),
+        TextKey::GroupSettingsTitle => Some("グループを設定"),
+        TextKey::GroupTargetsSentence => Some("{}件のファイルのグループを設定します。"),
+        TextKey::ExistingGroups => Some("既存グループから選択"),
+        TextKey::OrManualInput => Some("または手入力"),
+        TextKey::GroupNameHint => Some("グループ名を入力..."),
+        TextKey::ReturnToUncategorized => Some("未分類に戻す"),
+        TextKey::NewFileNamePrompt => Some("新しいファイル名を入力してください"),
+        TextKey::NewFileNameHint => Some("新しいファイル名"),
+        TextKey::IrreversibleActionNote => Some("この操作は元に戻せません"),
+        TextKey::Loading => Some("読み込み中..."),
+        TextKey::ViewerLoading => Some("読み込み中…"),
+        TextKey::FavoriteUpdating => Some("お気に入り更新中"),
+        TextKey::FavoriteChecking => Some("お気に入り状態確認中"),
+        TextKey::LibraryEmpty => Some("ライブラリが空です\nドラッグ&ドロップ / パス入力で追加"),
+        TextKey::NoMatchingBooks => Some("対応する本がありません"),
+        TextKey::ErrorTitle => Some("エラー"),
+        TextKey::ViewerInitFailed => Some("ビューア初期化に失敗しました。"),
+        TextKey::Ok => Some("OK"),
+        TextKey::CacheClearFailed => Some("キャッシュ保存先を開けないため、キャッシュ削除を実行できませんでした。"),
+        TextKey::FileCount => Some("{} 件のファイル"),
+        TextKey::FolderCount => Some("{} 件のフォルダ"),
+        TextKey::FilesAndFoldersCount => Some("{} 件のファイル、{} 件のフォルダ"),
+        TextKey::NoPreviousBook => Some("前の本はありません"),
+        TextKey::NoNextBook => Some("次の本はありません"),
+        TextKey::FavoriteUpdateFailed => Some("お気に入りを更新できませんでした"),
+        TextKey::DeleteAndNextBook => Some("削除して次の本"),
+        TextKey::DeleteFailed => Some("削除できませんでした"),
+        TextKey::General => Some("一般"),
+        TextKey::Display => Some("表示"),
+        TextKey::Performance => Some("パフォーマンス"),
+        TextKey::ExternalTools => Some("外部ツール"),
+        TextKey::ViewerTab => Some("Viewer"),
+        TextKey::App => Some("アプリ"),
+        TextKey::List => Some("一覧"),
+        TextKey::CardDisplay => Some("カード表示"),
+        TextKey::ReadingSection => Some("読書"),
+        TextKey::Language => Some("言語"),
+        TextKey::English => Some("英語"),
+        TextKey::Japanese => Some("日本語"),
+        TextKey::Size => Some("カードサイズ"),
+        TextKey::BackToDefaultSize => Some("標準のカードサイズ"),
+        TextKey::SizeMin => Some("最小(80)"),
+        TextKey::SizeDefault => Some("標準(200)"),
+        TextKey::SizeMax => Some("特大(320)"),
+        TextKey::SizeRealtimeNote => Some(
+            "ライブラリ一覧の本カードサイズを調整します。変更はリアルタイムで反映されます（再生成なし）。",
+        ),
+        TextKey::WheelSpeed => Some("ホイール速度"),
+        TextKey::WheelSpeedReset => Some("標準速度（レベル{} / {}倍）に戻す"),
+        TextKey::WheelSpeedDescription => Some(
+            "現在: レベル{} / {}倍。ライブラリ一覧のマウスホイール速度を調整します。ビューア画面には影響しません。",
+        ),
+        TextKey::HudText => Some("HUD文字"),
+        TextKey::HudTextReset => Some("標準文字サイズ（レベル{} / {}px）に戻す"),
+        TextKey::HudTextDescription => {
+            Some("現在: レベル{} / {}px。ライブラリ一覧の HUD ファイル名表示に反映されます。")
+        }
+        TextKey::HudStyle => Some("カードHUDスタイル"),
+        TextKey::HudStyleDefault => Some("標準"),
+        TextKey::HudStyleWhite => Some("ホワイト"),
+        TextKey::HudStyleBlue => Some("ブルー"),
+        TextKey::HudStyleAmber => Some("アンバー"),
+        TextKey::HudStyleRose => Some("ローズ"),
+        TextKey::HudStyleViolet => Some("バイオレット"),
+        TextKey::HudStyleHighContrast => Some("高コントラスト"),
+        TextKey::CardSelectionStyle => Some("カード選択スタイル"),
+        TextKey::CardSelectionStyleViolet => Some("紫"),
+        TextKey::CardSelectionStyleAmber => Some("アンバー"),
+        TextKey::CardSelectionStyleRose => Some("ローズ"),
+        TextKey::CardSelectionStyleHighContrast => Some("高コントラスト"),
+        TextKey::ImageFolder => Some("画像フォルダ"),
+        TextKey::ImageFolderOpenAsBook => Some("画像フォルダを本として開く"),
+        TextKey::ImageFolderDescription => Some(
+            "ON では画像フォルダを Viewer で開きます。OFF ではフォルダへ移動します。",
+        ),
+        TextKey::QualityGlobal => Some("画質（グローバル設定）"),
+        TextKey::QualitySpeed => Some("速度優先"),
+        TextKey::QualityBalanced => Some("標準"),
+        TextKey::QualityQuality => Some("画質優先"),
+        TextKey::QualityOriginal => Some("原寸優先"),
+        TextKey::QualitySpeedDesc => Some("表示速度を優先します。画質が低下する場合があります。"),
+        TextKey::QualityBalancedDesc => {
+            Some("画質と表示速度のバランスを取ります。通常はこちらを推奨します。")
+        }
+        TextKey::QualityQualityDesc => {
+            Some("表示サイズに合わせて高品質に縮小します。表示までの時間とCPU使用量が増える場合があります。")
+        }
+        TextKey::QualityOriginalDesc => {
+            Some("元画像の解像度を可能な範囲で維持します。読み込み時間とメモリ・GPUメモリ使用量が大きく増え、キャッシュできるページ数が減ります。")
+        }
+        TextKey::QualityByBookNote => {
+            Some("ビューアで本ごとに画質を変更できます。本ごとの設定はグローバル設定より優先されます。")
+        }
+        TextKey::QualityAnimationNote => Some("アニメーション画像には一部の画質処理が適用されません。"),
+        TextKey::DefaultReadingDirection => Some("既定のページ開き"),
+        TextKey::ResumeFromLastReadingPosition => Some("前回の読書位置から再開"),
+        TextKey::Reading => Some("読書中"),
+        TextKey::Read => Some("既読"),
+        TextKey::DefaultLabel => Some("標準"),
+        TextKey::RightOpen => Some("右開き"),
+        TextKey::LeftOpen => Some("左開き"),
+        TextKey::DefaultReadingDirectionNote => Some("本ごとの設定がない場合に使用します。"),
+        TextKey::ReadingDirectionTooltip => Some("この本のページ開きを設定します"),
+        TextKey::DisplayMode => Some("表示モード"),
+        TextKey::DisplayModeAuto => Some("AUTO"),
+        TextKey::DisplayModeSingle => Some("単ページ"),
+        TextKey::DisplayModeSpread => Some("見開き"),
+        TextKey::CoverBlank => Some("表紙ブランク"),
+        TextKey::CoverBlankHint => Some("見開き時に有効"),
+        TextKey::CoverBlankAutoHint => Some("見開き時に有効（AUTOでは事前設定可）"),
+        TextKey::QualityLabel => Some("画質"),
+        TextKey::SlideshowPlay => Some("再生"),
+        TextKey::SlideshowPause => Some("停止"),
+        TextKey::PreviousBook => Some("前の本へ"),
+        TextKey::NextBook => Some("次の本へ"),
+        TextKey::Processing => Some("処理"),
+        TextKey::BackgroundWorkers => Some("BG Workers"),
+        TextKey::BackgroundWorkersReset => Some("検出CPU数から算出した既定値（{}）に戻す"),
+        TextKey::BackgroundWorkersDescription => {
+            Some("BG は同時に処理するバックグラウンド worker 数です。")
+        }
+        TextKey::MemoryCache => Some("メモリキャッシュ"),
+        TextKey::L1VramCache => Some("L1 VRAM Cache"),
+        TextKey::L2RamCache => Some("L2 RAM Cache"),
+        TextKey::GPUKeepNote => Some("表示前後の画像をGPUメモリに保持します。"),
+        TextKey::CacheResetDefault => Some("検出資源から算出した既定値（{}）に戻す"),
+        TextKey::CacheUpperLimit => Some("通常上限"),
+        TextKey::CacheUsage => Some("使用量"),
+        TextKey::DiskCache => Some("ディスクキャッシュ"),
+        TextKey::CacheClear => Some("サムネイルキャッシュをクリア"),
+        TextKey::CacheClearTooltip => Some("ディスクキャッシュを削除し、表示時に再生成します"),
+        TextKey::DangerZone => Some("Danger Zone"),
+        TextKey::Unavailable => Some("取得不可"),
+        TextKey::MiB => Some("MiB"),
+        TextKey::Count => Some("個"),
+        TextKey::CurrentCount => Some("件数"),
+        TextKey::ExternalToolLabel => Some("ツール"),
+        TextKey::ExternalToolDelete => Some("削除"),
+        TextKey::ExternalToolAdd => Some("追加"),
+        TextKey::ExternalToolPathNote => Some("{path} は対象の本のフルパスに置換されます。"),
+        TextKey::Example => Some("例"),
+        TextKey::Optimizer => Some("Optimizer"),
+        TextKey::SampleExternalTool => Some("サンプル外部ツール"),
+        TextKey::StartModeLabel => Some("起動方式"),
+        TextKey::BackgroundMode => Some("バックグラウンド"),
+        TextKey::NormalMode => Some("通常"),
+        TextKey::NameLabel => Some("名前"),
+        TextKey::ShortcutLabel => Some("ショートカット"),
+        TextKey::ExecutableLabel => Some("実行ファイル"),
+        TextKey::ArgumentsLabel => Some("引数"),
+        TextKey::GettingUnavailable => Some("取得不可"),
+        TextKey::PcResourcesLabel => Some("PC 資源"),
+        TextKey::StandardLabel => Some("標準"),
+        TextKey::DangerZoneTitle => Some("Danger Zone"),
+        TextKey::DangerZoneEnableLabel => Some("Danger Zone を有効にする"),
+        TextKey::DangerZoneEnableDescription => Some("有効にすると、通常上限を超える値を手入力できます。"),
+        TextKey::DangerZoneBodyText => Some("危険領域では、検出資源の上限まで任意値を入力できます。既存値は自動変更しません。"),
+        TextKey::InputRangeLabel => Some("入力範囲"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_translations_cover_selected_keys() {
+        let keys = [
+            TextKey::Settings,
+            TextKey::LibraryTab,
+            TextKey::Open,
+            TextKey::Delete,
+            TextKey::NoPreviousBook,
+            TextKey::NoNextBook,
+            TextKey::FavoriteUpdateFailed,
+            TextKey::DeleteAndNextBook,
+            TextKey::DeleteFailed,
+        ];
+        for &key in &keys {
+            assert!(!tr(UiLanguage::English, key).is_empty());
+        }
+    }
+
+    #[test]
+    fn japanese_translations_and_english_fallback_work() {
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::Settings), "設定");
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::Language), "言語");
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::English), "英語");
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::Japanese), "日本語");
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::QualityBalanced), "標準");
+    }
+
+    #[test]
+    fn library_translations_and_history_dates_work() {
+        let date = NaiveDate::from_ymd_opt(2026, 6, 17).unwrap();
+        assert_eq!(tr(UiLanguage::English, TextKey::LibraryTab), "Library");
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::LibraryTab), "ライブラリ");
+        assert_eq!(tr(UiLanguage::English, TextKey::Open), "Open");
+        assert_eq!(tr(UiLanguage::Japanese, TextKey::Open), "開く");
+        assert_eq!(format_history_date(UiLanguage::English, date), "2026-06-17");
+        assert_eq!(
+            format_history_date(UiLanguage::Japanese, date),
+            "2026年06月17日"
+        );
+    }
+}

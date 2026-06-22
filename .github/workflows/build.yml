@@ -1,0 +1,199 @@
+name: build
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version label used for the package name"
+        required: false
+        default: dev
+        type: string
+
+permissions:
+  contents: write
+
+env:
+  VCPKG_ROOT: C:\vcpkg
+  PKG_CONFIG_PATH: /c/vcpkg/installed/x64-windows/lib/pkgconfig
+  PKG_CONFIG_ALLOW_SYSTEM_CFLAGS: 1
+
+jobs:
+  windows-check:
+    runs-on: windows-latest
+    # Observed:
+    # pre-cache baseline       : ~30 min
+    # cargo+target cache (warm): ~15 min
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo registry/git
+        id: cargo-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~\.cargo\registry
+            ~\.cargo\git
+          key: ${{ runner.os }}-cargo-registry-git-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-git-
+      - name: Cache target/release
+        id: target-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            target/release
+          key: ${{ runner.os }}-target-release-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'rust-toolchain') }}
+          restore-keys: |
+            ${{ runner.os }}-target-release-
+      - name: Report Cargo cache status
+        shell: pwsh
+        run: |
+          Write-Host "cargo cache key: ${{ runner.os }}-cargo-registry-git-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'rust-toolchain') }}"
+          Write-Host "cargo cache-hit: ${{ steps.cargo-cache.outputs.cache-hit }}"
+          Write-Host "cargo cache paths: ~\\.cargo\\registry, ~\\.cargo\\git"
+          Write-Host "target cache key: ${{ runner.os }}-target-release-${{ hashFiles('**/Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'rust-toolchain') }}"
+          Write-Host "target cache-hit: ${{ steps.target-cache.outputs.cache-hit }}"
+          Write-Host "target cache path: target/release"
+      - name: Setup MSVC Developer Command Prompt
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Verify MSVC tools
+        shell: pwsh
+        run: |
+          where.exe link
+          where.exe cl
+      - name: Install dav1d (vcpkg)
+        shell: pwsh
+        run: |
+          C:\vcpkg\vcpkg.exe install dav1d:x64-windows
+      - name: Patch dav1d.pc for pkg-config
+        shell: pwsh
+        run: |
+          $src = "C:\vcpkg\installed\x64-windows\lib\pkgconfig\dav1d.pc"
+          $dst = Join-Path $env:RUNNER_TEMP "dav1d.pc"
+          $dstUninstalled = Join-Path $env:RUNNER_TEMP "dav1d-uninstalled.pc"
+
+          if (-not (Test-Path $src)) {
+            Write-Error "dav1d.pc not found: $src"
+            exit 1
+          }
+
+          (Get-Content $src) `
+            -replace '^prefix=.*', 'prefix=C:/vcpkg/installed/x64-windows' `
+            -replace '^includedir=.*', 'includedir=${prefix}/include' `
+            -replace '^libdir=.*', 'libdir=${prefix}/lib' `
+            -replace '"-L\$\{libdir\}"', '-L${libdir}' `
+            -replace '"-I\$\{includedir\}"', '-I${includedir}' |
+            Set-Content $dst
+
+          Copy-Item $dst $dstUninstalled -Force
+
+          $pkgConfigPath = $env:RUNNER_TEMP.Replace('\','/')
+
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$pkgConfigPath"
+
+          Write-Host "PKG_CONFIG_PATH=$pkgConfigPath"
+      - name: Setup pkg-config from vcpkg msys2
+        shell: pwsh
+        run: |
+          $pkg = Get-ChildItem "C:\vcpkg\downloads\tools\msys2" `
+            -Recurse `
+            -Filter pkg-config.exe `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "\\mingw64\\bin\\pkg-config\.exe$" } |
+            Sort-Object FullName -Descending |
+            Select-Object -First 1
+          if (-not $pkg) {
+            Write-Error "vcpkg MSYS2 pkg-config.exe not found under C:\vcpkg\downloads\tools\msys2"
+            exit 1
+          }
+          Add-Content $env:GITHUB_ENV "PKG_CONFIG=$($pkg.FullName)"
+          Write-Host "PKG_CONFIG=$($pkg.FullName)"
+      - name: Verify pkg-config
+        shell: pwsh
+        run: |
+          Write-Host "PKG_CONFIG=$env:PKG_CONFIG"
+          Write-Host "PKG_CONFIG_PATH=$env:PKG_CONFIG_PATH"
+          where.exe pkg-config
+          & $env:PKG_CONFIG --version
+          & $env:PKG_CONFIG --libs --cflags dav1d
+      - name: Verify bundled runtime DLL sources
+        run: |
+          if (!(Test-Path third_party/unrar/x64/UnRAR64.dll)) {
+            Write-Error "third_party/unrar/x64/UnRAR64.dll is missing"
+            exit 1
+          }
+          if (!(Test-Path third_party/dav1d/dav1d.dll)) {
+            Write-Error "third_party/dav1d/dav1d.dll is missing"
+            exit 1
+          }
+      - name: cargo build --release
+        shell: pwsh
+        run: |
+          $start = Get-Date
+          Write-Host "cargo build --release reached: start"
+          cargo build --release
+          Write-Host "cargo build --release reached: success"
+          $elapsed = (Get-Date) - $start
+          Write-Host ("cargo build elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
+      - name: Verify runtime DLLs prepared (release)
+        run: |
+          if (!(Test-Path target/release/UnRAR64.dll)) {
+            Write-Error "target/release/UnRAR64.dll was not prepared by build.rs"
+            exit 1
+          }
+          if (!(Test-Path target/release/dav1d.dll)) {
+            Write-Error "target/release/dav1d.dll was not prepared by build.rs"
+            exit 1
+          }
+      - name: Resolve release package version
+        shell: pwsh
+        run: |
+          $version = "${{ github.event.inputs.version }}"
+          if ("${{ github.event_name }}" -eq "push") {
+            $version = "${{ github.ref_name }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            $version = "dev"
+          }
+
+          $packageName = "cbz-tools-viewer-$version-windows-x64"
+          Add-Content $env:GITHUB_ENV "CBZ_RELEASE_VERSION=$version"
+          Add-Content $env:GITHUB_ENV "CBZ_RELEASE_PACKAGE=$packageName"
+
+          Write-Host "CBZ_RELEASE_VERSION=$version"
+          Write-Host "CBZ_RELEASE_PACKAGE=$packageName"
+      - name: Package release zip
+        shell: pwsh
+        run: |
+          $start = Get-Date
+          Write-Host "package start"
+          & .\scripts\package_windows_release.ps1 `
+            -Version $env:CBZ_RELEASE_VERSION `
+            -Workspace $env:GITHUB_WORKSPACE `
+            -OutputDir "target/package"
+          $elapsed = (Get-Date) - $start
+          Write-Host "package end"
+          Write-Host ("package elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
+      - name: Upload workflow artifact
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.CBZ_RELEASE_PACKAGE }}
+          retention-days: 7
+          path: |
+            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
+            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip.sha256
+      - name: Upload release asset
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: |
+            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
+            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip.sha256
