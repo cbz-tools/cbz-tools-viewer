@@ -8,3 +8,5 @@
 - Added Library Card HUD Style and Library Card Selection Style settings.
 - Improved the Settings dialog layout so common tabs are easier to review.
 - Refined the Library card selection presentation.
+- Fixed ImageFile viewer navigation so pages opened from the Library follow the current Library order.
+- Added current image file names to the Viewer toolbar.
