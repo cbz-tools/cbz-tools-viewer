@@ -27,7 +27,7 @@ use lru::LruCache;
 use crate::{
     domain::app_settings::ViewerQuality,
     domain::page::ImageFormatHint,
-    infra::{archive::open_book_reader, image::decode as img},
+    infra::{archive::folder::FolderImageReader, archive::open_book_reader, image::decode as img},
 };
 
 /// frame_cache は worker 数に連動させず 2 件固定。
@@ -917,6 +917,9 @@ fn shutdown_started_queues(queues: &[Arc<SharedQueue>]) {
 fn open_book_reader_for_viewer_worker(
     path: &Path,
 ) -> anyhow::Result<Box<dyn crate::infra::archive::BookReader>> {
+    if path.is_dir() {
+        return Ok(Box::new(FolderImageReader::open_for_viewer(path)?));
+    }
     open_book_reader(path)
 }
 

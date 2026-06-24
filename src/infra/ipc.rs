@@ -62,11 +62,20 @@ pub struct ViewerBookState {
     pub start_page: Option<usize>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImageOrderSnapshot {
+    pub folder: PathBuf,
+    pub start_image: PathBuf,
+    pub ordered_images: Vec<PathBuf>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LibraryToViewer {
     ResponseViewerState {
         request_id: u64,
         book_state: ViewerBookState,
+        #[serde(default)]
+        image_order_snapshot: Option<ImageOrderSnapshot>,
     },
     FavoriteToggleResponse {
         request_id: u64,

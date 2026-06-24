@@ -13,7 +13,8 @@ use crate::domain::archive_settings::{book_settings_path, ReadingState, Settings
 use crate::infra::archive::folder::FolderImageReader;
 use crate::infra::favorite_store::FavoriteStore;
 use crate::infra::ipc::{
-    IpcErrorCode, IpcServer, LibraryToViewer, ViewerBookState, ViewerFavoriteState, ViewerToLibrary,
+    ImageOrderSnapshot, IpcErrorCode, IpcServer, LibraryToViewer, ViewerBookState,
+    ViewerFavoriteState, ViewerToLibrary,
 };
 use crate::util::archive_path::{is_supported_archive_path, is_supported_image_path};
 use crate::util::book_nav::{self, NavDirection};
@@ -77,12 +78,15 @@ impl App {
         path: &Path,
         with_pipe: bool,
         start_page: Option<u32>,
+        ipc_current_path: Option<PathBuf>,
+        image_order_snapshot: Option<ImageOrderSnapshot>,
+        snapshot_only_ipc: bool,
         root_ctx: &egui::Context,
     ) -> anyhow::Result<()> {
         let current_exe = std::env::current_exe()?;
         let mut cmd = Command::new(current_exe);
         cmd.arg(path);
-        let initial_path = path.to_path_buf();
+        let initial_path = ipc_current_path.unwrap_or_else(|| path.to_path_buf());
         if let Some(page) = start_page {
             cmd.arg("--viewer-start-page").arg(page.to_string());
         }
@@ -91,6 +95,9 @@ impl App {
             let server = IpcServer::with_generated_name()?;
             let pipe_name = server.pipe_name().to_owned();
             cmd.arg("--pipe").arg(&pipe_name);
+            if snapshot_only_ipc {
+                cmd.arg("--viewer-snapshot-only-ipc");
+            }
             if self.app_settings.viewer_open_mode == ViewerOpenMode::Fullscreen {
                 // Library から直接 fullscreen で起動する場合だけ、起動直後の矩形を渡す。
                 cmd.arg("--fullscreen");
@@ -141,6 +148,7 @@ impl App {
             let resume_from_last_reading_position =
                 self.app_settings.resume_from_last_reading_position;
             let repaint_ctx = root_ctx.clone();
+            let image_order_snapshot = image_order_snapshot.clone();
             std::thread::Builder::new()
                 .name("viewer-ipc-accept".to_owned())
                 .spawn(move || {
@@ -194,6 +202,7 @@ impl App {
                         let Some((response, sync_event)) = process_viewer_ipc_request(
                             msg,
                             &mut current_path,
+                            image_order_snapshot.as_ref(),
                             &library_book_order,
                             favorite_store.as_ref(),
                             resume_from_last_reading_position,
@@ -262,16 +271,32 @@ impl App {
     }
 
     pub(super) fn open_viewer(&mut self, idx: usize, ctx: &egui::Context) {
-        let Some(entry) = self.library.entries.get(idx) else {
+        let Some(entry) = self.library.entries.get(idx).cloned() else {
             return;
         };
         let Some((spawn_path, with_pipe, start_page, history_path)) =
-            self.viewer_launch_spec_for_entry(entry)
+            self.viewer_launch_spec_for_entry(&entry)
         else {
             return;
         };
         self.push_open_history(history_path);
-        if let Err(e) = self.spawn_viewer(spawn_path.as_path(), with_pipe, start_page, ctx) {
+        let image_order_snapshot = match &entry {
+            crate::domain::archive::LibraryEntry::ImageFile(meta) => {
+                self.image_order_snapshot_from_entries(meta.path.as_ref())
+            }
+            _ => None,
+        };
+        let snapshot_only_ipc =
+            matches!(&entry, crate::domain::archive::LibraryEntry::ImageFile(_));
+        if let Err(e) = self.spawn_viewer(
+            spawn_path.as_path(),
+            with_pipe,
+            start_page,
+            None,
+            image_order_snapshot,
+            snapshot_only_ipc,
+            ctx,
+        ) {
             tracing::error!(path = %spawn_path.display(), error = %e, "failed to spawn viewer subprocess");
             self.show_toast("Failed to open viewer");
         }
@@ -293,7 +318,15 @@ impl App {
             return Err(());
         };
         self.push_open_history(history_path);
-        if let Err(e) = self.spawn_viewer(spawn_path.as_path(), with_pipe, start_page, ctx) {
+        if let Err(e) = self.spawn_viewer(
+            spawn_path.as_path(),
+            with_pipe,
+            start_page,
+            None,
+            None,
+            false,
+            ctx,
+        ) {
             tracing::error!(path = %spawn_path.display(), error = %e, "failed to spawn viewer subprocess by path");
             self.show_toast("Failed to open viewer");
             return Err(());
@@ -325,7 +358,7 @@ impl App {
                 let start_page = reader.page_index_for_path(meta.path.as_ref())?;
                 Some((
                     meta.path.parent()?.to_path_buf(),
-                    false,
+                    true,
                     self.viewer_start_page_for_path(meta.path.as_ref(), Some(start_page as usize))
                         .map(|page| page as u32),
                     meta.path.as_ref().to_path_buf(),
@@ -401,11 +434,45 @@ impl App {
             resume_page => resume_page,
         }
     }
+
+    fn image_order_snapshot_from_entries(&self, start_image: &Path) -> Option<ImageOrderSnapshot> {
+        let folder = start_image.parent()?.to_path_buf();
+        let normalized_folder = normalize_path_for_selection(folder.as_path());
+        let ordered_images: Vec<PathBuf> = self
+            .library
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                crate::domain::archive::LibraryEntry::ImageFile(meta)
+                    if meta.path.parent().is_some_and(|parent| {
+                        normalize_path_for_selection(parent) == normalized_folder
+                    }) =>
+                {
+                    Some(meta.path.as_ref().to_path_buf())
+                }
+                _ => None,
+            })
+            .collect();
+        let normalized_start_image = normalize_path_for_selection(start_image);
+        if ordered_images.is_empty()
+            || !ordered_images
+                .iter()
+                .any(|path| normalize_path_for_selection(path) == normalized_start_image)
+        {
+            return None;
+        }
+        Some(ImageOrderSnapshot {
+            folder,
+            start_image: start_image.to_path_buf(),
+            ordered_images,
+        })
+    }
 }
 
 fn process_viewer_ipc_request(
     msg: ViewerToLibrary,
     current_path: &mut PathBuf,
+    image_order_snapshot: Option<&ImageOrderSnapshot>,
     library_book_order: &Arc<RwLock<LibraryNavSnapshot>>,
     favorite_store: &RwLock<FavoriteStore>,
     resume_from_last_reading_position: bool,
@@ -414,11 +481,14 @@ fn process_viewer_ipc_request(
     let (response, sync_event) = match msg {
         ViewerToLibrary::RequestViewerState {
             request_id,
-            current_path,
+            current_path: _,
         } => {
+            let state_path = image_order_snapshot
+                .map(|snapshot| snapshot.start_image.as_path())
+                .unwrap_or_else(|| current_path.as_path());
             let book_state = viewer_book_state_for_path(
                 favorite_store,
-                current_path.as_path(),
+                state_path,
                 resume_from_last_reading_position,
                 None,
             );
@@ -426,6 +496,7 @@ fn process_viewer_ipc_request(
                 LibraryToViewer::ResponseViewerState {
                     request_id,
                     book_state,
+                    image_order_snapshot: image_order_snapshot.cloned(),
                 },
                 None,
             )

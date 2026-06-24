@@ -12,12 +12,13 @@ use crate::domain::app_settings::{
     normalize_external_tool_executable, AppSettings, ReadingDirection, ViewerQuality,
 };
 use crate::domain::archive::{BookId, BookMeta};
+use crate::infra::archive::folder::FolderImageReader;
 use crate::domain::archive_settings::{SettingsStore, SpreadMode};
 use crate::domain::performance::{PerformanceResources, PerformanceSettingsResolved};
 use crate::infra::cache::disk::DiskCache;
 use crate::infra::ipc::{
-    AdjacentBooksKind, IpcClient, LibraryToViewer, ViewerBookState, ViewerFavoriteState,
-    ViewerToLibrary,
+    AdjacentBooksKind, ImageOrderSnapshot, IpcClient, LibraryToViewer, ViewerBookState,
+    ViewerFavoriteState, ViewerToLibrary,
 };
 use crate::infra::page_map::viewer_bootstrap::bootstrap_viewer_page_map;
 use crate::infra::worker::external_tool_worker::{
@@ -82,6 +83,7 @@ pub struct ViewerApp {
     saved_viewer_win_pos: Option<[f32; 2]>,
     saved_viewer_win_size: Option<[f32; 2]>,
     saved_viewer_window_maximized: Option<bool>,
+    image_order_snapshot_applied: bool,
 }
 
 enum ViewerMode {
@@ -94,6 +96,12 @@ enum ViewerMode {
         pending_action_request_id: Option<u64>,
         pending_viewer_state_request_id: Option<u64>,
         pending_favorite_toggle_request_id: Option<u64>,
+    },
+    SnapshotOnly {
+        request_tx: mpsc::Sender<ViewerToLibrary>,
+        event_rx: mpsc::Receiver<IpcEvent>,
+        last_request_id: u64,
+        pending_viewer_state_request_id: Option<u64>,
     },
     Detached,
 }
@@ -183,14 +191,20 @@ impl ViewerApp {
         book_state: &mut ViewerBookState,
         path: &Path,
     ) {
-        let ViewerMode::Library {
-            request_tx,
-            last_request_id,
-            pending_viewer_state_request_id,
-            ..
-        } = mode
-        else {
-            return;
+        let (request_tx, last_request_id, pending_viewer_state_request_id) = match mode {
+            ViewerMode::Library {
+                request_tx,
+                last_request_id,
+                pending_viewer_state_request_id,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                request_tx,
+                last_request_id,
+                pending_viewer_state_request_id,
+                ..
+            } => (request_tx, last_request_id, pending_viewer_state_request_id),
+            _ => return,
         };
 
         *last_request_id = last_request_id.saturating_add(1);
@@ -429,14 +443,27 @@ impl ViewerApp {
                             );
                             ViewerMode::Detached
                         } else {
-                            ViewerMode::Library {
+                            let common = (
                                 request_tx,
                                 event_rx,
-                                last_request_id: 0,
-                                pending_action: None,
-                                pending_action_request_id: None,
-                                pending_viewer_state_request_id: None,
-                                pending_favorite_toggle_request_id: None,
+                            );
+                            if launch.viewer_snapshot_only_ipc {
+                                ViewerMode::SnapshotOnly {
+                                    request_tx: common.0,
+                                    event_rx: common.1,
+                                    last_request_id: 0,
+                                    pending_viewer_state_request_id: None,
+                                }
+                            } else {
+                                ViewerMode::Library {
+                                    request_tx: common.0,
+                                    event_rx: common.1,
+                                    last_request_id: 0,
+                                    pending_action: None,
+                                    pending_action_request_id: None,
+                                    pending_viewer_state_request_id: None,
+                                    pending_favorite_toggle_request_id: None,
+                                }
                             }
                         }
                     }
@@ -456,7 +483,8 @@ impl ViewerApp {
         let effective_quality = file_settings
             .quality_override
             .unwrap_or(app_settings.viewer_quality);
-        let page_map_mode = bootstrap_viewer_page_map(&entry, launch.map_make_skip);
+        let page_map_mode =
+            Self::viewer_page_map_mode_for_launch(&entry, launch.map_make_skip, &mode);
         let full_equivalent_size_hint = cc
             .egui_ctx
             .input(|i| i.viewport().monitor_size)
@@ -553,6 +581,7 @@ impl ViewerApp {
             saved_viewer_win_pos,
             saved_viewer_win_size,
             saved_viewer_window_maximized,
+            image_order_snapshot_applied: false,
         })
     }
 
@@ -561,6 +590,7 @@ impl ViewerApp {
         ctx: &egui::Context,
         path: &Path,
         book_state: ViewerBookState,
+        force_page_map_unavailable: bool,
     ) -> anyhow::Result<()> {
         let started_at = Instant::now();
         self.send_reading_session_finished(false);
@@ -574,7 +604,11 @@ impl ViewerApp {
         let effective_quality = file_settings
             .quality_override
             .unwrap_or(self.app_settings.viewer_quality);
-        let page_map_mode = bootstrap_viewer_page_map(&entry, self.map_make_skip);
+        let page_map_mode = if force_page_map_unavailable {
+            crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode::Unavailable
+        } else {
+            Self::viewer_page_map_mode_for_launch(&entry, self.map_make_skip, &self.mode)
+        };
         let full_equivalent_size_hint = ctx
             .input(|i| i.viewport().monitor_size)
             .filter(|s| s.x > 1.0 && s.y > 1.0)
@@ -733,13 +767,16 @@ impl ViewerApp {
     fn poll_library_ipc(&mut self, ctx: &egui::Context) {
         let mut events = Vec::new();
         {
-            let ViewerMode::Library { event_rx, .. } = &mut self.mode else {
-                return;
-            };
-            while let Ok(event) = event_rx.try_recv() {
-                events.push(event);
+            match &mut self.mode {
+                ViewerMode::Library { event_rx, .. } | ViewerMode::SnapshotOnly { event_rx, .. } => {
+                    while let Ok(event) = event_rx.try_recv() {
+                        events.push(event);
+                    }
+                }
+                _ => return,
             }
         }
+        let snapshot_only_mode = matches!(self.mode, ViewerMode::SnapshotOnly { .. });
         for event in events {
             match event {
                 IpcEvent::Disconnected => {
@@ -758,13 +795,22 @@ impl ViewerApp {
                     LibraryToViewer::ResponseViewerState {
                         request_id,
                         book_state,
+                        image_order_snapshot,
                     } => {
                         if self.is_current_viewer_state_request(request_id) {
+                            let book_state = self.apply_image_order_snapshot_if_needed(
+                                ctx,
+                                book_state,
+                                image_order_snapshot,
+                            );
                             self.state
                                 .apply_start_page_before_initial_load(book_state.start_page);
                             self.book_state = book_state;
                             self.favorite_state = book_state.favorite_state;
                             self.clear_pending_viewer_state_request();
+                            if snapshot_only_mode {
+                                self.mode = ViewerMode::Detached;
+                            }
                         }
                     }
                     LibraryToViewer::Deleted {
@@ -786,7 +832,12 @@ impl ViewerApp {
                                         (next_path, next_book_state)
                                     {
                                         if let Err(e) =
-                                            self.reopen_to_path(ctx, path.as_path(), book_state)
+                                            self.reopen_to_path(
+                                                ctx,
+                                                path.as_path(),
+                                                book_state,
+                                                false,
+                                            )
                                         {
                                             tracing::warn!(error = %e, "ipc delete-next apply failed");
                                         }
@@ -813,7 +864,9 @@ impl ViewerApp {
                                 self.delete_dialog_online = DeleteDialogOnlineState::Online;
                             }
                             self.state.close_boundary_preview();
-                            if let Err(e) = self.reopen_to_path(ctx, path.as_path(), book_state) {
+                            if let Err(e) =
+                                self.reopen_to_path(ctx, path.as_path(), book_state, false)
+                            {
                                 tracing::warn!(error = %e, "ipc navigate apply failed");
                             }
                             self.clear_pending_library_action();
@@ -970,6 +1023,10 @@ impl ViewerApp {
             ViewerMode::Library {
                 pending_viewer_state_request_id,
                 ..
+            }
+            | ViewerMode::SnapshotOnly {
+                pending_viewer_state_request_id,
+                ..
             } => pending_viewer_state_request_id == &Some(request_id),
             _ => false,
         }
@@ -998,12 +1055,18 @@ impl ViewerApp {
     }
 
     fn clear_pending_viewer_state_request(&mut self) {
-        if let ViewerMode::Library {
-            pending_viewer_state_request_id,
-            ..
-        } = &mut self.mode
-        {
-            *pending_viewer_state_request_id = None;
+        match &mut self.mode {
+            ViewerMode::Library {
+                pending_viewer_state_request_id,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                pending_viewer_state_request_id,
+                ..
+            } => {
+                *pending_viewer_state_request_id = None;
+            }
+            _ => {}
         }
     }
 
@@ -1067,6 +1130,58 @@ impl ViewerApp {
         };
         self.handle_ipc_navigation(request, action, request_id)
             .is_ok()
+    }
+
+    fn apply_image_order_snapshot_if_needed(
+        &mut self,
+        ctx: &egui::Context,
+        mut book_state: ViewerBookState,
+        image_order_snapshot: Option<ImageOrderSnapshot>,
+    ) -> ViewerBookState {
+        let original_book_state = book_state;
+        if self.image_order_snapshot_applied {
+            return book_state;
+        }
+        let Some(snapshot) = image_order_snapshot else {
+            return book_state;
+        };
+        let Some(start_page) = validate_image_order_snapshot(&snapshot) else {
+            return book_state;
+        };
+        if FolderImageReader::install_viewer_order_override(
+            snapshot.folder.as_path(),
+            snapshot.ordered_images.clone(),
+        )
+        .is_err()
+        {
+            return book_state;
+        }
+        book_state.start_page = Some(start_page);
+        self.image_order_snapshot_applied = true;
+        if let Err(error) =
+            self.reopen_to_path(ctx, snapshot.folder.as_path(), book_state, true)
+        {
+            tracing::warn!(
+                error = %error,
+                path = %snapshot.folder.display(),
+                "viewer image order snapshot reopen failed"
+            );
+            FolderImageReader::clear_viewer_order_override(snapshot.folder.as_path());
+            self.image_order_snapshot_applied = false;
+            return original_book_state;
+        }
+        book_state
+    }
+
+    fn viewer_page_map_mode_for_launch(
+        entry: &BookMeta,
+        map_make_skip: bool,
+        mode: &ViewerMode,
+    ) -> crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode {
+        if matches!(mode, ViewerMode::SnapshotOnly { .. }) {
+            return crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode::Unavailable;
+        }
+        bootstrap_viewer_page_map(entry, map_make_skip)
     }
 
     fn toggle_fullscreen(&mut self, ctx: &egui::Context) {
@@ -1688,6 +1803,43 @@ impl ViewerApp {
     fn apply_startup_restore_rect_adjustment_windows(&self, _frame: &eframe::Frame) -> bool {
         false
     }
+}
+
+fn validate_image_order_snapshot(snapshot: &ImageOrderSnapshot) -> Option<usize> {
+    if snapshot.ordered_images.is_empty() || !snapshot.folder.is_dir() || !snapshot.start_image.is_file()
+    {
+        return None;
+    }
+    let normalized_folder = crate::util::path_eq::normalize_path_for_override(&snapshot.folder);
+    if crate::util::path_eq::normalize_path_for_override(snapshot.start_image.parent()?)
+        != normalized_folder
+    {
+        return None;
+    }
+    let normalized_start_image =
+        crate::util::path_eq::normalize_path_for_override(&snapshot.start_image);
+    let start_page = snapshot
+        .ordered_images
+        .iter()
+        .position(|path| {
+            crate::util::path_eq::normalize_path_for_override(path) == normalized_start_image
+        })?;
+    let mut seen = std::collections::HashSet::with_capacity(snapshot.ordered_images.len());
+    for path in &snapshot.ordered_images {
+        if !path.is_file() {
+            return None;
+        }
+        if crate::util::path_eq::normalize_path_for_override(path.parent()?) != normalized_folder {
+            return None;
+        }
+        if !crate::util::archive_path::is_supported_image_path(path) {
+            return None;
+        }
+        if !seen.insert(crate::util::path_eq::normalize_path_for_override(path)) {
+            return None;
+        }
+    }
+    Some(start_page)
 }
 
 impl eframe::App for ViewerApp {

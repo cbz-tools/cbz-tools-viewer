@@ -25,6 +25,7 @@ pub struct LaunchOptions {
     pub initial_library_dir: Option<std::path::PathBuf>,
     pub startup_select_path: Option<std::path::PathBuf>,
     pub pipe_name: Option<String>,
+    pub viewer_snapshot_only_ipc: bool,
     pub viewer_start_page: Option<u32>,
     pub map_make_skip: bool,
     pub viewer_offline: bool,
@@ -63,6 +64,7 @@ struct LaunchCliState {
     pipe_name: Option<String>,
     positional_raw: Option<String>,
     start_fullscreen: bool,
+    viewer_snapshot_only_ipc: bool,
     viewer_start_page: Option<u32>,
     map_make_skip: bool,
     viewer_offline: bool,
@@ -74,6 +76,7 @@ struct LaunchCliState {
 impl LaunchCliState {
     fn has_viewer_flags(&self) -> bool {
         self.start_fullscreen
+            || self.viewer_snapshot_only_ipc
             || self.viewer_start_page.is_some()
             || self.map_make_skip
             || self.viewer_offline
@@ -95,6 +98,7 @@ struct ViewerLaunchRequest {
     initial_library_dir: Option<std::path::PathBuf>,
     startup_select_path: std::path::PathBuf,
     pipe_name: Option<String>,
+    viewer_snapshot_only_ipc: bool,
     viewer_start_page: Option<u32>,
     viewer_offline: bool,
     allow_fullscreen_target: bool,
@@ -272,6 +276,10 @@ fn parse_viewer_flag_args(
             state.start_fullscreen = true;
             Ok(true)
         }
+        "--viewer-snapshot-only-ipc" => {
+            state.viewer_snapshot_only_ipc = true;
+            Ok(true)
+        }
         "--viewer-offline" => {
             state.viewer_offline = true;
             Ok(true)
@@ -347,6 +355,7 @@ fn build_library_launch(initial_library_dir: Option<std::path::PathBuf>) -> Laun
         initial_library_dir,
         startup_select_path: None,
         pipe_name: None,
+        viewer_snapshot_only_ipc: false,
         viewer_start_page: None,
         map_make_skip: false,
         viewer_offline: false,
@@ -363,6 +372,7 @@ fn build_viewer_launch(state: &LaunchCliState, request: ViewerLaunchRequest) -> 
         initial_library_dir: request.initial_library_dir,
         startup_select_path: Some(request.startup_select_path),
         pipe_name: request.pipe_name,
+        viewer_snapshot_only_ipc: request.viewer_snapshot_only_ipc,
         viewer_start_page: request.viewer_start_page,
         map_make_skip: state.map_make_skip,
         viewer_offline: request.viewer_offline,
@@ -391,6 +401,7 @@ fn build_directory_launch(
                 initial_library_dir: path.parent().map(std::path::Path::to_path_buf),
                 startup_select_path: path,
                 pipe_name: Some(pipe),
+                viewer_snapshot_only_ipc: state.viewer_snapshot_only_ipc,
                 viewer_start_page: state.viewer_start_page,
                 viewer_offline: false,
                 allow_fullscreen_target: true,
@@ -403,6 +414,7 @@ fn build_directory_launch(
                 initial_library_dir: path.parent().map(std::path::Path::to_path_buf),
                 startup_select_path: path,
                 pipe_name: None,
+                viewer_snapshot_only_ipc: false,
                 viewer_start_page: state.viewer_start_page,
                 viewer_offline: true,
                 allow_fullscreen_target: true,
@@ -426,6 +438,7 @@ fn build_archive_launch(state: &LaunchCliState, path: std::path::PathBuf) -> Lau
                 initial_library_dir: path.parent().map(std::path::Path::to_path_buf),
                 startup_select_path: path,
                 pipe_name: Some(pipe),
+                viewer_snapshot_only_ipc: state.viewer_snapshot_only_ipc,
                 viewer_start_page: None,
                 viewer_offline: false,
                 allow_fullscreen_target: true,
@@ -438,6 +451,7 @@ fn build_archive_launch(state: &LaunchCliState, path: std::path::PathBuf) -> Lau
                 initial_library_dir: path.parent().map(std::path::Path::to_path_buf),
                 startup_select_path: path,
                 pipe_name: None,
+                viewer_snapshot_only_ipc: false,
                 viewer_start_page: None,
                 viewer_offline: false,
                 allow_fullscreen_target: false,
@@ -468,6 +482,7 @@ fn build_image_launch(
             initial_library_dir: Some(parent.clone()),
             startup_select_path: parent,
             pipe_name: None,
+            viewer_snapshot_only_ipc: false,
             viewer_start_page: Some(start_page),
             viewer_offline: true,
             allow_fullscreen_target: false,
@@ -672,6 +687,7 @@ fn main() -> anyhow::Result<()> {
         initial_library_dir = ?launch.initial_library_dir,
         startup_select_path = ?launch.startup_select_path,
         has_pipe = launch.pipe_name.is_some(),
+        viewer_snapshot_only_ipc = launch.viewer_snapshot_only_ipc,
         viewer_start_page = ?launch.viewer_start_page,
         viewer_offline = launch.viewer_offline,
         start_fullscreen = launch.start_fullscreen,

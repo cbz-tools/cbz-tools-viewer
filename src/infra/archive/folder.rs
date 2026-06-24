@@ -1,14 +1,25 @@
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    sync::{OnceLock, RwLock},
 };
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
 use crate::util::{archive_path::is_supported_image_path, natural_sort};
+use crate::util::path_eq::normalize_path_for_override;
 
 use super::BookReader;
+
+#[derive(Clone, Debug)]
+struct FolderOrderOverride {
+    ordered_images: Vec<PathBuf>,
+}
+
+static VIEWER_FOLDER_ORDER_OVERRIDES: OnceLock<RwLock<std::collections::HashMap<String, FolderOrderOverride>>> =
+    OnceLock::new();
 
 pub struct FolderImageReader {
     image_paths: Vec<PathBuf>,
@@ -46,6 +57,45 @@ impl FolderImageReader {
         Ok(Self { image_paths })
     }
 
+    pub fn open_with_order(folder: &Path, ordered_images: Vec<PathBuf>) -> Result<Self> {
+        validate_ordered_images(folder, &ordered_images)?;
+        tracing::debug!(
+            path = %folder.display(),
+            image_count = ordered_images.len(),
+            "folder_reader: open complete with snapshot order"
+        );
+        Ok(Self {
+            image_paths: ordered_images,
+        })
+    }
+
+    pub fn open_for_viewer(path: &Path) -> Result<Self> {
+        let normalized = normalize_path_for_override(path);
+        let override_map = VIEWER_FOLDER_ORDER_OVERRIDES.get_or_init(Default::default);
+        if let Some(override_entry) = override_map.read().unwrap().get(&normalized).cloned() {
+            return Self::open_with_order(path, override_entry.ordered_images);
+        }
+        Self::open(path)
+    }
+
+    pub fn install_viewer_order_override(folder: &Path, ordered_images: Vec<PathBuf>) -> Result<()> {
+        validate_ordered_images(folder, &ordered_images)?;
+        let normalized = normalize_path_for_override(folder);
+        let override_map = VIEWER_FOLDER_ORDER_OVERRIDES.get_or_init(Default::default);
+        override_map.write().unwrap().insert(
+            normalized,
+            FolderOrderOverride { ordered_images },
+        );
+        Ok(())
+    }
+
+    pub fn clear_viewer_order_override(folder: &Path) {
+        let normalized = normalize_path_for_override(folder);
+        if let Some(override_map) = VIEWER_FOLDER_ORDER_OVERRIDES.get() {
+            override_map.write().unwrap().remove(&normalized);
+        }
+    }
+
     fn read_path(&self, idx: usize) -> Result<Bytes> {
         let path = self
             .image_paths
@@ -75,6 +125,37 @@ impl FolderImageReader {
                 path,
             })
     }
+}
+
+fn validate_ordered_images(folder: &Path, ordered_images: &[PathBuf]) -> Result<()> {
+    if ordered_images.is_empty() {
+        anyhow::bail!("ordered_images is empty");
+    }
+    let normalized_folder = normalize_path_for_override(folder);
+    let mut seen = HashSet::with_capacity(ordered_images.len());
+    for path in ordered_images {
+        if !path.is_file() {
+            anyhow::bail!("ordered image is not a file: {}", path.display());
+        }
+        if !is_supported_image_path(path) {
+            anyhow::bail!("ordered image is not a supported image: {}", path.display());
+        }
+        let Some(parent) = path.parent() else {
+            anyhow::bail!("ordered image has no parent: {}", path.display());
+        };
+        if normalize_path_for_override(parent) != normalized_folder {
+            anyhow::bail!(
+                "ordered image is outside folder: {} not in {}",
+                path.display(),
+                folder.display()
+            );
+        }
+        let normalized = normalize_path_for_override(path);
+        if !seen.insert(normalized) {
+            anyhow::bail!("ordered image is duplicated: {}", path.display());
+        }
+    }
+    Ok(())
 }
 
 impl BookReader for FolderImageReader {
