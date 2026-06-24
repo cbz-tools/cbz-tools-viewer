@@ -10,6 +10,7 @@ use crate::domain::app_settings::{ReadingDirection, ViewerQuality};
 use crate::domain::archive::{BookId, BookMeta};
 use crate::domain::archive_settings::{clamp_slideshow_interval_secs, SpreadMode};
 use crate::domain::performance::{mib_to_bytes, split_mib_evenly, PerformanceSettingsResolved};
+use crate::infra::archive::viewer_page_display_labels;
 use crate::infra::image::decode as img;
 use crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode;
 use crate::infra::worker::viewer_loader::{
@@ -768,6 +769,7 @@ impl RgbaPageCache {
 /// ビュー再生成後も持ち越す読み取り状態。
 pub(super) struct ViewerPersistentState {
     pub entry: BookMeta,
+    pub(super) page_display_labels: Vec<String>,
     pub(super) page_map_mode: ViewerPageMapMode,
     pub(super) auto_spread_plan: Option<Arc<AutoSpreadPlan>>,
     pub page_count: u32,
@@ -1138,6 +1140,24 @@ impl ViewerState {
         &self.persistent.entry
     }
 
+    pub(super) fn current_toolbar_title(&self) -> Option<String> {
+        let current_page = self.persistent.displayed_page;
+        let (page_left, page_right) = self.current_view_pages(current_page);
+        if page_left.is_none() && page_right.is_none() {
+            return None;
+        }
+        if !self.persistent.spread_mode {
+            return self.page_display_label(page_left.or(page_right));
+        }
+        let (screen_left, screen_right) = match self.effective_reading_direction() {
+            ReadingDirection::RightToLeft => (page_right, page_left),
+            ReadingDirection::LeftToRight => (page_left, page_right),
+        };
+        let left_label = self.toolbar_spread_slot_label(screen_left, true, current_page)?;
+        let right_label = self.toolbar_spread_slot_label(screen_right, false, current_page)?;
+        Some(format!("{left_label} / {right_label}"))
+    }
+
     pub(crate) fn take_reading_session_snapshot(&mut self) -> Option<ReadingSessionSnapshot> {
         self.reading_session.begin_notification()
     }
@@ -1269,11 +1289,13 @@ impl ViewerState {
         });
         let worker_manager = ViewerWorkerManagerHandle::spawn(Arc::clone(&loader), repaint_ctx);
         let entry_id_for_snapshot = entry.id.clone();
+        let page_display_labels = viewer_page_display_labels(entry.path.as_ref()).unwrap_or_default();
         let spread_setting_for_snapshot = spread_setting.clone();
 
         Ok(Self {
             persistent: ViewerPersistentState {
                 entry,
+                page_display_labels,
                 page_map_mode,
                 auto_spread_plan,
                 page_count: 0,
@@ -5734,6 +5756,26 @@ impl ViewerState {
             self.request.prefetch_dir = -1;
             self.request_view(last, display_w, display_h, max_tex_side, ctx, reason);
         }
+    }
+
+    fn page_display_label(&self, page: Option<u32>) -> Option<String> {
+        let page = page?;
+        self.persistent.page_display_labels.get(page as usize).cloned()
+    }
+
+    fn toolbar_spread_slot_label(
+        &self,
+        page: Option<u32>,
+        is_left_slot: bool,
+        current_page: u32,
+    ) -> Option<String> {
+        if let Some(label) = self.page_display_label(page) {
+            return Some(label);
+        }
+        if self.persistent.cover_blank && current_page == 0 && is_left_slot {
+            return Some("ブランク".to_owned());
+        }
+        None
     }
 }
 

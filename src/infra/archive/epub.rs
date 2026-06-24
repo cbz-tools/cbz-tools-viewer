@@ -90,6 +90,20 @@ impl EpubImageReader {
     pub(crate) fn book(&self) -> &EpubImageBook {
         &self.book
     }
+
+    pub(crate) fn page_display_labels(&self) -> Vec<String> {
+        self.book
+            .pages()
+            .iter()
+            .map(|page| {
+                page.image_path
+                    .rsplit(['/', '\\'])
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(page.image_path.as_str())
+                    .to_owned()
+            })
+            .collect()
+    }
 }
 
 impl BookReader for EpubImageReader {

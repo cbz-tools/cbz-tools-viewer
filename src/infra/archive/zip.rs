@@ -251,6 +251,12 @@ impl ZipReader {
         self.image_entries.len() as u32
     }
 
+    pub(crate) fn page_display_labels(&self) -> Vec<String> {
+        self.page_map_image_entry_infos()
+            .map(|info| display_name_from_archive_entry(info.name))
+            .collect()
+    }
+
     pub(crate) fn page_map_image_entry_infos(
         &self,
     ) -> impl Iterator<Item = ZipImageEntryInfo<'_>> + '_ {
@@ -299,6 +305,13 @@ impl ZipReader {
             .ok_or(ZipPageMapSlowFailureReason::EntryReadError)?;
         self.core.read_entry_by_index_for_page_map(entry_idx)
     }
+}
+
+fn display_name_from_archive_entry(name: &str) -> String {
+    name.rsplit(['/', '\\'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(name)
+        .to_owned()
 }
 
 fn read_page_map_metadata_stored(entry: &ZipEntry, raw: &[u8]) -> Result<ZipPageMapReadOutcome> {

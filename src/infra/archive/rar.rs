@@ -31,6 +31,26 @@ impl RarReader {
             anyhow::bail!("RAR サポートは無効です（--features rar でビルドしてください）")
         }
     }
+
+    pub(crate) fn page_display_labels(&self) -> Vec<String> {
+        #[cfg(feature = "rar")]
+        {
+            self.image_names
+                .iter()
+                .map(|name| {
+                    name.rsplit(['/', '\\'])
+                        .find(|part| !part.is_empty())
+                        .unwrap_or(name.as_str())
+                        .to_owned()
+                })
+                .collect()
+        }
+
+        #[cfg(not(feature = "rar"))]
+        {
+            Vec::new()
+        }
+    }
 }
 
 // ── rar feature 有効時の実装 ──────────────────────────────────────────────────

@@ -278,11 +278,7 @@ pub(super) fn render_viewer_toolbar(
                 .on_hover_text(tr(language, TextKey::ReadingDirectionTooltip));
         });
 
-        let blank_label = if state.persistent.cover_blank {
-            format!("{} ✓", tr(language, TextKey::CoverBlank))
-        } else {
-            tr(language, TextKey::CoverBlank).to_owned()
-        };
+        let blank_label = tr(language, TextKey::CoverBlank).to_owned();
         let blank_enabled = matches!(
             state.persistent.spread_setting,
             SpreadMode::Auto | SpreadMode::Spread
@@ -496,20 +492,30 @@ pub(super) fn render_viewer_toolbar(
         }
 
         ui.separator();
-        let viewer_title = state
+        let book_file_name = state
             .persistent
             .entry
             .path
             .file_name()
             .and_then(|s| s.to_str())
             .filter(|s| !s.is_empty())
-            .unwrap_or(&state.persistent.entry.title);
-        ui.label(
-            egui::RichText::new(viewer_title)
+            .map(str::to_owned)
+            .unwrap_or_else(|| state.persistent.entry.title.to_string());
+        let title_text = |text: &str| {
+            egui::RichText::new(text)
                 .size(theme::FONT_SIZE_BODY)
                 .color(theme::TEXT_MAIN)
-                .strong(),
-        );
+                .strong()
+        };
+        if let Some(current_image_title) = state.current_toolbar_title() {
+            ui.label(title_text(&book_file_name));
+            ui.add_space(28.0);
+            ui.label(title_text("|"));
+            ui.add_space(28.0);
+            ui.label(title_text(&current_image_title));
+        } else {
+            ui.label(title_text(&book_file_name));
+        }
 
         ui.add_space(ui.available_width().max(0.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

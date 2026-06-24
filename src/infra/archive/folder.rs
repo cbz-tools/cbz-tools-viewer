@@ -112,6 +112,19 @@ impl FolderImageReader {
             .map(|idx| idx as u32)
     }
 
+    pub(crate) fn page_display_labels(&self) -> Vec<String> {
+        self.image_paths
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| path.display().to_string())
+            })
+            .collect()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     /// Page Map / thumbnail 生成が使う画像エントリ順を返す。
     pub(crate) fn page_map_image_entry_infos(

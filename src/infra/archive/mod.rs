@@ -53,3 +53,14 @@ pub fn book_source_kind(path: &Path) -> BookSourceKind {
         _ => BookSourceKind::Unsupported,
     }
 }
+
+pub fn viewer_page_display_labels(path: &Path) -> Result<Vec<String>> {
+    match book_source_kind(path) {
+        BookSourceKind::Folder => Ok(folder::FolderImageReader::open_for_viewer(path)?.page_display_labels()),
+        BookSourceKind::Zip | BookSourceKind::Unsupported => {
+            Ok(zip::ZipReader::open(path)?.page_display_labels())
+        }
+        BookSourceKind::Rar => Ok(rar::RarReader::open(path)?.page_display_labels()),
+        BookSourceKind::Epub => Ok(epub::EpubImageReader::open(path)?.page_display_labels()),
+    }
+}
