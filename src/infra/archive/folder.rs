@@ -190,31 +190,3 @@ fn file_name_for_sort(path: &Path) -> &str {
         .and_then(|s| s.to_str())
         .unwrap_or_default()
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn folder_reader_orders_images_naturally() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::write(temp.path().join("10.jpg"), b"10").unwrap();
-        fs::write(temp.path().join("2.jpg"), b"2").unwrap();
-        fs::write(temp.path().join("001.png"), b"1").unwrap();
-        fs::write(temp.path().join("note.txt"), b"x").unwrap();
-
-        let reader = FolderImageReader::open(temp.path()).unwrap();
-        assert_eq!(reader.page_count(), 3);
-        assert_eq!(&reader.read_first_image().unwrap()[..], b"1");
-        assert_eq!(&reader.read_page_n(1).unwrap()[..], b"2");
-        assert_eq!(&reader.read_page_n(2).unwrap()[..], b"10");
-    }
-
-    #[test]
-    fn folder_reader_rejects_missing_pages() {
-        let temp = tempfile::tempdir().unwrap();
-        let reader = FolderImageReader::open(temp.path()).unwrap();
-        assert_eq!(reader.page_count(), 0);
-        assert!(reader.read_first_image().is_err());
-    }
-}

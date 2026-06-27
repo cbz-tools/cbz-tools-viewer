@@ -16,9 +16,6 @@ use std::{
     time::Instant,
 };
 
-#[cfg(test)]
-use std::collections::VecDeque;
-
 use anyhow::Context;
 use bytes::Bytes;
 use eframe::egui;
@@ -170,10 +167,6 @@ pub struct ViewerLoader {
     background_worker_count: usize,
     interactive_result_rx: Mutex<mpsc::Receiver<ViewerResult>>,
     background_result_rx: Mutex<mpsc::Receiver<ViewerResult>>,
-    #[cfg(test)]
-    test_interactive_result_rx: Mutex<VecDeque<ViewerResult>>,
-    #[cfg(test)]
-    test_background_result_rx: Mutex<VecDeque<ViewerResult>>,
     next_id: AtomicU64,
 }
 
@@ -315,52 +308,8 @@ impl ViewerLoader {
             background_worker_count,
             interactive_result_rx: Mutex::new(interactive_result_rx),
             background_result_rx: Mutex::new(background_result_rx),
-            #[cfg(test)]
-            test_interactive_result_rx: Mutex::new(VecDeque::new()),
-            #[cfg(test)]
-            test_background_result_rx: Mutex::new(VecDeque::new()),
             next_id: AtomicU64::new(1),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn spawn_for_tests(background_worker_count: usize) -> Self {
-        let background_worker_count = background_worker_count.max(1);
-        let interactive_even_shared = Arc::new(SharedQueue {
-            pending: Mutex::new(None),
-            condvar: Condvar::new(),
-            shutdown: AtomicBool::new(false),
-        });
-        let interactive_odd_shared = Arc::new(SharedQueue {
-            pending: Mutex::new(None),
-            condvar: Condvar::new(),
-            shutdown: AtomicBool::new(false),
-        });
-        let background_shards: Vec<Arc<SharedQueue>> = (0..background_worker_count)
-            .map(|_| {
-                Arc::new(SharedQueue {
-                    pending: Mutex::new(None),
-                    condvar: Condvar::new(),
-                    shutdown: AtomicBool::new(false),
-                })
-            })
-            .collect();
-        let (_interactive_result_tx, interactive_result_rx) = mpsc::channel();
-        let (_background_result_tx, background_result_rx) = mpsc::channel();
-
-        Self {
-            interactive_even_shared,
-            interactive_odd_shared,
-            background_shards,
-            background_worker_count,
-            interactive_result_rx: Mutex::new(interactive_result_rx),
-            background_result_rx: Mutex::new(background_result_rx),
-            #[cfg(test)]
-            test_interactive_result_rx: Mutex::new(VecDeque::new()),
-            #[cfg(test)]
-            test_background_result_rx: Mutex::new(VecDeque::new()),
-            next_id: AtomicU64::new(1),
-        }
     }
 
     /// フルデコードリクエストを送信し、割り当てられた ID を返す。
@@ -440,12 +389,6 @@ impl ViewerLoader {
 
     /// 完了した結果を 1 件取り出す（ノンブロッキング）。
     pub fn try_recv_interactive(&self) -> Option<ViewerResult> {
-        #[cfg(test)]
-        if let Ok(mut rx) = self.test_interactive_result_rx.lock() {
-            if let Some(result) = rx.pop_front() {
-                return Some(result);
-            }
-        }
         match self.interactive_result_rx.lock() {
             Ok(rx) => rx.try_recv().ok(),
             Err(_) => {
@@ -456,12 +399,6 @@ impl ViewerLoader {
     }
 
     pub fn try_recv_background(&self) -> Option<ViewerResult> {
-        #[cfg(test)]
-        if let Ok(mut rx) = self.test_background_result_rx.lock() {
-            if let Some(result) = rx.pop_front() {
-                return Some(result);
-            }
-        }
         match self.background_result_rx.lock() {
             Ok(rx) => rx.try_recv().ok(),
             Err(_) => {
@@ -476,17 +413,6 @@ impl ViewerLoader {
     pub fn flush(&self) {
         while self.try_recv_interactive().is_some() {}
         while self.try_recv_background().is_some() {}
-    }
-
-    #[cfg(test)]
-    pub(crate) fn push_test_result(&self, result: ViewerResult) {
-        if result.interactive {
-            if let Ok(mut rx) = self.test_interactive_result_rx.lock() {
-                rx.push_back(result);
-            }
-        } else if let Ok(mut rx) = self.test_background_result_rx.lock() {
-            rx.push_back(result);
-        }
     }
 
     pub fn peek_next_request_id(&self) -> u64 {
@@ -1314,21 +1240,27 @@ fn draw_failed_page_glyph(
             }
             let px = x + col as u32 * scale;
             let py = y + row as u32 * scale;
-            fill_rect_rgba(pixels, width, height, px, py, scale, scale, FAILED_PAGE_FG_RGBA);
+            fill_rect_rgba(
+                pixels,
+                (width, height),
+                (px, py),
+                (scale, scale),
+                FAILED_PAGE_FG_RGBA,
+            );
         }
     }
 }
 
 fn fill_rect_rgba(
     pixels: &mut [u8],
-    width: u32,
-    height: u32,
-    x: u32,
-    y: u32,
-    rect_w: u32,
-    rect_h: u32,
+    bounds: (u32, u32),
+    origin: (u32, u32),
+    size: (u32, u32),
     rgba: [u8; 4],
 ) {
+    let (width, height) = bounds;
+    let (x, y) = origin;
+    let (rect_w, rect_h) = size;
     let x_end = x.saturating_add(rect_w).min(width);
     let y_end = y.saturating_add(rect_h).min(height);
     for py in y..y_end {

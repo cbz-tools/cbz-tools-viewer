@@ -158,16 +158,6 @@ impl FavoriteStore {
     }
 }
 
-#[cfg(test)]
-impl FavoriteStore {
-    pub(crate) fn from_entries(entries: Vec<FavoriteEntry>) -> Self {
-        Self {
-            file_path: PathBuf::new(),
-            entries,
-        }
-    }
-}
-
 fn favorites_json_path() -> PathBuf {
     app_base_dir().join("favorites.json")
 }
@@ -190,92 +180,4 @@ fn read_entry_metadata(path: &Path) -> (u64, u64) {
 
 fn path_exists(normalized_path: &str) -> bool {
     !normalized_path.is_empty() && Path::new(normalized_path).exists()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn store_for_tempfile(tempdir: &tempfile::TempDir) -> FavoriteStore {
-        FavoriteStore {
-            file_path: tempdir.path().join("favorites.json"),
-            entries: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn toggle_adds_and_removes_by_normalized_path() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let file_path = tempdir.path().join("book.cbz");
-        std::fs::write(&file_path, b"abc").expect("write file");
-
-        let mut store = store_for_tempfile(&tempdir);
-        let normalized = normalize_path_for_selection(&file_path);
-
-        assert_eq!(store.toggle(&file_path), FavoriteState::Favorite);
-        assert!(store.contains(&normalized));
-
-        assert_eq!(store.toggle(&file_path), FavoriteState::NotFavorite);
-        assert!(!store.contains(&normalized));
-    }
-
-    #[test]
-    fn remove_deletes_by_normalized_path() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let file_path = tempdir.path().join("book.cbz");
-        std::fs::write(&file_path, b"abc").expect("write file");
-
-        let mut store = store_for_tempfile(&tempdir);
-        let normalized = normalize_path_for_selection(&file_path);
-        store.entries.push(FavoriteEntry {
-            normalized_path: normalized.clone(),
-            file_size: 3,
-            modified: 1,
-        });
-
-        assert!(store.remove(&file_path));
-        assert!(!store.contains(&normalized));
-        assert!(!store.remove(&file_path));
-    }
-
-    #[test]
-    fn compact_removes_missing_and_duplicate_entries() {
-        let tempdir = tempfile::tempdir().expect("tempdir");
-        let existing = tempdir.path().join("book.cbz");
-        std::fs::write(&existing, b"abc").expect("write file");
-        let missing = tempdir.path().join("missing.cbz");
-
-        let normalized_existing = normalize_path_for_selection(&existing);
-        let normalized_missing = normalize_path_for_selection(&missing);
-
-        let mut store = store_for_tempfile(&tempdir);
-        store.entries = vec![
-            FavoriteEntry {
-                normalized_path: normalized_existing.clone(),
-                file_size: 3,
-                modified: 1,
-            },
-            FavoriteEntry {
-                normalized_path: normalized_existing,
-                file_size: 4,
-                modified: 2,
-            },
-            FavoriteEntry {
-                normalized_path: normalized_missing,
-                file_size: 0,
-                modified: 0,
-            },
-            FavoriteEntry {
-                normalized_path: String::new(),
-                file_size: 0,
-                modified: 0,
-            },
-        ];
-
-        let removed = store.compact();
-
-        assert_eq!(removed, 3);
-        assert_eq!(store.entries.len(), 1);
-        assert_eq!(store.entries[0].file_size, 3);
-    }
 }

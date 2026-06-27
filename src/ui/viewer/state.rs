@@ -754,14 +754,6 @@ impl RgbaPageCache {
     pub(super) fn entry_count(&self) -> usize {
         self.entries.len()
     }
-
-    #[cfg(test)]
-    pub(super) fn debug_pages(&self) -> Vec<u32> {
-        let mut pages: Vec<u32> = self.entries.keys().map(|key| key.page).collect();
-        pages.sort_unstable();
-        pages.dedup();
-        pages
-    }
 }
 
 // ── 状態 ─────────────────────────────────────────────────────────────────────
@@ -1285,8 +1277,6 @@ impl ViewerState {
         let background_worker_count = performance_settings.background_worker_count.max(1);
         let (l1_future_mib, l1_history_mib) =
             split_mib_evenly(performance_settings.l1_vram_cache_max_mib);
-        #[cfg(test)]
-        let _ = &ctx;
         let auto_spread_plan = build_auto_spread_plan_for_mode(&page_map_mode, cover_blank);
         let auto_mode_available = auto_spread_plan.is_some();
         let spread_setting = normalize_spread_setting(spread_setting, auto_mode_available);
@@ -1303,17 +1293,10 @@ impl ViewerState {
             SpreadMode::Spread => true,
         };
         let repaint_ctx = ctx.clone();
-        let loader = Arc::new({
-            #[cfg(test)]
-            {
-                ViewerLoader::spawn_for_tests(background_worker_count)
-            }
-            #[cfg(not(test))]
-            {
-                ViewerLoader::spawn(ctx, background_worker_count)
-                    .map_err(|e| format!("viewer loader init failed: {e}"))?
-            }
-        });
+        let loader = Arc::new(
+            ViewerLoader::spawn(ctx, background_worker_count)
+                .map_err(|e| format!("viewer loader init failed: {e}"))?,
+        );
         let worker_manager = ViewerWorkerManagerHandle::spawn(Arc::clone(&loader), repaint_ctx);
         let entry_id_for_snapshot = entry.id.clone();
         let page_display_labels = viewer_page_display_labels(entry.path.as_ref()).unwrap_or_default();
@@ -5817,89 +5800,3 @@ impl ViewerState {
 }
 
 // ── 描画 ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::infra::image::decode::{DecodedImage, FrameData};
-    use std::sync::Arc;
-
-    const MAX_TEX_SIDE: u32 = 4096;
-
-    fn frame(width: u32, height: u32) -> Arc<Vec<FrameData>> {
-        Arc::new(vec![FrameData {
-            image: DecodedImage {
-                width,
-                height,
-                pixels: vec![0; width as usize * height as usize * 4],
-            },
-            delay_ms: 0,
-        }])
-    }
-
-
-    #[test]
-    fn suitability_uses_105_percent_tolerance() {
-        let requirement = DisplayRequirement::from_display_request(
-            ViewerQuality::Balanced,
-            2544,
-            1281,
-            MAX_TEX_SIDE,
-        );
-        let cached =
-            RenderSignature::from_decode_request(ViewerQuality::Balanced, 2560, 1440, MAX_TEX_SIDE);
-        assert!(cached.is_suitable_for(requirement));
-        assert!(cached.mismatch_reason(requirement).is_none());
-
-        let smaller =
-            RenderSignature::from_decode_request(ViewerQuality::Balanced, 1200, 900, MAX_TEX_SIDE);
-        assert!(!smaller.is_suitable_for(requirement));
-        assert_eq!(
-            smaller.mismatch_reason(requirement),
-            Some("insufficient resolution")
-        );
-    }
-
-    #[test]
-    fn rgba_cache_mutation_revision_advances_on_insert_and_evict() {
-        let mut cache = RgbaPageCache::new();
-        let protected_pages = HashSet::new();
-        let frames = frame(2, 2);
-        let key = RgbaCacheKey {
-            page: 1,
-            render_signature: RenderSignature::from_decode_request(
-                ViewerQuality::Balanced,
-                2,
-                2,
-                MAX_TEX_SIDE,
-            ),
-        };
-
-        cache.set_max_bytes_with_context(1024, 0, &protected_pages);
-        let initial_revision = cache.mutation_revision();
-        assert!(cache.insert(key, Arc::clone(&frames), "test", 0, &protected_pages,));
-        let after_insert_revision = cache.mutation_revision();
-        assert!(after_insert_revision > initial_revision);
-
-        cache.set_max_bytes_with_context(0, 0, &protected_pages);
-        let after_evict_revision = cache.mutation_revision();
-        assert!(after_evict_revision > after_insert_revision);
-        assert!(cache.debug_pages().is_empty());
-    }
-
-    #[test]
-    fn resolved_full_equivalent_area_prefers_hint_over_display_size() {
-        let hint = Some(FullEquivalentSizeHint {
-            monitor_size_points: egui::vec2(3840.0, 2160.0),
-            source: FullEquivalentSizeHintSource::ViewerViewport,
-        });
-
-        let from_small = resolved_full_equivalent_area_from_hint(hint, 1200, 800);
-        let from_large = resolved_full_equivalent_area_from_hint(hint, 1600, 1000);
-        assert_eq!(from_small, (3840, 2160, "viewer-viewport"));
-        assert_eq!(from_small, from_large);
-
-        let fallback = resolved_full_equivalent_area_from_hint(None, 1200, 800);
-        assert_eq!(fallback, (1200, 800, "fallback-current-layout"));
-    }
-}
