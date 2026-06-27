@@ -507,7 +507,8 @@ pub(super) fn render_viewer_toolbar(
                 .color(theme::TEXT_MAIN)
                 .strong()
         };
-        if let Some(current_image_title) = state.current_toolbar_title() {
+        let blank_label = tr(language, TextKey::BlankPage);
+        if let Some(current_image_title) = state.current_toolbar_title(blank_label) {
             ui.label(title_text(&book_file_name));
             ui.add_space(28.0);
             ui.label(title_text("|"));

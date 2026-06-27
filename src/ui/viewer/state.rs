@@ -1140,22 +1140,49 @@ impl ViewerState {
         &self.persistent.entry
     }
 
-    pub(super) fn current_toolbar_title(&self) -> Option<String> {
+    pub(super) fn current_toolbar_title(&self, blank_label: &str) -> Option<String> {
         let current_page = self.persistent.displayed_page;
         let (page_left, page_right) = self.current_view_pages(current_page);
         if page_left.is_none() && page_right.is_none() {
             return None;
         }
-        if !self.persistent.spread_mode {
+
+        let has_two_visible_pages = page_left.is_some() && page_right.is_some();
+        let use_spread_title = self.persistent.spread_mode
+            || has_two_visible_pages
+            || self.is_leading_cover_blank_spread(current_page);
+        if !use_spread_title {
             return self.page_display_label(page_left.or(page_right));
         }
-        let (screen_left, screen_right) = match self.effective_reading_direction() {
+
+        let reading_direction = self.effective_reading_direction();
+        let leading_cover_blank_spread = self.is_leading_cover_blank_spread(current_page);
+        let (screen_left, screen_right) = match reading_direction {
             ReadingDirection::RightToLeft => (page_right, page_left),
             ReadingDirection::LeftToRight => (page_left, page_right),
         };
-        let left_label = self.toolbar_spread_slot_label(screen_left, true, current_page)?;
-        let right_label = self.toolbar_spread_slot_label(screen_right, false, current_page)?;
+        let left_is_blank_slot =
+            leading_cover_blank_spread && matches!(reading_direction, ReadingDirection::RightToLeft);
+        let right_is_blank_slot = leading_cover_blank_spread
+            && matches!(reading_direction, ReadingDirection::LeftToRight);
+        let left_label = self.toolbar_spread_slot_label(
+            screen_left,
+            left_is_blank_slot,
+            blank_label,
+        )?;
+        let right_label = self.toolbar_spread_slot_label(
+            screen_right,
+            right_is_blank_slot,
+            blank_label,
+        )?;
         Some(format!("{left_label} / {right_label}"))
+    }
+
+    pub(super) fn is_leading_cover_blank_spread(&self, physical_page: u32) -> bool {
+        self.persistent.cover_blank
+            && physical_page == 0
+            && !matches!(self.persistent.spread_setting, SpreadMode::Single)
+            && self.persistent.page_count > 0
     }
 
     pub(crate) fn take_reading_session_snapshot(&mut self) -> Option<ReadingSessionSnapshot> {
@@ -4422,7 +4449,8 @@ impl ViewerState {
                 physical_page,
                 current_spread,
                 current_page_right,
-            );
+            )
+            || self.is_leading_cover_blank_spread(physical_page);
         let is_snapshot_key_mismatch = !self.persistent.spread_snapshot.valid
             || self.persistent.spread_snapshot.key != current_key;
         if is_snapshot_key_mismatch {
@@ -4648,6 +4676,9 @@ impl ViewerState {
         if physical_page >= self.persistent.page_count {
             return (None, None);
         }
+        if self.is_leading_cover_blank_spread(physical_page) {
+            return (Some(0), None);
+        }
         match self.persistent.spread_setting {
             SpreadMode::Auto => self
                 .auto_plan()
@@ -4672,6 +4703,9 @@ impl ViewerState {
     }
 
     pub(super) fn request_view_pages(&self, physical_page: u32) -> (Option<u32>, Option<u32>) {
+        if self.is_leading_cover_blank_spread(physical_page) {
+            return (Some(0), None);
+        }
         if self.persistent.page_count == 0 {
             return match self.persistent.spread_setting {
                 SpreadMode::Auto => self
@@ -4700,7 +4734,8 @@ impl ViewerState {
         allow_snapshot_update: bool,
     ) -> ViewerViewLayout {
         let (page_left, current_page_right) = self.request_view_pages(physical_page);
-        let current_spread = current_page_right.is_some();
+        let current_spread =
+            current_page_right.is_some() || self.is_leading_cover_blank_spread(physical_page);
         let (effective_spread, page_right) = self.resolved_spread_for_physical_page(
             physical_page,
             current_spread,
@@ -5030,7 +5065,8 @@ impl ViewerState {
         self.clear_interactive_in_flight();
         if matches!(self.persistent.spread_setting, SpreadMode::Auto) {
             let (_visible_left, page_right) = self.display_pages_for_physical_page(view_idx);
-            let spread = page_right.is_some();
+            let spread =
+                page_right.is_some() || self.is_leading_cover_blank_spread(view_idx);
             self.persistent.spread_mode = spread;
         } else {
             self.persistent.spread_mode =
@@ -5758,6 +5794,7 @@ impl ViewerState {
         }
     }
 
+
     fn page_display_label(&self, page: Option<u32>) -> Option<String> {
         let page = page?;
         self.persistent.page_display_labels.get(page as usize).cloned()
@@ -5766,14 +5803,14 @@ impl ViewerState {
     fn toolbar_spread_slot_label(
         &self,
         page: Option<u32>,
-        is_left_slot: bool,
-        current_page: u32,
+        is_blank_slot: bool,
+        blank_label: &str,
     ) -> Option<String> {
         if let Some(label) = self.page_display_label(page) {
             return Some(label);
         }
-        if self.persistent.cover_blank && current_page == 0 && is_left_slot {
-            return Some("ブランク".to_owned());
+        if is_blank_slot {
+            return Some(blank_label.to_owned());
         }
         None
     }
@@ -5799,6 +5836,7 @@ mod tests {
             delay_ms: 0,
         }])
     }
+
 
     #[test]
     fn suitability_uses_105_percent_tolerance() {

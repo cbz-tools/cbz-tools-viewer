@@ -1193,6 +1193,13 @@ fn snapshot_visible_pages(snapshot: &ViewerWorkerManagerSnapshot) -> (Option<u32
     (snapshot.visible_page_first, snapshot.visible_page_second)
 }
 
+fn is_leading_cover_blank_spread(snapshot: &ViewerWorkerManagerSnapshot, physical_page: u32) -> bool {
+    snapshot.cover_blank
+        && physical_page == 0
+        && !matches!(snapshot.spread_setting, SpreadMode::Single)
+        && snapshot.page_count > 0
+}
+
 #[derive(Clone, Copy, Debug)]
 struct BgCandidateLayout {
     effective_spread: bool,
@@ -1207,6 +1214,9 @@ fn resolve_candidate_pages(
 ) -> (Option<u32>, Option<u32>) {
     if snapshot.page_count == 0 || physical_page >= snapshot.page_count {
         return (None, None);
+    }
+    if is_leading_cover_blank_spread(snapshot, physical_page) {
+        return (Some(0), None);
     }
     match snapshot.spread_setting {
         SpreadMode::Auto => snapshot
@@ -1234,7 +1244,8 @@ fn resolve_candidate_layout(
     physical_page: u32,
 ) -> BgCandidateLayout {
     let (_page_left, page_right) = resolve_candidate_pages(snapshot, physical_page);
-    let effective_spread = page_right.is_some();
+    let effective_spread =
+        page_right.is_some() || is_leading_cover_blank_spread(snapshot, physical_page);
     let page_decode_w =
         request_display_width_for_pair(snapshot.full_equivalent_area_w, effective_spread);
     BgCandidateLayout {

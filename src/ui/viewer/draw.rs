@@ -64,6 +64,8 @@ pub(super) fn draw_pages(
 
     if effective_spread {
         let reading_direction = state.effective_reading_direction();
+        let leading_cover_blank_spread =
+            state.is_leading_cover_blank_spread(state.persistent.displayed_page);
         let (left_size, right_size) = match reading_direction {
             ReadingDirection::RightToLeft => (
                 state
@@ -90,7 +92,21 @@ pub(super) fn draw_pages(
                     .map(|c| c.texture().size_vec2()),
             ),
         };
-        let (ldraw, rdraw) = compute_spread_rects(area, left_size, right_size);
+        let (ldraw, rdraw) = if leading_cover_blank_spread {
+            let cover_size = state
+                .display_assets
+                .content_left
+                .as_ref()
+                .map(|c| c.texture().size_vec2())
+                .or(left_size)
+                .or(right_size);
+            match cover_size {
+                Some(size) => compute_spread_rects(area, Some(size), Some(size)),
+                None => (None, None),
+            }
+        } else {
+            compute_spread_rects(area, left_size, right_size)
+        };
 
         if let (Some(lr), Some(_)) = (&ldraw, &rdraw) {
             let x = lr.max.x;
@@ -102,7 +118,12 @@ pub(super) fn draw_pages(
 
         match reading_direction {
             ReadingDirection::RightToLeft => {
-                if let Some(c) = &mut state.display_assets.content_right {
+                if leading_cover_blank_spread {
+                    if let Some(rect) = ldraw {
+                        ui.painter()
+                            .rect_filled(rect, egui::CornerRadius::ZERO, Color32::WHITE);
+                    }
+                } else if let Some(c) = &mut state.display_assets.content_right {
                     let r = c.tick("viewer_right", &ctx);
                     min_remaining = min_remaining.min(r);
                     if let Some(rect) = ldraw {
@@ -115,6 +136,11 @@ pub(super) fn draw_pages(
                     if let Some(rect) = rdraw {
                         draw_image_at_rect(ui, c.texture(), &rect);
                     }
+                } else if leading_cover_blank_spread {
+                    if let Some(rect) = rdraw {
+                        ui.painter()
+                            .rect_filled(rect, egui::CornerRadius::ZERO, Color32::WHITE);
+                    }
                 }
             }
             ReadingDirection::LeftToRight => {
@@ -124,8 +150,18 @@ pub(super) fn draw_pages(
                     if let Some(rect) = ldraw {
                         draw_image_at_rect(ui, c.texture(), &rect);
                     }
+                } else if leading_cover_blank_spread {
+                    if let Some(rect) = ldraw {
+                        ui.painter()
+                            .rect_filled(rect, egui::CornerRadius::ZERO, Color32::WHITE);
+                    }
                 }
-                if let Some(c) = &mut state.display_assets.content_right {
+                if leading_cover_blank_spread {
+                    if let Some(rect) = rdraw {
+                        ui.painter()
+                            .rect_filled(rect, egui::CornerRadius::ZERO, Color32::WHITE);
+                    }
+                } else if let Some(c) = &mut state.display_assets.content_right {
                     let r = c.tick("viewer_right", &ctx);
                     min_remaining = min_remaining.min(r);
                     if let Some(rect) = rdraw {

@@ -230,6 +230,9 @@ fn build_page_label_at(language: UiLanguage, state: &ViewerState, view: u32) -> 
         return "…".into();
     }
     let (lp, rp) = state.current_view_pages(view);
+    if state.is_leading_cover_blank_spread(view) && state.persistent.page_count > 1 {
+        return format_page_count_label(language, "1-2", state.persistent.page_count);
+    }
     let pages_str = match (lp, rp) {
         (None, Some(r)) => format!("{}", r + 1),
         (Some(l), None) => format!("{}", l + 1),
