@@ -137,9 +137,6 @@ pub struct ViewerResult {
     pub request_max_tex_side: u32,
     /// 実行worker名
     pub worker: String,
-    /// true の場合は UI が直接発行した interactive リクエストの結果。
-    #[allow(dead_code)]
-    pub interactive: bool,
 }
 
 #[derive(Clone)]
@@ -671,7 +668,6 @@ fn process_request(
                     request_quality: req.quality,
                     request_max_tex_side: req.max_tex_side,
                     worker: worker_name.to_owned(),
-                    interactive: req.interactive,
                 };
             }
         }
@@ -704,7 +700,6 @@ fn process_request(
             request_quality: req.quality,
             request_max_tex_side: req.max_tex_side,
             worker: worker_name.to_owned(),
-            interactive: req.interactive,
         };
     };
     let page_count = cache_ref.reader.page_count();
@@ -749,7 +744,6 @@ fn process_request(
         request_quality: req.quality,
         request_max_tex_side: req.max_tex_side,
         worker: worker_name.to_owned(),
-        interactive: req.interactive,
     };
 
     if matches!(

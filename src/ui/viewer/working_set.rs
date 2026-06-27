@@ -211,7 +211,6 @@ pub(super) struct GpuTextureEntrySnapshot {
 /// 巨大 page を BG へ再投入し続けるループを防ぐための負キャッシュ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BgAdmissionState {
-    Unknown,
     Admissible,
     TooLargeForBgRgba,
     InsertDidNotSurvive,
@@ -235,26 +234,18 @@ pub(super) struct BgRenderContext {
 #[derive(Clone, Copy, Debug)]
 pub(super) struct WorkingSetPage {
     pub(super) page: u32,
-    pub(super) render_signature: RenderSignature,
-    pub(super) bg_admission_state: BgAdmissionState,
 }
 
 /// page 単位の Working Set を保持し、BG FIFO と eviction の基準を共通化する。
 /// Worker 数や FIFO 容量はここでは扱わない。
 #[derive(Clone, Debug)]
 pub(super) struct WorkingSetPlan {
-    pub(super) anchor_page: WorkingSetAnchorPage,
-    pub(super) direction: Direction,
     pages: Vec<WorkingSetPage>,
 }
 
 impl WorkingSetPlan {
-    pub(super) fn new(anchor_page: WorkingSetAnchorPage, direction: Direction) -> Self {
-        Self {
-            anchor_page,
-            direction,
-            pages: Vec::new(),
-        }
+    pub(super) fn new(_anchor_page: WorkingSetAnchorPage, _direction: Direction) -> Self {
+        Self { pages: Vec::new() }
     }
 
     pub(super) fn push(&mut self, page: WorkingSetPage) {
@@ -267,13 +258,6 @@ impl WorkingSetPlan {
 
     pub(super) fn page_count(&self) -> usize {
         self.pages.len()
-    }
-
-    pub(super) fn admissible_count(&self) -> usize {
-        self.pages
-            .iter()
-            .filter(|page| !matches!(page.bg_admission_state, BgAdmissionState::TooLargeForBgRgba))
-            .count()
     }
 }
 
