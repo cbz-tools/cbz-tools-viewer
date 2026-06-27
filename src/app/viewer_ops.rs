@@ -45,6 +45,16 @@ struct ResolvedNavigationBooks {
 }
 
 #[derive(Clone, Debug)]
+struct ViewerLaunchSpec {
+    path: PathBuf,
+    with_pipe: bool,
+    start_page: Option<u32>,
+    ipc_current_path: Option<PathBuf>,
+    image_order_snapshot: Option<ImageOrderSnapshot>,
+    snapshot_only_ipc: bool,
+}
+
+#[derive(Clone, Debug)]
 pub(super) enum ViewerSyncEvent {
     Deleted {
         deleted_path: PathBuf,
@@ -75,27 +85,25 @@ impl App {
     // - Viewer 側: UI 状態、描画、fullscreen を保持する。
     fn spawn_viewer(
         &mut self,
-        path: &Path,
-        with_pipe: bool,
-        start_page: Option<u32>,
-        ipc_current_path: Option<PathBuf>,
-        image_order_snapshot: Option<ImageOrderSnapshot>,
-        snapshot_only_ipc: bool,
+        spec: ViewerLaunchSpec,
         root_ctx: &egui::Context,
     ) -> anyhow::Result<()> {
         let current_exe = std::env::current_exe()?;
         let mut cmd = Command::new(current_exe);
-        cmd.arg(path);
-        let initial_path = ipc_current_path.unwrap_or_else(|| path.to_path_buf());
-        if let Some(page) = start_page {
+        cmd.arg(&spec.path);
+        let initial_path = spec
+            .ipc_current_path
+            .clone()
+            .unwrap_or_else(|| spec.path.clone());
+        if let Some(page) = spec.start_page {
             cmd.arg("--viewer-start-page").arg(page.to_string());
         }
 
-        if with_pipe {
+        if spec.with_pipe {
             let server = IpcServer::with_generated_name()?;
             let pipe_name = server.pipe_name().to_owned();
             cmd.arg("--pipe").arg(&pipe_name);
-            if snapshot_only_ipc {
+            if spec.snapshot_only_ipc {
                 cmd.arg("--viewer-snapshot-only-ipc");
             }
             if self.app_settings.viewer_open_mode == ViewerOpenMode::Fullscreen {
@@ -148,7 +156,7 @@ impl App {
             let resume_from_last_reading_position =
                 self.app_settings.resume_from_last_reading_position;
             let repaint_ctx = root_ctx.clone();
-            let image_order_snapshot = image_order_snapshot.clone();
+            let image_order_snapshot = spec.image_order_snapshot.clone();
             std::thread::Builder::new()
                 .name("viewer-ipc-accept".to_owned())
                 .spawn(move || {
@@ -221,7 +229,7 @@ impl App {
         }
 
         cmd.arg("--viewer-offline");
-        if let Some(page) = start_page {
+        if let Some(page) = spec.start_page {
             cmd.arg("--viewer-start-page").arg(page.to_string());
         }
         if self.app_settings.viewer_open_mode == ViewerOpenMode::Fullscreen {
@@ -274,30 +282,14 @@ impl App {
         let Some(entry) = self.library.entries.get(idx).cloned() else {
             return;
         };
-        let Some((spawn_path, with_pipe, start_page, history_path)) =
+        let Some((spec, history_path)) =
             self.viewer_launch_spec_for_entry(&entry)
         else {
             return;
         };
         self.push_open_history(history_path);
-        let image_order_snapshot = match &entry {
-            crate::domain::archive::LibraryEntry::ImageFile(meta) => {
-                self.image_order_snapshot_from_entries(meta.path.as_ref())
-            }
-            _ => None,
-        };
-        let snapshot_only_ipc =
-            matches!(&entry, crate::domain::archive::LibraryEntry::ImageFile(_));
-        if let Err(e) = self.spawn_viewer(
-            spawn_path.as_path(),
-            with_pipe,
-            start_page,
-            None,
-            image_order_snapshot,
-            snapshot_only_ipc,
-            ctx,
-        ) {
-            tracing::error!(path = %spawn_path.display(), error = %e, "failed to spawn viewer subprocess");
+        if let Err(e) = self.spawn_viewer(spec, ctx) {
+            tracing::error!(error = %e, "failed to spawn viewer subprocess");
             self.show_toast("Failed to open viewer");
         }
     }
@@ -311,23 +303,15 @@ impl App {
             self.show_toast("Path not found");
             return Err(());
         }
-        let Some((spawn_path, with_pipe, start_page, history_path)) =
+        let Some((spec, history_path)) =
             self.viewer_launch_spec_for_path(path.as_path())
         else {
             self.show_toast("Unsupported file type");
             return Err(());
         };
         self.push_open_history(history_path);
-        if let Err(e) = self.spawn_viewer(
-            spawn_path.as_path(),
-            with_pipe,
-            start_page,
-            None,
-            None,
-            false,
-            ctx,
-        ) {
-            tracing::error!(path = %spawn_path.display(), error = %e, "failed to spawn viewer subprocess by path");
+        if let Err(e) = self.spawn_viewer(spec, ctx) {
+            tracing::error!(error = %e, "failed to spawn viewer subprocess by path");
             self.show_toast("Failed to open viewer");
             return Err(());
         }
@@ -337,30 +321,50 @@ impl App {
     fn viewer_launch_spec_for_entry(
         &self,
         entry: &crate::domain::archive::LibraryEntry,
-    ) -> Option<(PathBuf, bool, Option<u32>, PathBuf)> {
+    ) -> Option<(ViewerLaunchSpec, PathBuf)> {
         match entry {
             crate::domain::archive::LibraryEntry::Archive(meta) => Some((
-                meta.path.as_ref().to_path_buf(),
-                true,
-                self.viewer_start_page_for_path(meta.path.as_ref(), None)
-                    .map(|page| page as u32),
+                ViewerLaunchSpec {
+                    path: meta.path.as_ref().to_path_buf(),
+                    with_pipe: true,
+                    start_page: self
+                        .viewer_start_page_for_path(meta.path.as_ref(), None)
+                        .map(|page| page as u32),
+                    ipc_current_path: None,
+                    image_order_snapshot: None,
+                    snapshot_only_ipc: false,
+                },
                 meta.path.as_ref().to_path_buf(),
             )),
             crate::domain::archive::LibraryEntry::FolderBook(meta) => Some((
-                meta.path.as_ref().to_path_buf(),
-                true,
-                self.viewer_start_page_for_path(meta.path.as_ref(), None)
-                    .map(|page| page as u32),
+                ViewerLaunchSpec {
+                    path: meta.path.as_ref().to_path_buf(),
+                    with_pipe: true,
+                    start_page: self
+                        .viewer_start_page_for_path(meta.path.as_ref(), None)
+                        .map(|page| page as u32),
+                    ipc_current_path: None,
+                    image_order_snapshot: None,
+                    snapshot_only_ipc: false,
+                },
                 meta.path.as_ref().to_path_buf(),
             )),
             crate::domain::archive::LibraryEntry::ImageFile(meta) => {
                 let reader = FolderImageReader::open(meta.path.parent()?).ok()?;
                 let start_page = reader.page_index_for_path(meta.path.as_ref())?;
                 Some((
-                    meta.path.parent()?.to_path_buf(),
-                    true,
-                    self.viewer_start_page_for_path(meta.path.as_ref(), Some(start_page as usize))
-                        .map(|page| page as u32),
+                    ViewerLaunchSpec {
+                        path: meta.path.parent()?.to_path_buf(),
+                        with_pipe: true,
+                        start_page: self
+                            .viewer_start_page_for_path(meta.path.as_ref(), Some(start_page as usize))
+                            .map(|page| page as u32),
+                        ipc_current_path: None,
+                        image_order_snapshot: self.image_order_snapshot_from_entries(
+                            meta.path.as_ref(),
+                        ),
+                        snapshot_only_ipc: true,
+                    },
                     meta.path.as_ref().to_path_buf(),
                 ))
             }
@@ -371,22 +375,34 @@ impl App {
     fn viewer_launch_spec_for_path(
         &self,
         path: &Path,
-    ) -> Option<(PathBuf, bool, Option<u32>, PathBuf)> {
+    ) -> Option<(ViewerLaunchSpec, PathBuf)> {
         if path.is_dir() {
             return Some((
-                path.to_path_buf(),
-                false,
-                self.viewer_start_page_for_path(path, None)
-                    .map(|page| page as u32),
+                ViewerLaunchSpec {
+                    path: path.to_path_buf(),
+                    with_pipe: false,
+                    start_page: self
+                        .viewer_start_page_for_path(path, None)
+                        .map(|page| page as u32),
+                    ipc_current_path: None,
+                    image_order_snapshot: None,
+                    snapshot_only_ipc: false,
+                },
                 path.to_path_buf(),
             ));
         }
         if is_supported_archive_path(path) {
             return Some((
-                path.to_path_buf(),
-                true,
-                self.viewer_start_page_for_path(path, None)
-                    .map(|page| page as u32),
+                ViewerLaunchSpec {
+                    path: path.to_path_buf(),
+                    with_pipe: true,
+                    start_page: self
+                        .viewer_start_page_for_path(path, None)
+                        .map(|page| page as u32),
+                    ipc_current_path: None,
+                    image_order_snapshot: None,
+                    snapshot_only_ipc: false,
+                },
                 path.to_path_buf(),
             ));
         }
@@ -395,10 +411,16 @@ impl App {
             let reader = FolderImageReader::open(parent).ok()?;
             let start_page = reader.page_index_for_path(path)?;
             return Some((
-                parent.to_path_buf(),
-                false,
-                self.viewer_start_page_for_path(path, Some(start_page as usize))
-                    .map(|page| page as u32),
+                ViewerLaunchSpec {
+                    path: parent.to_path_buf(),
+                    with_pipe: false,
+                    start_page: self
+                        .viewer_start_page_for_path(path, Some(start_page as usize))
+                        .map(|page| page as u32),
+                    ipc_current_path: None,
+                    image_order_snapshot: None,
+                    snapshot_only_ipc: false,
+                },
                 path.to_path_buf(),
             ));
         }
