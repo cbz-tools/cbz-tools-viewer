@@ -538,6 +538,28 @@ struct CachedAnimationStream {
     source: img::WebpAnimFrameSource,
 }
 
+const FAILED_PAGE_TEXT: &str = "PAGE LOAD FAILED";
+const FAILED_PAGE_BG_RGBA: [u8; 4] = [224, 224, 224, 255];
+const FAILED_PAGE_FG_RGBA: [u8; 4] = [80, 80, 80, 255];
+const FAILED_PAGE_FONT_W: u32 = 5;
+const FAILED_PAGE_FONT_H: u32 = 7;
+// 文字サイズはページ高さの約 1/2 まで下げる目安。
+const FAILED_PAGE_TEXT_HEIGHT_SCALE_DIVISOR: u32 = 6;
+// 幅側も同じく縮めて、幅基準で scale が支配されても小さくする。
+const FAILED_PAGE_TEXT_WIDTH_SCALE_DIVISOR: u32 = 2;
+const FAILED_PAGE_TEXT_MIN_SCALE: u32 = 2;
+
+#[derive(Clone)]
+struct FailedPageSpec {
+    frames: Arc<Vec<img::FrameData>>,
+    width: u32,
+    height: u32,
+}
+
+struct PageLoadOutcome {
+    page: DisplayPage,
+}
+
 fn worker_loop(
     shared: Arc<SharedQueue>,
     result_tx: mpsc::Sender<ViewerResult>,
@@ -823,7 +845,7 @@ fn process_request(
                 result.error = Some("viewer cache unavailable".to_owned());
                 return result;
             };
-            match get_display_page(
+            match get_display_page_or_failed(
                 cached,
                 pn,
                 req.display_w,
@@ -831,13 +853,17 @@ fn process_request(
                 req.quality,
                 req.max_tex_side,
             ) {
-                Ok(DisplayPage::Static(page)) => {
+                Ok(PageLoadOutcome {
+                    page: DisplayPage::Static(page),
+                }) => {
                     result.left_orig_w = page.orig_w;
                     result.left_orig_h = page.orig_h;
                     result.left = Some(page.frames);
                     result.decode_ms = result.decode_ms.saturating_add(page.decode_ms);
                 }
-                Ok(DisplayPage::AnimationStream(page)) => {
+                Ok(PageLoadOutcome {
+                    page: DisplayPage::AnimationStream(page),
+                }) => {
                     result.left_orig_w = page.orig_w;
                     result.left_orig_h = page.orig_h;
                     result.left = Some(page.frames);
@@ -856,7 +882,7 @@ fn process_request(
                 result.error = Some("viewer cache unavailable".to_owned());
                 return result;
             };
-            match get_display_page(
+            match get_display_page_or_failed(
                 cached,
                 pn,
                 req.display_w,
@@ -864,13 +890,17 @@ fn process_request(
                 req.quality,
                 req.max_tex_side,
             ) {
-                Ok(DisplayPage::Static(page)) => {
+                Ok(PageLoadOutcome {
+                    page: DisplayPage::Static(page),
+                }) => {
                     result.right_orig_w = page.orig_w;
                     result.right_orig_h = page.orig_h;
                     result.right = Some(page.frames);
                     result.decode_ms = result.decode_ms.saturating_add(page.decode_ms);
                 }
-                Ok(DisplayPage::AnimationStream(page)) => {
+                Ok(PageLoadOutcome {
+                    page: DisplayPage::AnimationStream(page),
+                }) => {
                     result.right_orig_w = page.orig_w;
                     result.right_orig_h = page.orig_h;
                     result.right = Some(page.frames);
@@ -932,7 +962,7 @@ fn process_animation_stream_request(
     req_started: Instant,
 ) -> ViewerResult {
     if let Some(pn) = req.page_left.filter(|pn| *pn < result.page_count) {
-        match get_animation_stream_chunk(
+        match get_animation_stream_chunk_or_failed(
             cached,
             pn,
             req.display_w,
@@ -940,11 +970,20 @@ fn process_animation_stream_request(
             req.quality,
             req.kind,
         ) {
-            Ok(chunk) => {
+            Ok(PageLoadOutcome {
+                page: DisplayPage::AnimationStream(chunk),
+            }) => {
                 result.left_stream_exhausted = chunk.exhausted;
                 result.left_orig_w = chunk.orig_w;
                 result.left_orig_h = chunk.orig_h;
                 result.left = Some(chunk.frames);
+            }
+            Ok(PageLoadOutcome {
+                page: DisplayPage::Static(page),
+            }) => {
+                result.left_orig_w = page.orig_w;
+                result.left_orig_h = page.orig_h;
+                result.left = Some(page.frames);
             }
             Err(e) => {
                 tracing::error!("viewer_loader: animation stream left page {pn}: {e:#}");
@@ -954,7 +993,7 @@ fn process_animation_stream_request(
     }
 
     if let Some(pn) = req.page_right.filter(|pn| *pn < result.page_count) {
-        match get_animation_stream_chunk(
+        match get_animation_stream_chunk_or_failed(
             cached,
             pn,
             req.display_w,
@@ -962,11 +1001,20 @@ fn process_animation_stream_request(
             req.quality,
             req.kind,
         ) {
-            Ok(chunk) => {
+            Ok(PageLoadOutcome {
+                page: DisplayPage::AnimationStream(chunk),
+            }) => {
                 result.right_stream_exhausted = chunk.exhausted;
                 result.right_orig_w = chunk.orig_w;
                 result.right_orig_h = chunk.orig_h;
                 result.right = Some(chunk.frames);
+            }
+            Ok(PageLoadOutcome {
+                page: DisplayPage::Static(page),
+            }) => {
+                result.right_orig_w = page.orig_w;
+                result.right_orig_h = page.orig_h;
+                result.right = Some(page.frames);
             }
             Err(e) => {
                 tracing::error!("viewer_loader: animation stream right page {pn}: {e:#}");
@@ -1047,6 +1095,27 @@ fn get_display_page(
     Ok(DisplayPage::Static(page))
 }
 
+fn get_display_page_or_failed(
+    cached: &mut CachedReader,
+    pn: u32,
+    display_w: u32,
+    display_h: u32,
+    quality: ViewerQuality,
+    max_tex_side: u32,
+) -> anyhow::Result<PageLoadOutcome> {
+    match get_display_page(cached, pn, display_w, display_h, quality, max_tex_side) {
+        Ok(page) => Ok(PageLoadOutcome { page }),
+        Err(e) => {
+            tracing::warn!("viewer_loader: decode page {pn} failed, using synthetic page: {e:#}");
+            Ok(PageLoadOutcome {
+                page: DisplayPage::Static(build_failed_decoded_page(
+                    cached, pn, display_w, display_h, quality,
+                )),
+            })
+        }
+    }
+}
+
 fn start_animation_stream(
     cached: &mut CachedReader,
     pn: u32,
@@ -1114,6 +1183,33 @@ fn get_animation_stream_chunk(
     read_animation_stream_chunk(cached, &key, pn)
 }
 
+fn get_animation_stream_chunk_or_failed(
+    cached: &mut CachedReader,
+    pn: u32,
+    display_w: u32,
+    display_h: u32,
+    quality: ViewerQuality,
+    kind: ViewerRequestKind,
+) -> anyhow::Result<PageLoadOutcome> {
+    match get_animation_stream_chunk(cached, pn, display_w, display_h, quality, kind) {
+        Ok(chunk) => Ok(PageLoadOutcome {
+            page: DisplayPage::AnimationStream(chunk),
+        }),
+        Err(e) => {
+            let key = (pn, display_w, display_h, quality);
+            cached.animation_streams.remove(&key);
+            tracing::warn!(
+                "viewer_loader: animation page {pn} failed, using synthetic page: {e:#}"
+            );
+            Ok(PageLoadOutcome {
+                page: DisplayPage::Static(build_failed_decoded_page(
+                    cached, pn, display_w, display_h, quality,
+                )),
+            })
+        }
+    }
+}
+
 struct DecodedPage {
     frames: Arc<Vec<img::FrameData>>,
     orig_w: u32,
@@ -1132,6 +1228,133 @@ struct RawPageData {
     raw_cache_hit: bool,
     raw_read_ms: u128,
     raw_total_ms: u128,
+}
+
+fn build_failed_decoded_page(
+    cached: &mut CachedReader,
+    pn: u32,
+    display_w: u32,
+    display_h: u32,
+    quality: ViewerQuality,
+) -> DecodedPage {
+    let spec = build_failed_page_spec(display_w, display_h);
+    cached.frame_cache.put(
+        (pn, display_w, display_h, quality, ViewerFrameStage::Full),
+        Arc::clone(&spec.frames),
+    );
+    cached.raw_cache = None;
+    DecodedPage {
+        frames: spec.frames,
+        orig_w: spec.width,
+        orig_h: spec.height,
+        decode_ms: 0,
+    }
+}
+
+fn build_failed_page_spec(display_w: u32, display_h: u32) -> FailedPageSpec {
+    let width = display_w.max(1);
+    let height = display_h.max(1);
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    for px in pixels.chunks_exact_mut(4) {
+        px.copy_from_slice(&FAILED_PAGE_BG_RGBA);
+    }
+    draw_failed_page_label(&mut pixels, width, height);
+    FailedPageSpec {
+        frames: Arc::new(vec![img::FrameData {
+            image: img::DecodedImage {
+                width,
+                height,
+                pixels,
+            },
+            delay_ms: 0,
+        }]),
+        width,
+        height,
+    }
+}
+
+fn draw_failed_page_label(pixels: &mut [u8], width: u32, height: u32) {
+    let glyph_count = FAILED_PAGE_TEXT.len() as u32;
+    let base_text_w = glyph_count
+        .saturating_mul(FAILED_PAGE_FONT_W + 1)
+        .saturating_sub(1);
+    let scale_from_height = (
+        height / (FAILED_PAGE_FONT_H.saturating_mul(FAILED_PAGE_TEXT_HEIGHT_SCALE_DIVISOR)).max(1)
+    )
+        .max(FAILED_PAGE_TEXT_MIN_SCALE);
+    let width_divisor = FAILED_PAGE_TEXT_WIDTH_SCALE_DIVISOR.max(1);
+    let scale_from_width =
+        (width / base_text_w.saturating_mul(width_divisor).max(1)).max(1);
+    let scale = scale_from_height.min(scale_from_width).max(1);
+    let text_w = base_text_w.saturating_mul(scale);
+    let text_h = FAILED_PAGE_FONT_H.saturating_mul(scale);
+    let start_x = width.saturating_sub(text_w) / 2;
+    let start_y = height.saturating_sub(text_h) / 2;
+
+    for (idx, ch) in FAILED_PAGE_TEXT.bytes().enumerate() {
+        let x = start_x + (idx as u32).saturating_mul((FAILED_PAGE_FONT_W + 1).saturating_mul(scale));
+        draw_failed_page_glyph(pixels, width, height, x, start_y, scale, ch);
+    }
+}
+
+fn draw_failed_page_glyph(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    scale: u32,
+    ch: u8,
+) {
+    let glyph = failed_page_glyph(ch);
+    for (row, bits) in glyph.iter().enumerate() {
+        for col in 0..FAILED_PAGE_FONT_W as usize {
+            if (bits >> (FAILED_PAGE_FONT_W as usize - 1 - col)) & 1 == 0 {
+                continue;
+            }
+            let px = x + col as u32 * scale;
+            let py = y + row as u32 * scale;
+            fill_rect_rgba(pixels, width, height, px, py, scale, scale, FAILED_PAGE_FG_RGBA);
+        }
+    }
+}
+
+fn fill_rect_rgba(
+    pixels: &mut [u8],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    rect_w: u32,
+    rect_h: u32,
+    rgba: [u8; 4],
+) {
+    let x_end = x.saturating_add(rect_w).min(width);
+    let y_end = y.saturating_add(rect_h).min(height);
+    for py in y..y_end {
+        for px in x..x_end {
+            let offset = ((py as usize * width as usize) + px as usize) * 4;
+            if let Some(dst) = pixels.get_mut(offset..offset + 4) {
+                dst.copy_from_slice(&rgba);
+            }
+        }
+    }
+}
+
+fn failed_page_glyph(ch: u8) -> [u8; FAILED_PAGE_FONT_H as usize] {
+    match ch {
+        b'A' => [0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11],
+        b'D' => [0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E],
+        b'E' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F],
+        b'F' => [0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10],
+        b'G' => [0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F],
+        b'I' => [0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x1F],
+        b'L' => [0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F],
+        b'O' => [0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E],
+        b'P' => [0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10],
+        b' ' => [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+        _ => [0x1F, 0x01, 0x02, 0x04, 0x08, 0x00, 0x08],
+    }
 }
 
 /// ページをデコードして `(Arc<frames>, orig_w, orig_h)` を返す。
