@@ -36,6 +36,11 @@ pub enum ViewerToLibrary {
         request_id: u64,
         book_id: BookId,
     },
+    RebuildSelectedImagesAsCbzAndNext {
+        request_id: u64,
+        book_id: BookId,
+        delete_entries: Vec<String>,
+    },
     ReadingSessionFinished {
         request_id: u64,
         book_path: PathBuf,

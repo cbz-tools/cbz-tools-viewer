@@ -183,8 +183,13 @@ pub(super) fn draw_pages(
     min_remaining
 }
 
-fn operation_help_text(_language: UiLanguage, capabilities: ViewerUiCapabilities) -> String {
+fn operation_help_text(
+    _language: UiLanguage,
+    capabilities: ViewerUiCapabilities,
+    state: &ViewerState,
+) -> String {
     let mut text = String::with_capacity(128);
+    let delete_range = state.delete_range_selection();
     text.push_str("←→ / Wheel : Page\n");
     if capabilities.allow_book_navigation {
         text.push_str("↑↓         : Book\n");
@@ -193,12 +198,41 @@ fn operation_help_text(_language: UiLanguage, capabilities: ViewerUiCapabilities
     text.push_str("Space      : Slideshow\n");
     text.push_str("F11        : Fullscreen\n");
     if capabilities.allow_delete {
-        text.push_str("Del        : Delete\n");
+        match (delete_range.start, delete_range.end) {
+            (None, None) => {
+                text.push_str("M          : Mark start\n");
+                text.push_str("Del        : Delete book\n");
+            }
+            (Some(_), None) => {
+                text.push_str("M          : Mark end\n");
+                text.push_str("Del        : Delete book\n");
+            }
+            (Some(_), Some(_)) => {
+                text.push_str("M          : Restart range\n");
+                text.push_str("Del        : Delete range\n");
+            }
+            (None, Some(_)) => {}
+        }
     }
-    if capabilities.allow_book_navigation {
+    if delete_range.has_any() {
+        text.push_str("Esc        : Clear range");
+    } else if capabilities.allow_book_navigation {
         text.push_str("Esc        : Library");
     } else {
         text.push_str("Esc        : Close");
+    }
+    match (delete_range.start, delete_range.end) {
+        (Some(start), None) => {
+            text.push_str(&format!("\nDelete Range: S={}", start + 1));
+        }
+        (Some(start), Some(end)) => {
+            text.push_str(&format!(
+                "\nDelete Range: S={} E={}",
+                start + 1,
+                end + 1
+            ));
+        }
+        _ => {}
     }
     text
 }
@@ -208,8 +242,9 @@ fn draw_operation_help_overlay(
     area: &Rect,
     language: UiLanguage,
     capabilities: ViewerUiCapabilities,
+    state: &ViewerState,
 ) {
-    let help_text = operation_help_text(language, capabilities);
+    let help_text = operation_help_text(language, capabilities, state);
     ui.painter().text(
         pos2(area.min.x + 8.0, area.max.y - 6.0),
         egui::Align2::LEFT_BOTTOM,
@@ -685,7 +720,7 @@ pub(super) fn fullscreen_overlay_near(ctx: &egui::Context, area: &Rect) -> bool 
     should_show_fullscreen_overlay(ctx, area)
 }
 
-fn compute_spread_rects(
+pub(super) fn compute_spread_rects(
     area: &Rect,
     lsize: Option<egui::Vec2>,
     rsize: Option<egui::Vec2>,
@@ -785,7 +820,7 @@ pub(super) fn draw_viewer_overlays(ui: &mut egui::Ui, overlay: ViewerOverlayCont
     {
         draw_debug_cache_overlay(ui, _state, area, _display_w, _display_h, _max_tex_side);
     }
-    draw_operation_help_overlay(ui, area, language, capabilities);
+    draw_operation_help_overlay(ui, area, language, capabilities, _state);
 }
 
 pub(super) fn draw_status_message(ui: &egui::Ui, area: &Rect, text: &str, color: Color32) {

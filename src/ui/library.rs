@@ -889,6 +889,18 @@ impl LibraryState {
         self.recompute_group_counts();
     }
 
+    pub(crate) fn register_rebuilt_cbz_entry(&mut self, old_path: &Path, rebuilt_entry: LibraryEntry) {
+        let rebuilt_path = Self::entry_path_ref(&rebuilt_entry).to_path_buf();
+        self.raw_entries.retain(|entry| {
+            !paths_equivalent_for_selection(Self::entry_path_ref(entry), old_path)
+                && !paths_equivalent_for_selection(Self::entry_path_ref(entry), rebuilt_path.as_path())
+        });
+        self.raw_entries.push(rebuilt_entry.clone());
+        self.prefill_kind_groups();
+        self.rebuild_entries();
+        self.request_thumb_for_entry(&rebuilt_entry, true);
+    }
+
     pub fn clear_books(&mut self) {
         self.book_states.clear();
         self.recompute_group_counts();
@@ -901,6 +913,13 @@ impl LibraryState {
                 None
             }
         }
+    }
+
+    pub(crate) fn archive_entry_by_book_id(&self, book_id: &BookId) -> Option<LibraryEntry> {
+        self.raw_entries.iter().find_map(|entry| match entry {
+            LibraryEntry::Archive(meta) if meta.id == *book_id => Some(entry.clone()),
+            _ => None,
+        })
     }
 
     fn entry_path_ref(entry: &LibraryEntry) -> &Path {
@@ -1834,6 +1853,39 @@ impl LibraryState {
         for task in tasks {
             self.worker.request(task);
         }
+    }
+
+    fn request_thumb_for_entry(&mut self, entry: &LibraryEntry, bypass_cache: bool) {
+        let Some(book_id) = entry.thumb_id() else {
+            return;
+        };
+        let (path, expected_size, expected_modified) = match entry {
+            LibraryEntry::Archive(meta) => (Arc::clone(&meta.path), meta.size, Some(meta.modified)),
+            LibraryEntry::FolderBook(meta) => {
+                let Ok(fs_meta) = std::fs::metadata(meta.path.as_ref()) else {
+                    return;
+                };
+                (Arc::clone(&meta.path), fs_meta.len(), fs_meta.modified().ok())
+            }
+            LibraryEntry::ImageFile(meta) => (Arc::clone(&meta.path), meta.size, Some(meta.modified)),
+            LibraryEntry::Folder(_) => return,
+        };
+        let target_width = crate::domain::app_settings::AppSettings::storage_width();
+        let state = self.book_state_mut(&book_id);
+        if state.thumb_requested {
+            return;
+        }
+        state.thumb_failed = false;
+        state.thumb_requested = true;
+        state.force_reload = false;
+        self.worker.request(ThumbTask {
+            book_id,
+            path,
+            target_width,
+            expected_size,
+            expected_modified,
+            bypass_cache,
+        });
     }
 
     // ── 選択ユーティリティ ────────────────────────────────────────────────────

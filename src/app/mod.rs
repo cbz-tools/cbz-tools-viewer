@@ -16,9 +16,12 @@ use self::external_tool::{ExternalToolRunning, ExternalToolUiState};
 use self::library_ops::PendingAfterLoad;
 use self::platform::{normalize_dir_path, sanitize_favorite_dirs};
 use self::ui_helpers::{calc_cache_size_mb, dialog_button_row, setup_style, DialogButtonSpec};
-use self::viewer_ops::{FavoriteToggleResult, LibraryNavSnapshot, ViewerSyncEvent};
+use self::viewer_ops::{
+    FavoriteToggleResult, LibraryNavSnapshot, RebuildSelectedImagesAsCbzAndNextResult,
+    ViewerSyncEvent,
+};
 use crate::domain::app_settings::AppSettings;
-use crate::domain::archive::{BookId, BookMeta, LibraryEntry};
+use crate::domain::archive::{BookId, BookMeta, CbzRebuildPlanOptions, LibraryEntry};
 use crate::domain::performance::PerformanceResources;
 use crate::infra::cache::{disk::DiskCache, page_map::PageMapDiskCache};
 use crate::infra::worker::external_tool_worker::ExternalToolWorker;
@@ -52,6 +55,11 @@ enum DeleteDialogChoice {
 enum BookSettingsClearDialogChoice {
     Reset,
     Cancel,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct RebuiltCbzLibrarySyncResult {
+    pub rebuilt_path: PathBuf,
 }
 
 pub struct App {
@@ -108,6 +116,7 @@ pub struct App {
         std::sync::Arc<parking_lot::Mutex<Vec<(usize, PathBuf, ExternalToolTrigger)>>>,
     pending_history_paths: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
     pending_viewer_sync_events: std::sync::Arc<parking_lot::Mutex<Vec<ViewerSyncEvent>>>,
+    pending_rebuilt_viewer_paths: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
     library_book_order: Arc<RwLock<LibraryNavSnapshot>>,
     left_pane_tab: LeftPaneTab,
     open_history: std::collections::VecDeque<crate::session::HistoryEntry>,
@@ -222,6 +231,7 @@ impl App {
             pending_external_tool_runs: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_history_paths: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             pending_viewer_sync_events: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
+            pending_rebuilt_viewer_paths: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             library_book_order: Arc::new(RwLock::new(LibraryNavSnapshot::default())),
             left_pane_tab,
             open_history,
@@ -254,6 +264,7 @@ impl eframe::App for App {
         self.drain_pending_external_tool_runs(ctx);
         self.drain_pending_history_paths();
         self.drain_pending_viewer_sync_events(ctx);
+        self.drain_pending_rebuilt_viewer_paths(ctx);
         if !self.pending_external_tool_runs.lock().is_empty() {
             ctx.request_repaint();
         }
@@ -282,6 +293,7 @@ impl eframe::App for App {
         self.drain_pending_external_tool_runs(ctx);
         self.drain_pending_history_paths();
         self.drain_pending_viewer_sync_events(ctx);
+        self.drain_pending_rebuilt_viewer_paths(ctx);
         self.library.wheel_scroll_multiplier = self.app_settings.library_wheel_multiplier();
 
         // ── 設定ウィンドウ ────────────────────────────────────────────────────
@@ -869,6 +881,23 @@ impl App {
         }
     }
 
+    fn drain_pending_rebuilt_viewer_paths(&mut self, ctx: &egui::Context) {
+        let mut pending = self.pending_rebuilt_viewer_paths.lock();
+        if pending.is_empty() {
+            return;
+        }
+        let paths: Vec<PathBuf> = pending.drain(..).collect();
+        drop(pending);
+        for path in paths {
+            if let Err(()) = self.open_viewer_by_path(path.clone(), ctx) {
+                tracing::warn!(
+                    path = %path.display(),
+                    "rebuilt cbz auto-open failed"
+                );
+            }
+        }
+    }
+
     fn drain_pending_viewer_sync_events(&mut self, ctx: &egui::Context) {
         let mut pending = self.pending_viewer_sync_events.lock();
         if pending.is_empty() {
@@ -933,6 +962,69 @@ impl App {
                         );
                     }
                 }
+                ViewerSyncEvent::RebuildSelectedImagesAsCbzAndNext {
+                    request_id,
+                    book_id,
+                    current_path,
+                    delete_entries,
+                    next_path,
+                    response_tx,
+                } => {
+                    let result = match self.library.archive_entry_by_book_id(&book_id) {
+                        Some(entry) => {
+                            let rebuild_result = self.rebuild_cbz_and_sync_library_entry(
+                                &entry,
+                                crate::domain::archive::CbzRebuildPlanOptions {
+                                    delete_entries,
+                                    remaining_image_entries_after_delete: None,
+                                },
+                            );
+                            match rebuild_result {
+                                Ok(sync_result) => {
+                                    if self.app_settings.open_rebuilt_cbz_in_new_viewer {
+                                        self.pending_rebuilt_viewer_paths
+                                            .lock()
+                                            .push(sync_result.rebuilt_path);
+                                    }
+                                    match next_path {
+                                    Some(path) => {
+                                        RebuildSelectedImagesAsCbzAndNextResult::NavigateTo(path)
+                                    }
+                                    None => RebuildSelectedImagesAsCbzAndNextResult::NoMoreBooks,
+                                }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        request_id,
+                                        path = %current_path.display(),
+                                        error = %error,
+                                        "viewer.ipc.rebuild_selected_images_as_cbz_and_next.failed"
+                                    );
+                                    RebuildSelectedImagesAsCbzAndNextResult::Error(
+                                        crate::infra::ipc::IpcErrorCode::Unknown,
+                                    )
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::warn!(
+                                request_id,
+                                path = %current_path.display(),
+                                "viewer.ipc.rebuild_selected_images_as_cbz_and_next.file_not_found"
+                            );
+                            RebuildSelectedImagesAsCbzAndNextResult::Error(
+                                crate::infra::ipc::IpcErrorCode::FileNotFound,
+                            )
+                        }
+                    };
+                    if response_tx.send(result).is_err() {
+                        tracing::warn!(
+                            request_id,
+                            path = %current_path.display(),
+                            "viewer.ipc.rebuild_selected_images_as_cbz_and_next.response_channel_closed"
+                        );
+                    }
+                }
             }
         }
     }
@@ -987,6 +1079,34 @@ impl App {
             self.library.anchor_idx = None;
             self.library.selected_set.clear();
         }
+    }
+
+    pub(super) fn rebuild_cbz_and_sync_library_entry(
+        &mut self,
+        entry: &LibraryEntry,
+        options: CbzRebuildPlanOptions,
+    ) -> anyhow::Result<RebuiltCbzLibrarySyncResult> {
+        let completed = crate::domain::archive::rebuild_cbz_for_library_entry(entry, options)?;
+        let rebuilt_path = completed.plan.output_path.clone();
+        let rebuilt_entry = crate::infra::fs::scanner::scan_path(rebuilt_path.as_path())?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "cbz rebuild output is not a supported library entry: {}",
+                    rebuilt_path.display()
+                )
+            })?;
+        if !matches!(rebuilt_entry, LibraryEntry::Archive(_)) {
+            anyhow::bail!(
+                "cbz rebuild output is not an archive library entry: {}",
+                rebuilt_path.display()
+            );
+        }
+        self.apply_deleted_path_diff(completed.plan.input_path.as_path(), None);
+        self.library.register_rebuilt_cbz_entry(
+            completed.plan.input_path.as_path(),
+            rebuilt_entry,
+        );
+        Ok(RebuiltCbzLibrarySyncResult { rebuilt_path })
     }
 
     fn save_session(&mut self) {

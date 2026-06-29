@@ -104,6 +104,14 @@ impl EpubImageReader {
             })
             .collect()
     }
+
+    pub(crate) fn page_entry_names(&self) -> Vec<String> {
+        self.book
+            .pages()
+            .iter()
+            .map(|page| page.image_path.clone())
+            .collect()
+    }
 }
 
 impl BookReader for EpubImageReader {

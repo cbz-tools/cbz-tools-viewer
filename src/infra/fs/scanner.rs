@@ -75,6 +75,60 @@ pub fn scan_dir(root: &Path) -> Result<Vec<LibraryEntry>> {
     Ok(entries)
 }
 
+pub fn scan_path(path: &Path) -> Result<Option<LibraryEntry>> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+
+    if meta.is_dir() {
+        let title: Arc<str> = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .map(Arc::from)
+            .unwrap_or_else(|| Arc::from(path.to_string_lossy().as_ref()));
+        let folder_meta = FolderMeta {
+            path: Arc::from(path),
+            title,
+            modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+        };
+        if has_direct_image(path) {
+            return Ok(Some(LibraryEntry::FolderBook(folder_meta)));
+        }
+        return Ok(Some(LibraryEntry::Folder(folder_meta)));
+    }
+
+    if meta.is_file() {
+        let title: Arc<str> = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .map(Arc::from)
+            .unwrap_or_else(|| Arc::from(path.to_string_lossy().as_ref()));
+        let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if is_supported_archive_path(path) {
+            return Ok(Some(LibraryEntry::Archive(BookMeta {
+                id: BookId::from_path(path),
+                path: Arc::from(path),
+                title,
+                size: meta.len(),
+                modified,
+                page_count: None,
+            })));
+        }
+        if is_supported_image(path) {
+            return Ok(Some(LibraryEntry::ImageFile(ImageFileMeta {
+                path: Arc::from(path),
+                title,
+                size: meta.len(),
+                modified,
+            })));
+        }
+    }
+
+    Ok(None)
+}
+
 fn has_direct_image(path: &Path) -> bool {
     let Ok(read_dir) = std::fs::read_dir(path) else {
         return false;

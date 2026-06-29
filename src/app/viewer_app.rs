@@ -12,9 +12,9 @@ use crate::domain::app_settings::{
     normalize_external_tool_executable, AppSettings, ReadingDirection, ViewerQuality,
 };
 use crate::domain::archive::{BookId, BookMeta};
-use crate::infra::archive::folder::FolderImageReader;
 use crate::domain::archive_settings::{SettingsStore, SpreadMode};
 use crate::domain::performance::{PerformanceResources, PerformanceSettingsResolved};
+use crate::infra::archive::{book_source_kind, folder::FolderImageReader, BookSourceKind};
 use crate::infra::cache::disk::DiskCache;
 use crate::infra::ipc::{
     AdjacentBooksKind, ImageOrderSnapshot, IpcClient, LibraryToViewer, ViewerBookState,
@@ -28,7 +28,8 @@ use crate::ui::i18n::{tr, TextKey};
 use crate::ui::thumb_cache::load_disk_thumb_texture;
 use crate::ui::viewer::{
     self, BoundaryPreviewDirection, ExternalToolButtonModel, ExternalToolToolbarState,
-    ExternalToolTrigger, ViewerAction, ViewerState, ViewerUiCapabilities,
+    ExternalToolTrigger, ViewerAction, ViewerDeleteRangeSelection, ViewerState,
+    ViewerUiCapabilities,
 };
 use crate::util::archive_path::is_supported_archive_path;
 use crate::{LaunchOptions, StartupMode};
@@ -64,6 +65,11 @@ pub struct ViewerApp {
     delete_dialog_open: bool,
     delete_dialog_choice: ViewerDeleteDialogChoice,
     delete_dialog_online: DeleteDialogOnlineState,
+    page_range_delete_dialog_open: bool,
+    page_range_delete_dialog_choice: PageRangeDeleteDialogChoice,
+    page_range_delete_in_flight: bool,
+    page_range_delete_error: Option<String>,
+    pending_page_range_rebuild_request: Option<PendingPageRangeRebuildRequest>,
     book_state: ViewerBookState,
     favorite_state: ViewerFavoriteState,
     pending_favorite_toggle_previous_state: Option<ViewerFavoriteState>,
@@ -119,6 +125,7 @@ enum PendingLibraryAction {
     Next,
     DeleteAndClose,
     DeleteAndNext,
+    RebuildSelectedImagesAsCbzAndNext,
     DeleteDialogProbe,
 }
 
@@ -128,6 +135,17 @@ enum DeleteDialogOnlineState {
     Checking,
     Online,
     Offline,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PageRangeDeleteDialogChoice {
+    Confirm,
+    Cancel,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PendingPageRangeRebuildRequest {
+    delete_entries: Vec<String>,
 }
 
 enum IpcEvent {
@@ -177,6 +195,26 @@ impl ViewerMode {
 }
 
 impl ViewerApp {
+    fn clear_page_range_delete_request_state(&mut self) {
+        self.page_range_delete_in_flight = false;
+        self.page_range_delete_dialog_open = false;
+        self.pending_page_range_rebuild_request = None;
+        self.page_range_delete_error = None;
+    }
+
+    fn clear_page_range_delete_request_state_and_selection(&mut self) {
+        self.clear_page_range_delete_request_state();
+        self.state.delete_range_clear();
+    }
+
+    fn allow_page_range_delete(&self) -> bool {
+        matches!(self.mode, ViewerMode::Library { .. })
+            && matches!(
+                book_source_kind(self.state.entry().path.as_ref()),
+                BookSourceKind::Zip | BookSourceKind::Rar
+            )
+    }
+
     fn viewer_text(&self, key: TextKey) -> &'static str {
         tr(self.app_settings.ui_language, key)
     }
@@ -443,10 +481,7 @@ impl ViewerApp {
                             );
                             ViewerMode::Detached
                         } else {
-                            let common = (
-                                request_tx,
-                                event_rx,
-                            );
+                            let common = (request_tx, event_rx);
                             if launch.viewer_snapshot_only_ipc {
                                 ViewerMode::SnapshotOnly {
                                     request_tx: common.0,
@@ -562,6 +597,11 @@ impl ViewerApp {
             delete_dialog_open: false,
             delete_dialog_choice: ViewerDeleteDialogChoice::DeleteAndNext,
             delete_dialog_online: DeleteDialogOnlineState::Unknown,
+            page_range_delete_dialog_open: false,
+            page_range_delete_dialog_choice: PageRangeDeleteDialogChoice::Confirm,
+            page_range_delete_in_flight: false,
+            page_range_delete_error: None,
+            pending_page_range_rebuild_request: None,
             book_state,
             favorite_state,
             pending_favorite_toggle_previous_state: None,
@@ -682,6 +722,65 @@ impl ViewerApp {
         Ok(())
     }
 
+    fn begin_page_range_rebuild_request(&mut self) {
+        self.page_range_delete_error = None;
+        if !self.allow_page_range_delete() {
+            self.page_range_delete_error =
+                Some(self.viewer_text(TextKey::DeleteRangeFailed).to_owned());
+            return;
+        }
+        if self.state.delete_range_would_remove_all_pages() {
+            self.page_range_delete_error = Some(
+                self.viewer_text(TextKey::DeleteRangeAllPagesNotAllowed)
+                    .to_owned(),
+            );
+            return;
+        }
+        let Some(delete_entries) = self.state.delete_range_entry_names() else {
+            self.page_range_delete_error =
+                Some(self.viewer_text(TextKey::DeleteRangeFailed).to_owned());
+            return;
+        };
+        if delete_entries.is_empty() {
+            self.page_range_delete_error =
+                Some(self.viewer_text(TextKey::DeleteRangeFailed).to_owned());
+            return;
+        }
+        let ViewerMode::Library {
+            ref mut last_request_id,
+            ..
+        } = self.mode
+        else {
+            self.page_range_delete_error =
+                Some(self.viewer_text(TextKey::DeleteRangeFailed).to_owned());
+            return;
+        };
+        *last_request_id = last_request_id.saturating_add(1);
+        let request_id = *last_request_id;
+        let book_id = BookId::from_path(self.state.entry().path.as_ref());
+        let request = ViewerToLibrary::RebuildSelectedImagesAsCbzAndNext {
+            request_id,
+            book_id,
+            delete_entries: delete_entries.clone(),
+        };
+        self.pending_page_range_rebuild_request =
+            Some(PendingPageRangeRebuildRequest { delete_entries });
+        self.page_range_delete_in_flight = true;
+        let result = self.handle_ipc_navigation(
+            request,
+            PendingLibraryAction::RebuildSelectedImagesAsCbzAndNext,
+            request_id,
+        );
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "viewer page-range rebuild request send failed");
+            self.page_range_delete_in_flight = false;
+            self.pending_page_range_rebuild_request = None;
+            self.page_range_delete_error =
+                Some(self.viewer_text(TextKey::DeleteRangeFailed).to_owned());
+            self.mode = ViewerMode::Detached;
+        }
+    }
+
     fn send_boundary_preview_request(&mut self) {
         if !matches!(self.mode, ViewerMode::Library { .. }) {
             self.state.close_boundary_preview();
@@ -768,7 +867,8 @@ impl ViewerApp {
         let mut events = Vec::new();
         {
             match &mut self.mode {
-                ViewerMode::Library { event_rx, .. } | ViewerMode::SnapshotOnly { event_rx, .. } => {
+                ViewerMode::Library { event_rx, .. }
+                | ViewerMode::SnapshotOnly { event_rx, .. } => {
                     while let Ok(event) = event_rx.try_recv() {
                         events.push(event);
                     }
@@ -784,6 +884,12 @@ impl ViewerApp {
                     let had_pending_favorite_toggle =
                         self.pending_favorite_toggle_previous_state.is_some();
                     self.restore_pending_favorite_toggle_state();
+                    if self.page_range_delete_in_flight {
+                        self.page_range_delete_in_flight = false;
+                        self.pending_page_range_rebuild_request = None;
+                        self.page_range_delete_error =
+                            Some(self.viewer_text(TextKey::DeleteRangeFailed).to_owned());
+                    }
                     if had_pending_favorite_toggle {
                         self.mark_viewer_feedback(TextKey::FavoriteUpdateFailed, Instant::now());
                     }
@@ -831,14 +937,12 @@ impl ViewerApp {
                                     if let (Some(path), Some(book_state)) =
                                         (next_path, next_book_state)
                                     {
-                                        if let Err(e) =
-                                            self.reopen_to_path(
-                                                ctx,
-                                                path.as_path(),
-                                                book_state,
-                                                false,
-                                            )
-                                        {
+                                        if let Err(e) = self.reopen_to_path(
+                                            ctx,
+                                            path.as_path(),
+                                            book_state,
+                                            false,
+                                        ) {
                                             tracing::warn!(error = %e, "ipc delete-next apply failed");
                                         }
                                     } else {
@@ -857,11 +961,19 @@ impl ViewerApp {
                         book_state,
                     } => {
                         if self.is_current_library_request(request_id) {
+                            let pending_action = self.current_pending_library_action();
                             if matches!(
-                                self.current_pending_library_action(),
+                                pending_action,
                                 Some(PendingLibraryAction::DeleteDialogProbe)
                             ) {
                                 self.delete_dialog_online = DeleteDialogOnlineState::Online;
+                            }
+                            if matches!(
+                                pending_action,
+                                Some(PendingLibraryAction::RebuildSelectedImagesAsCbzAndNext)
+                            ) {
+                                self.clear_page_range_delete_request_state();
+                                self.state.discard_reading_session_notification();
                             }
                             self.state.close_boundary_preview();
                             if let Err(e) =
@@ -892,6 +1004,15 @@ impl ViewerApp {
                                 self.state.close_boundary_preview();
                                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                             }
+                            if matches!(
+                                pending_action,
+                                Some(PendingLibraryAction::RebuildSelectedImagesAsCbzAndNext)
+                            ) {
+                                self.clear_page_range_delete_request_state_and_selection();
+                                self.state.discard_reading_session_notification();
+                                self.state.close_boundary_preview();
+                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                            }
                             self.clear_pending_library_action();
                         }
                     }
@@ -913,6 +1034,16 @@ impl ViewerApp {
                         if self.is_current_library_request(request_id) {
                             let retried = retryable && self.retry_pending_library_action();
                             if !retried {
+                                if matches!(
+                                    self.current_pending_library_action(),
+                                    Some(PendingLibraryAction::RebuildSelectedImagesAsCbzAndNext)
+                                ) {
+                                    self.page_range_delete_in_flight = false;
+                                    self.pending_page_range_rebuild_request = None;
+                                    self.page_range_delete_error = Some(
+                                        self.viewer_text(TextKey::DeleteRangeFailed).to_owned(),
+                                    );
+                                }
                                 if matches!(
                                     self.current_pending_library_action(),
                                     Some(PendingLibraryAction::DeleteDialogProbe)
@@ -1127,6 +1258,18 @@ impl ViewerApp {
                 request_id,
                 book_id: BookId::from_path(self.state.entry().path.as_ref()),
             },
+            PendingLibraryAction::RebuildSelectedImagesAsCbzAndNext => {
+                let delete_entries = self
+                    .pending_page_range_rebuild_request
+                    .as_ref()
+                    .map(|request| request.delete_entries.clone())
+                    .unwrap_or_default();
+                ViewerToLibrary::RebuildSelectedImagesAsCbzAndNext {
+                    request_id,
+                    book_id: BookId::from_path(self.state.entry().path.as_ref()),
+                    delete_entries,
+                }
+            }
         };
         self.handle_ipc_navigation(request, action, request_id)
             .is_ok()
@@ -1158,9 +1301,7 @@ impl ViewerApp {
         }
         book_state.start_page = Some(start_page);
         self.image_order_snapshot_applied = true;
-        if let Err(error) =
-            self.reopen_to_path(ctx, snapshot.folder.as_path(), book_state, true)
-        {
+        if let Err(error) = self.reopen_to_path(ctx, snapshot.folder.as_path(), book_state, true) {
             tracing::warn!(
                 error = %error,
                 path = %snapshot.folder.display(),
@@ -1281,6 +1422,47 @@ impl ViewerApp {
                 self.delete_dialog_online = DeleteDialogOnlineState::Offline;
                 self.mode = ViewerMode::Detached;
             }
+        }
+    }
+
+    fn begin_page_range_delete_dialog(&mut self) {
+        self.page_range_delete_dialog_open = true;
+        self.page_range_delete_dialog_choice = PageRangeDeleteDialogChoice::Confirm;
+        self.page_range_delete_in_flight = false;
+        self.page_range_delete_error = if self.state.delete_range_would_remove_all_pages() {
+            Some(
+                self.viewer_text(TextKey::DeleteRangeAllPagesNotAllowed)
+                    .to_owned(),
+            )
+        } else {
+            None
+        };
+        self.pending_page_range_rebuild_request = None;
+    }
+
+    fn close_page_range_delete_dialog(&mut self) {
+        self.page_range_delete_dialog_open = false;
+        self.page_range_delete_dialog_choice = PageRangeDeleteDialogChoice::Confirm;
+        self.page_range_delete_in_flight = false;
+        self.page_range_delete_error = None;
+        self.pending_page_range_rebuild_request = None;
+    }
+
+    fn page_range_selection(&self) -> ViewerDeleteRangeSelection {
+        self.state.delete_range_selection()
+    }
+
+    fn page_range_selection_label(&self) -> Option<String> {
+        let selection = self.page_range_selection();
+        match (selection.start, selection.end) {
+            (Some(start), Some(end)) => {
+                if start == end {
+                    Some(format!("p.{}", start + 1))
+                } else {
+                    Some(format!("p.{}-{}", start + 1, end + 1))
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1409,6 +1591,150 @@ impl ViewerApp {
             self.delete_dialog_open = false;
             self.delete_dialog_choice = ViewerDeleteDialogChoice::DeleteAndNext;
             self.delete_dialog_online = DeleteDialogOnlineState::Unknown;
+        }
+    }
+
+    fn show_page_range_delete_dialog(&mut self, ctx: &egui::Context) {
+        if !self.page_range_delete_dialog_open {
+            return;
+        }
+        let Some(pages_label) = self.page_range_selection_label() else {
+            self.page_range_delete_dialog_open = false;
+            return;
+        };
+        let language = self.app_settings.ui_language;
+        let title = tr(language, TextKey::DeleteRangeConfirmTitle);
+        let question = if self.page_range_delete_in_flight {
+            tr(language, TextKey::DeleteRangeProcessing)
+        } else {
+            tr(language, TextKey::DeleteRangeConfirmQuestion)
+        };
+        let replace_note = tr(language, TextKey::DeleteRangeReplaceNote);
+        let next_book_note = tr(language, TextKey::DeleteRangeNextBookNote);
+        let irreversible_note = tr(language, TextKey::IrreversibleActionNote);
+        let delete_label = tr(language, TextKey::DeleteRangeRebuild);
+        let cancel_label = tr(language, TextKey::Cancel);
+        let can_confirm =
+            !self.page_range_delete_in_flight && self.page_range_delete_error.is_none();
+        let can_cancel = !self.page_range_delete_in_flight;
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+        egui::Window::new(title)
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .min_width(560.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(540.0);
+                let (left, right, enter, escape) = ui.input_mut(|i| {
+                    (
+                        i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft),
+                        i.consume_key(egui::Modifiers::NONE, Key::ArrowRight),
+                        i.consume_key(egui::Modifiers::NONE, Key::Enter),
+                        i.consume_key(egui::Modifiers::NONE, Key::Escape),
+                    )
+                });
+                if !self.page_range_delete_in_flight && left {
+                    self.page_range_delete_dialog_choice = match self
+                        .page_range_delete_dialog_choice
+                    {
+                        PageRangeDeleteDialogChoice::Confirm => {
+                            PageRangeDeleteDialogChoice::Confirm
+                        }
+                        PageRangeDeleteDialogChoice::Cancel => PageRangeDeleteDialogChoice::Confirm,
+                    };
+                }
+                if !self.page_range_delete_in_flight && right {
+                    self.page_range_delete_dialog_choice = match self
+                        .page_range_delete_dialog_choice
+                    {
+                        PageRangeDeleteDialogChoice::Confirm => PageRangeDeleteDialogChoice::Cancel,
+                        PageRangeDeleteDialogChoice::Cancel => PageRangeDeleteDialogChoice::Cancel,
+                    };
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(icons::icon(icons::ICON_DELETE, 22.0).color(theme::DELETE_RED));
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(question).color(theme::TEXT_MAIN));
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(format!(
+                        "{replace_note}\n{next_book_note}\n{irreversible_note}"
+                    ))
+                    .size(theme::FONT_SIZE_SMALL)
+                    .color(theme::TEXT_SUBTLE),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(pages_label)
+                        .size(theme::FONT_SIZE_SMALL)
+                        .color(theme::TEXT_SUBTLE),
+                );
+                if let Some(error) = self.page_range_delete_error.as_ref() {
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(error).color(theme::DELETE_RED));
+                }
+                ui.add_space(20.0);
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(can_confirm, |ui| {
+                        let buttons = dialog_button_row(
+                            ui,
+                            31.0,
+                            &[DialogButtonSpec {
+                                id: ui.id().with(("viewer_page_range_delete_dialog", "confirm")),
+                                label: delete_label,
+                                width: 260.0,
+                                is_default: self.page_range_delete_dialog_choice
+                                    == PageRangeDeleteDialogChoice::Confirm,
+                            }],
+                        );
+                        if buttons[0].clicked {
+                            self.page_range_delete_dialog_choice =
+                                PageRangeDeleteDialogChoice::Confirm;
+                            confirmed = true;
+                        }
+                    });
+                    ui.add_enabled_ui(can_cancel, |ui| {
+                        let buttons = dialog_button_row(
+                            ui,
+                            31.0,
+                            &[DialogButtonSpec {
+                                id: ui.id().with(("viewer_page_range_delete_dialog", "cancel")),
+                                label: cancel_label,
+                                width: 116.0,
+                                is_default: self.page_range_delete_dialog_choice
+                                    == PageRangeDeleteDialogChoice::Cancel,
+                            }],
+                        );
+                        if buttons[0].clicked {
+                            self.page_range_delete_dialog_choice =
+                                PageRangeDeleteDialogChoice::Cancel;
+                            cancelled = true;
+                        }
+                    });
+                });
+                if enter {
+                    match self.page_range_delete_dialog_choice {
+                        PageRangeDeleteDialogChoice::Confirm if can_confirm => confirmed = true,
+                        PageRangeDeleteDialogChoice::Cancel if can_cancel => cancelled = true,
+                        _ => {}
+                    }
+                }
+                if escape && can_cancel {
+                    cancelled = true;
+                }
+                if self.page_range_delete_in_flight {
+                    ui.ctx().request_repaint_after(Duration::from_millis(50));
+                }
+            });
+        if confirmed {
+            self.begin_page_range_rebuild_request();
+        } else if (cancelled || !open) && !self.page_range_delete_in_flight {
+            self.close_page_range_delete_dialog();
         }
     }
 
@@ -1806,7 +2132,9 @@ impl ViewerApp {
 }
 
 fn validate_image_order_snapshot(snapshot: &ImageOrderSnapshot) -> Option<usize> {
-    if snapshot.ordered_images.is_empty() || !snapshot.folder.is_dir() || !snapshot.start_image.is_file()
+    if snapshot.ordered_images.is_empty()
+        || !snapshot.folder.is_dir()
+        || !snapshot.start_image.is_file()
     {
         return None;
     }
@@ -1818,12 +2146,9 @@ fn validate_image_order_snapshot(snapshot: &ImageOrderSnapshot) -> Option<usize>
     }
     let normalized_start_image =
         crate::util::path_eq::normalize_path_for_override(&snapshot.start_image);
-    let start_page = snapshot
-        .ordered_images
-        .iter()
-        .position(|path| {
-            crate::util::path_eq::normalize_path_for_override(path) == normalized_start_image
-        })?;
+    let start_page = snapshot.ordered_images.iter().position(|path| {
+        crate::util::path_eq::normalize_path_for_override(path) == normalized_start_image
+    })?;
     let mut seen = std::collections::HashSet::with_capacity(snapshot.ordered_images.len());
     for path in &snapshot.ordered_images {
         if !path.is_file() {
@@ -1867,7 +2192,13 @@ impl eframe::App for ViewerApp {
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
             self.state.close_boundary_preview();
-            if self.delete_dialog_open {
+            if self.page_range_delete_dialog_open {
+                if !self.page_range_delete_in_flight {
+                    self.close_page_range_delete_dialog();
+                }
+            } else if self.state.delete_range_selection().has_any() {
+                self.state.delete_range_clear();
+            } else if self.delete_dialog_open {
                 self.delete_dialog_open = false;
                 self.delete_dialog_choice = ViewerDeleteDialogChoice::DeleteAndNext;
             } else if self.opened_as_fullscreen {
@@ -1894,6 +2225,7 @@ impl eframe::App for ViewerApp {
         let mut reading_direction_override_changed: Option<Option<ReadingDirection>> = None;
         let mut quality_changed: Option<Option<ViewerQuality>> = None;
         let capabilities = self.mode.ui_capabilities();
+        let allow_page_range_delete = self.allow_page_range_delete();
         let external_tools = self.external_tool_button_models();
         let external_tool_state = self.external_tool_toolbar_state_for_ui();
 
@@ -1916,12 +2248,14 @@ impl eframe::App for ViewerApp {
                         favorite_toggle_pending: self
                             .pending_favorite_toggle_previous_state
                             .is_some(),
-                        interaction_blocked: self.delete_dialog_open,
+                        interaction_blocked: self.delete_dialog_open
+                            || self.page_range_delete_dialog_open,
                         is_fullscreen: self.is_fullscreen,
                         external_tools: &external_tools,
                         external_tool_state: &external_tool_state,
                         global_quality: self.app_settings.viewer_quality,
                         capabilities,
+                        allow_page_range_delete,
                         boundary_preview_thumb_size: egui::vec2(
                             self.app_settings.thumb_w(),
                             self.app_settings.thumb_h(),
@@ -1943,6 +2277,11 @@ impl eframe::App for ViewerApp {
                     }
                     ViewerAction::RequestDelete => {
                         self.begin_delete_dialog();
+                    }
+                    ViewerAction::RequestPageRangeDelete => {
+                        if self.allow_page_range_delete() {
+                            self.begin_page_range_delete_dialog();
+                        }
                     }
                     ViewerAction::ToggleFavorite => {
                         if let Err(e) = self.request_favorite_toggle() {
@@ -2028,6 +2367,7 @@ impl eframe::App for ViewerApp {
             self.settings.set_quality_override(path, v);
         }
         self.show_delete_dialog(ctx);
+        self.show_page_range_delete_dialog(ctx);
         self.capture_viewer_window_state(ctx);
         self.maybe_apply_startup_restore_rect_adjustment(ctx, frame);
     }

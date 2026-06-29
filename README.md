@@ -77,6 +77,9 @@ Animation images do not use some of the quality processing.
 * Copy
 * Delete
 * Open in Explorer
+* In the Library-connected Viewer, you can mark an image page range and rebuild the archive without those pages.
+
+See the [Operation Guide](docs/operation.md) for details.
 
 ### External tools
 

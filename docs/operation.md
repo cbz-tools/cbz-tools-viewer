@@ -43,6 +43,9 @@ Changes are applied immediately.
 
 * Display controls the global quality setting used by the Viewer.
 * Reading controls the default reading direction and whether the Viewer resumes from the last reading position.
+* Open rebuilt archive in a new Viewer is off by default.
+  When off, the current Viewer only moves to the next book.
+  When on, the rebuilt archive also opens in another Viewer window.
 
 ### Performance
 
@@ -150,6 +153,32 @@ You can move across a mixed list of books and image folders in the same order.
 | Delete | Delete the current book |
 
 Deleting an image folder removes the whole folder.
+
+### Page range delete and archive rebuild
+
+This operation rewrites or replaces the archive.
+It is available only for archive books opened from the Library.
+FolderBook, EPUB, and ImageFile are not supported.
+
+You cannot delete all image pages.
+If rebuild fails, the selected range is kept so you can retry.
+
+Actions:
+
+* `M`
+  With no mark, mark Start using the smaller displayed page.
+  With Start only, mark End using the larger displayed page.
+  With Start and End, restart from the smaller displayed page.
+* `Esc`
+  While a range is selected, clear the current mark.
+  Otherwise, keep the existing behavior.
+* `Delete`
+  When Start and End exist, open Delete Pages.
+  Otherwise, delete the current book.
+* Right-click
+  Use the clicked image page as Start or End.
+* Left-bottom help
+  Shows `Delete Range: S=... E=...` while a range is selected.
 
 ### Toolbar
 

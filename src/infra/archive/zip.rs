@@ -4,7 +4,12 @@
 //! - `read` は `&self` なので並列呼出しできる
 //! - ZIP64 に対応する
 //! - Stored / Deflate を扱う
-use std::{path::Path, sync::Arc, time::Instant};
+use std::{
+    io::{Seek, Write},
+    path::Path,
+    sync::Arc,
+    time::Instant,
+};
 
 use anyhow::{bail, Context, Result};
 use bytes::Bytes;
@@ -22,8 +27,10 @@ use super::{
         page_map_format_for_name, ZipPageMapIssueReason, ZipPageMapSlowFailureReason,
         ZipPageMapSlowReason,
     },
-    BookReader,
+    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry, BookReader,
+    CbzRebuildArchiveEntry, CbzRebuildArchiveEntryKind,
 };
+use zip_writer::ZipWriter;
 
 // ── 定数 ─────────────────────────────────────────────────────────────────────
 
@@ -46,6 +53,7 @@ const U32_MAX_AS_64: u64 = 0xFFFF_FFFF;
 enum Compression {
     Stored,
     Deflate,
+    Unsupported(u16),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +67,7 @@ impl From<Compression> for ZipCompressionMethod {
         match value {
             Compression::Stored => Self::Stored,
             Compression::Deflate => Self::Deflate,
+            Compression::Unsupported(_) => Self::Stored,
         }
     }
 }
@@ -220,6 +229,9 @@ impl ZipArchiveCore {
         match entry.compression {
             Compression::Stored => read_page_map_metadata_stored(entry, raw),
             Compression::Deflate => read_page_map_metadata_deflate(entry, raw),
+            Compression::Unsupported(_) => Ok(ZipPageMapReadOutcome::SlowRequired(
+                ZipPageMapSlowReason::UnsupportedLightweightFormat,
+            )),
         }
     }
 }
@@ -254,6 +266,12 @@ impl ZipReader {
     pub(crate) fn page_display_labels(&self) -> Vec<String> {
         self.page_map_image_entry_infos()
             .map(|info| display_name_from_archive_entry(info.name))
+            .collect()
+    }
+
+    pub(crate) fn page_entry_names(&self) -> Vec<String> {
+        self.page_map_image_entry_infos()
+            .map(|info| info.name.to_owned())
             .collect()
     }
 
@@ -305,6 +323,44 @@ impl ZipReader {
             .ok_or(ZipPageMapSlowFailureReason::EntryReadError)?;
         self.core.read_entry_by_index_for_page_map(entry_idx)
     }
+}
+
+pub(crate) fn list_cbz_rebuild_entries(path: &Path) -> Result<Vec<CbzRebuildArchiveEntry>> {
+    let core = ZipArchiveCore::open(path)?;
+    Ok(core
+        .entries()
+        .iter()
+        .map(|entry| CbzRebuildArchiveEntry {
+            name: entry.name.to_string(),
+            kind: if entry.is_dir {
+                CbzRebuildArchiveEntryKind::Directory
+            } else if is_image_name(&entry.name) {
+                CbzRebuildArchiveEntryKind::Image
+            } else {
+                CbzRebuildArchiveEntryKind::NonImage
+            },
+        })
+        .collect())
+}
+
+pub(crate) fn write_cbz_rebuild_keep_entries<W: Write + Seek>(
+    path: &Path,
+    keep_entries: &[CbzRebuildArchiveEntry],
+    writer: &mut ZipWriter<W>,
+) -> Result<()> {
+    let core = ZipArchiveCore::open(path)?;
+    for entry in keep_entries {
+        match entry.kind {
+            CbzRebuildArchiveEntryKind::Directory => {
+                write_cbz_rebuild_directory_entry(writer, &entry.name)?;
+            }
+            CbzRebuildArchiveEntryKind::Image | CbzRebuildArchiveEntryKind::NonImage => {
+                let bytes = core.read_entry_by_name(&entry.name)?;
+                write_cbz_rebuild_file_entry(writer, &entry.name, &bytes)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn display_name_from_archive_entry(name: &str) -> String {
@@ -500,7 +556,11 @@ fn build_image_entries(entries: &[ZipEntry]) -> Vec<usize> {
     let mut image_entries: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| !e.is_dir && is_image_name(&e.name))
+        .filter(|(_, e)| {
+            !e.is_dir
+                && !matches!(e.compression, Compression::Unsupported(_))
+                && is_image_name(&e.name)
+        })
         .map(|(i, _)| i)
         .collect();
     image_entries.sort_by(|&a, &b| natural_sort::compare(&entries[a].name, &entries[b].name));
@@ -621,11 +681,8 @@ fn parse_central_dir(_file_data: &[u8], cd: &[u8]) -> Result<Vec<ZipEntry>> {
             0 => Compression::Stored,
             8 => Compression::Deflate,
             m => {
-                // 未サポート圧縮はスキップ（ビューアとして非画像扱い）
-                tracing::debug!("unsupported compression method {m} for '{name}', skipping");
-                let entry_len = CDIR_FIXED + name_len + extra_len + comment_len;
-                pos += entry_len;
-                continue;
+                tracing::debug!("unsupported compression method {m} for '{name}'");
+                Compression::Unsupported(m)
             }
         };
 
@@ -711,6 +768,9 @@ fn decompress(raw: &[u8], entry: &ZipEntry) -> Result<Bytes> {
                 .read_to_end(&mut out)
                 .with_context(|| format!("deflate '{}': expected {} bytes", entry.name, cap))?;
             Ok(out.into())
+        }
+        Compression::Unsupported(method) => {
+            bail!("unsupported compression method {} for '{}'", method, entry.name)
         }
     }
 }

@@ -55,7 +55,11 @@ pub enum TextKey {
     QualityByBookNote,
     QualityAnimationNote,
     DefaultReadingDirection,
+    Startup,
+    PageDeleteSection,
     ResumeFromLastReadingPosition,
+    OpenRebuiltCbzInNewViewer,
+    OpenRebuiltCbzInNewViewerNote,
     Reading,
     Read,
     DefaultLabel,
@@ -202,6 +206,17 @@ pub enum TextKey {
     FavoriteUpdateFailed,
     DeleteAndNextBook,
     DeleteFailed,
+    DeleteRangeStartHere,
+    DeleteRangeEndHere,
+    DeleteRangeClear,
+    DeleteRangeRebuild,
+    DeleteRangeConfirmTitle,
+    DeleteRangeConfirmQuestion,
+    DeleteRangeReplaceNote,
+    DeleteRangeNextBookNote,
+    DeleteRangeProcessing,
+    DeleteRangeFailed,
+    DeleteRangeAllPagesNotAllowed,
 }
 
 pub const fn ui_language_choice_key(language: UiLanguage) -> TextKey {
@@ -332,6 +347,25 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::FavoriteUpdateFailed => "Could not update favorites.",
         TextKey::DeleteAndNextBook => "Delete and next book",
         TextKey::DeleteFailed => "Could not delete the book.",
+        TextKey::DeleteRangeStartHere => "Start delete range here",
+        TextKey::DeleteRangeEndHere => "Set delete range end here",
+        TextKey::DeleteRangeClear => "Clear delete range",
+        TextKey::DeleteRangeRebuild => "Delete selected range and rebuild archive",
+        TextKey::DeleteRangeConfirmTitle => "Delete pages",
+        TextKey::DeleteRangeConfirmQuestion => {
+            "Rebuild the archive without the selected image pages?"
+        }
+        TextKey::DeleteRangeReplaceNote => {
+            "The original book will be replaced or removed. This operation cannot be undone."
+        }
+        TextKey::DeleteRangeNextBookNote => {
+            "The current Viewer will move to the next book after success."
+        }
+        TextKey::DeleteRangeProcessing => "Rebuilding archive...",
+        TextKey::DeleteRangeFailed => "Failed to rebuild archive.",
+        TextKey::DeleteRangeAllPagesNotAllowed => {
+            "Cannot delete all image pages. At least one image page must remain."
+        }
         TextKey::General => "General",
         TextKey::Display => "Display",
         TextKey::Performance => "Performance",
@@ -402,7 +436,13 @@ fn english_text(key: TextKey) -> &'static str {
             "Some image processing does not apply to animated images."
         }
         TextKey::DefaultReadingDirection => "Default reading direction",
+        TextKey::Startup => "Startup",
+        TextKey::PageDeleteSection => "Page delete",
         TextKey::ResumeFromLastReadingPosition => "Resume from last reading position",
+        TextKey::OpenRebuiltCbzInNewViewer => "Open rebuilt archive in a new Viewer",
+        TextKey::OpenRebuiltCbzInNewViewerNote => {
+            "After removing pages, open the rebuilt archive in another Viewer window."
+        }
         TextKey::Reading => "Reading",
         TextKey::Read => "Read",
         TextKey::DefaultLabel => "Default",
@@ -570,6 +610,25 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::FavoriteUpdateFailed => Some("お気に入りを更新できませんでした"),
         TextKey::DeleteAndNextBook => Some("削除して次の本"),
         TextKey::DeleteFailed => Some("削除できませんでした"),
+        TextKey::DeleteRangeStartHere => Some("ここから削除範囲を開始"),
+        TextKey::DeleteRangeEndHere => Some("ここまでを削除範囲にする"),
+        TextKey::DeleteRangeClear => Some("削除範囲をクリア"),
+        TextKey::DeleteRangeRebuild => Some("選択範囲を削除してアーカイブを再構築"),
+        TextKey::DeleteRangeConfirmTitle => Some("ページ削除の確認"),
+        TextKey::DeleteRangeConfirmQuestion => {
+            Some("選択範囲の画像ページを除外してアーカイブを再構築しますか？")
+        }
+        TextKey::DeleteRangeReplaceNote => {
+            Some("元の本は置換または削除されます。この操作は元に戻せません。")
+        }
+        TextKey::DeleteRangeNextBookNote => {
+            Some("現在のViewerは成功後に次の本へ移動します。")
+        }
+        TextKey::DeleteRangeProcessing => Some("アーカイブを再構築中..."),
+        TextKey::DeleteRangeFailed => Some("アーカイブの再構築に失敗しました。"),
+        TextKey::DeleteRangeAllPagesNotAllowed => {
+            Some("すべての画像ページは削除できません。少なくとも1ページは残す必要があります。")
+        }
         TextKey::General => Some("一般"),
         TextKey::Display => Some("表示"),
         TextKey::Performance => Some("パフォーマンス"),
@@ -638,7 +697,13 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         }
         TextKey::QualityAnimationNote => Some("アニメーション画像には一部の画質処理が適用されません。"),
         TextKey::DefaultReadingDirection => Some("既定のページ開き"),
+        TextKey::Startup => Some("起動時"),
+        TextKey::PageDeleteSection => Some("ページ削除"),
         TextKey::ResumeFromLastReadingPosition => Some("前回の読書位置から再開"),
+        TextKey::OpenRebuiltCbzInNewViewer => Some("再構築後のアーカイブを別Viewerで開く"),
+        TextKey::OpenRebuiltCbzInNewViewerNote => {
+            Some("ページ削除後、再構築後のアーカイブを別Viewerウィンドウで開きます。")
+        }
         TextKey::Reading => Some("読書中"),
         TextKey::Read => Some("既読"),
         TextKey::DefaultLabel => Some("標準"),

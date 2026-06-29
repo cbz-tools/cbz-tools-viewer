@@ -1193,7 +1193,10 @@ fn snapshot_visible_pages(snapshot: &ViewerWorkerManagerSnapshot) -> (Option<u32
     (snapshot.visible_page_first, snapshot.visible_page_second)
 }
 
-fn is_leading_cover_blank_spread(snapshot: &ViewerWorkerManagerSnapshot, physical_page: u32) -> bool {
+fn is_leading_cover_blank_spread(
+    snapshot: &ViewerWorkerManagerSnapshot,
+    physical_page: u32,
+) -> bool {
     snapshot.cover_blank
         && physical_page == 0
         && !matches!(snapshot.spread_setting, SpreadMode::Single)

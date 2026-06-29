@@ -1198,13 +1198,11 @@ fn draw_failed_page_label(pixels: &mut [u8], width: u32, height: u32) {
     let base_text_w = glyph_count
         .saturating_mul(FAILED_PAGE_FONT_W + 1)
         .saturating_sub(1);
-    let scale_from_height = (
-        height / (FAILED_PAGE_FONT_H.saturating_mul(FAILED_PAGE_TEXT_HEIGHT_SCALE_DIVISOR)).max(1)
-    )
-        .max(FAILED_PAGE_TEXT_MIN_SCALE);
+    let scale_from_height = (height
+        / (FAILED_PAGE_FONT_H.saturating_mul(FAILED_PAGE_TEXT_HEIGHT_SCALE_DIVISOR)).max(1))
+    .max(FAILED_PAGE_TEXT_MIN_SCALE);
     let width_divisor = FAILED_PAGE_TEXT_WIDTH_SCALE_DIVISOR.max(1);
-    let scale_from_width =
-        (width / base_text_w.saturating_mul(width_divisor).max(1)).max(1);
+    let scale_from_width = (width / base_text_w.saturating_mul(width_divisor).max(1)).max(1);
     let scale = scale_from_height.min(scale_from_width).max(1);
     let text_w = base_text_w.saturating_mul(scale);
     let text_h = FAILED_PAGE_FONT_H.saturating_mul(scale);
@@ -1212,7 +1210,8 @@ fn draw_failed_page_label(pixels: &mut [u8], width: u32, height: u32) {
     let start_y = height.saturating_sub(text_h) / 2;
 
     for (idx, ch) in FAILED_PAGE_TEXT.bytes().enumerate() {
-        let x = start_x + (idx as u32).saturating_mul((FAILED_PAGE_FONT_W + 1).saturating_mul(scale));
+        let x =
+            start_x + (idx as u32).saturating_mul((FAILED_PAGE_FONT_W + 1).saturating_mul(scale));
         draw_failed_page_glyph(pixels, width, height, x, start_y, scale, ch);
     }
 }

@@ -8,8 +8,8 @@ use std::{
 use anyhow::{Context, Result};
 use bytes::Bytes;
 
-use crate::util::{archive_path::is_supported_image_path, natural_sort};
 use crate::util::path_eq::normalize_path_for_override;
+use crate::util::{archive_path::is_supported_image_path, natural_sort};
 
 use super::BookReader;
 
@@ -18,8 +18,9 @@ struct FolderOrderOverride {
     ordered_images: Vec<PathBuf>,
 }
 
-static VIEWER_FOLDER_ORDER_OVERRIDES: OnceLock<RwLock<std::collections::HashMap<String, FolderOrderOverride>>> =
-    OnceLock::new();
+static VIEWER_FOLDER_ORDER_OVERRIDES: OnceLock<
+    RwLock<std::collections::HashMap<String, FolderOrderOverride>>,
+> = OnceLock::new();
 
 pub struct FolderImageReader {
     image_paths: Vec<PathBuf>,
@@ -78,14 +79,17 @@ impl FolderImageReader {
         Self::open(path)
     }
 
-    pub fn install_viewer_order_override(folder: &Path, ordered_images: Vec<PathBuf>) -> Result<()> {
+    pub fn install_viewer_order_override(
+        folder: &Path,
+        ordered_images: Vec<PathBuf>,
+    ) -> Result<()> {
         validate_ordered_images(folder, &ordered_images)?;
         let normalized = normalize_path_for_override(folder);
         let override_map = VIEWER_FOLDER_ORDER_OVERRIDES.get_or_init(Default::default);
-        override_map.write().unwrap().insert(
-            normalized,
-            FolderOrderOverride { ordered_images },
-        );
+        override_map
+            .write()
+            .unwrap()
+            .insert(normalized, FolderOrderOverride { ordered_images });
         Ok(())
     }
 
@@ -122,6 +126,13 @@ impl FolderImageReader {
                     .map(str::to_owned)
                     .unwrap_or_else(|| path.display().to_string())
             })
+            .collect()
+    }
+
+    pub(crate) fn page_entry_names(&self) -> Vec<String> {
+        self.image_paths
+            .iter()
+            .map(|path| path.display().to_string())
             .collect()
     }
 

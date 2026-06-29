@@ -128,6 +128,7 @@ pub(super) fn is_reserved_viewer_key(key: Key) -> bool {
             | Key::Delete
             | Key::Space
             | Key::Escape
+            | Key::M
             | Key::A
             | Key::D
             | Key::W

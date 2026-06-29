@@ -10,7 +10,7 @@ use crate::domain::app_settings::{ReadingDirection, ViewerQuality};
 use crate::domain::archive::{BookId, BookMeta};
 use crate::domain::archive_settings::{clamp_slideshow_interval_secs, SpreadMode};
 use crate::domain::performance::{mib_to_bytes, split_mib_evenly, PerformanceSettingsResolved};
-use crate::infra::archive::viewer_page_display_labels;
+use crate::infra::archive::{viewer_page_display_labels, viewer_page_entry_names};
 use crate::infra::image::decode as img;
 use crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode;
 use crate::infra::worker::viewer_loader::{
@@ -751,6 +751,7 @@ impl RgbaPageCache {
 pub(super) struct ViewerPersistentState {
     pub entry: BookMeta,
     pub(super) page_display_labels: Vec<String>,
+    pub(super) page_entry_names: Vec<String>,
     pub(super) page_map_mode: ViewerPageMapMode,
     pub(super) auto_spread_plan: Option<Arc<AutoSpreadPlan>>,
     pub page_count: u32,
@@ -851,6 +852,11 @@ impl ReadingSessionState {
     }
 
     fn complete_notification(&mut self) {
+        self.notification_in_flight = false;
+        self.notification_sent = true;
+    }
+
+    fn discard_notification(&mut self) {
         self.notification_in_flight = false;
         self.notification_sent = true;
     }
@@ -956,6 +962,7 @@ pub(super) struct ViewerRequestState {
 pub(super) struct ViewerUiRuntimeState {
     pub loading: bool,
     pub error: Option<String>,
+    pub(super) delete_range_context_menu_target_page: Option<u32>,
     /// Sequential 中の pending プレースホルダ表示遅延。チラつき抑制用。
     pub(super) pending_placeholder_after: Option<Instant>,
     /// マウスホイールの積算量。高分解能入力の端数を吸収する。
@@ -1010,6 +1017,32 @@ pub(super) struct PendingVisualState {
     pub(super) progress_hover: bool,
     pub(super) progress_drag: bool,
     pub(super) drag_fraction_milli: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ViewerDeleteRangeSelection {
+    pub start: Option<u32>,
+    pub end: Option<u32>,
+}
+
+impl ViewerDeleteRangeSelection {
+    pub fn normalized(self) -> Self {
+        match (self.start, self.end) {
+            (Some(a), Some(b)) => Self {
+                start: Some(a.min(b)),
+                end: Some(a.max(b)),
+            },
+            _ => self,
+        }
+    }
+
+    pub fn has_any(self) -> bool {
+        self.start.is_some() || self.end.is_some()
+    }
+
+    pub fn is_complete(self) -> bool {
+        self.start.is_some() && self.end.is_some()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1088,6 +1121,7 @@ pub struct ViewerState {
     pub(super) ui_runtime: ViewerUiRuntimeState,
     pub(super) boundary_preview: BoundaryPreviewState,
     pub(super) full_equivalent_size_hint: Option<FullEquivalentSizeHint>,
+    delete_range_selection: ViewerDeleteRangeSelection,
     reading_session: ReadingSessionState,
 }
 
@@ -1121,6 +1155,102 @@ impl ViewerState {
         &self.persistent.entry
     }
 
+    pub fn current_requested_page(&self) -> u32 {
+        self.persistent.requested_page
+    }
+
+    pub fn current_displayed_page_min_max(&self) -> Option<(u32, u32)> {
+        let (left, right) = self.current_view_pages(self.persistent.displayed_page);
+        match (left, right) {
+            (Some(left), Some(right)) => Some((left.min(right), left.max(right))),
+            (Some(page), None) | (None, Some(page)) => Some((page, page)),
+            (None, None) => None,
+        }
+    }
+
+    pub fn delete_range_selection(&self) -> ViewerDeleteRangeSelection {
+        self.delete_range_selection.normalized()
+    }
+
+    pub fn set_delete_range_context_menu_target_page(&mut self, page: Option<u32>) {
+        self.ui_runtime.delete_range_context_menu_target_page = page;
+    }
+
+    pub fn delete_range_context_menu_target_page(&self) -> Option<u32> {
+        self.ui_runtime.delete_range_context_menu_target_page
+    }
+
+    pub fn delete_range_clear(&mut self) {
+        self.delete_range_selection = ViewerDeleteRangeSelection::default();
+    }
+
+    pub fn delete_range_set_start(&mut self, page: u32) {
+        self.delete_range_selection = ViewerDeleteRangeSelection {
+            start: Some(page),
+            end: None,
+        };
+    }
+
+    pub fn delete_range_set_end(&mut self, page: u32) {
+        let start = self.delete_range_selection.start.unwrap_or(page);
+        self.delete_range_selection = ViewerDeleteRangeSelection {
+            start: Some(start.min(page)),
+            end: Some(start.max(page)),
+        };
+    }
+
+    pub fn delete_range_restart_from_current(&mut self, page: u32) {
+        self.delete_range_set_start(page);
+    }
+
+    pub fn delete_range_mark_current(&mut self, page: u32) {
+        match self.delete_range_selection() {
+            ViewerDeleteRangeSelection {
+                start: None,
+                end: None,
+            } => self.delete_range_set_start(page),
+            ViewerDeleteRangeSelection {
+                start: Some(_),
+                end: None,
+            } => self.delete_range_set_end(page),
+            ViewerDeleteRangeSelection {
+                start: Some(_),
+                end: Some(_),
+            } => self.delete_range_restart_from_current(page),
+            ViewerDeleteRangeSelection {
+                start: None,
+                end: Some(_),
+            } => self.delete_range_set_start(page),
+        }
+    }
+
+    pub fn delete_range_entry_names(&self) -> Option<Vec<String>> {
+        let selection = self.delete_range_selection();
+        let (Some(start), Some(end)) = (selection.start, selection.end) else {
+            return None;
+        };
+        let mut out = Vec::new();
+        for page in start..=end {
+            let entry_name = self.persistent.page_entry_names.get(page as usize)?;
+            out.push(entry_name.clone());
+        }
+        Some(out)
+    }
+
+    pub fn delete_range_would_remove_all_pages(&self) -> bool {
+        let selection = self.delete_range_selection();
+        let (Some(start), Some(end)) = (selection.start, selection.end) else {
+            return false;
+        };
+        let selected_page_count = end.saturating_sub(start).saturating_add(1) as usize;
+        let total_image_pages = if self.persistent.page_entry_names.is_empty() {
+            self.persistent.page_count as usize
+        } else {
+            self.persistent.page_entry_names.len()
+        };
+        total_image_pages > 0 && selected_page_count >= total_image_pages
+    }
+
     pub(super) fn current_toolbar_title(&self, blank_label: &str) -> Option<String> {
         let current_page = self.persistent.displayed_page;
         let (page_left, page_right) = self.current_view_pages(current_page);
@@ -1142,20 +1272,14 @@ impl ViewerState {
             ReadingDirection::RightToLeft => (page_right, page_left),
             ReadingDirection::LeftToRight => (page_left, page_right),
         };
-        let left_is_blank_slot =
-            leading_cover_blank_spread && matches!(reading_direction, ReadingDirection::RightToLeft);
+        let left_is_blank_slot = leading_cover_blank_spread
+            && matches!(reading_direction, ReadingDirection::RightToLeft);
         let right_is_blank_slot = leading_cover_blank_spread
             && matches!(reading_direction, ReadingDirection::LeftToRight);
-        let left_label = self.toolbar_spread_slot_label(
-            screen_left,
-            left_is_blank_slot,
-            blank_label,
-        )?;
-        let right_label = self.toolbar_spread_slot_label(
-            screen_right,
-            right_is_blank_slot,
-            blank_label,
-        )?;
+        let left_label =
+            self.toolbar_spread_slot_label(screen_left, left_is_blank_slot, blank_label)?;
+        let right_label =
+            self.toolbar_spread_slot_label(screen_right, right_is_blank_slot, blank_label)?;
         Some(format!("{left_label} / {right_label}"))
     }
 
@@ -1172,6 +1296,10 @@ impl ViewerState {
 
     pub(crate) fn complete_reading_session_notification(&mut self) {
         self.reading_session.complete_notification();
+    }
+
+    pub(crate) fn discard_reading_session_notification(&mut self) {
+        self.reading_session.discard_notification();
     }
 
     #[cfg(debug_assertions)]
@@ -1288,13 +1416,16 @@ impl ViewerState {
         );
         let worker_manager = ViewerWorkerManagerHandle::spawn(Arc::clone(&loader), repaint_ctx);
         let entry_id_for_snapshot = entry.id.clone();
-        let page_display_labels = viewer_page_display_labels(entry.path.as_ref()).unwrap_or_default();
+        let page_display_labels =
+            viewer_page_display_labels(entry.path.as_ref()).unwrap_or_default();
+        let page_entry_names = viewer_page_entry_names(entry.path.as_ref()).unwrap_or_default();
         let spread_setting_for_snapshot = spread_setting.clone();
 
         Ok(Self {
             persistent: ViewerPersistentState {
                 entry,
                 page_display_labels,
+                page_entry_names,
                 page_map_mode,
                 auto_spread_plan,
                 page_count: 0,
@@ -1370,6 +1501,7 @@ impl ViewerState {
             ui_runtime: ViewerUiRuntimeState {
                 loading: true,
                 error: None,
+                delete_range_context_menu_target_page: None,
                 pending_placeholder_after: None,
                 scroll_accum: 0.0,
                 wheel_cooldown_until: None,
@@ -1399,6 +1531,7 @@ impl ViewerState {
             },
             boundary_preview: BoundaryPreviewState::Hidden,
             full_equivalent_size_hint,
+            delete_range_selection: ViewerDeleteRangeSelection::default(),
             reading_session: ReadingSessionState::new(),
         })
     }
@@ -3182,7 +3315,9 @@ impl ViewerState {
             if !seen_pages.insert(candidate_page) {
                 return;
             }
-            plan.push(WorkingSetPage { page: candidate_page });
+            plan.push(WorkingSetPage {
+                page: candidate_page,
+            });
         };
 
         push_candidate(anchor_page.navigation_page());
@@ -4706,8 +4841,7 @@ impl ViewerState {
         self.clear_interactive_in_flight();
         if matches!(self.persistent.spread_setting, SpreadMode::Auto) {
             let (_visible_left, page_right) = self.display_pages_for_physical_page(view_idx);
-            let spread =
-                page_right.is_some() || self.is_leading_cover_blank_spread(view_idx);
+            let spread = page_right.is_some() || self.is_leading_cover_blank_spread(view_idx);
             self.persistent.spread_mode = spread;
         } else {
             self.persistent.spread_mode =
@@ -5435,10 +5569,12 @@ impl ViewerState {
         }
     }
 
-
     fn page_display_label(&self, page: Option<u32>) -> Option<String> {
         let page = page?;
-        self.persistent.page_display_labels.get(page as usize).cloned()
+        self.persistent
+            .page_display_labels
+            .get(page as usize)
+            .cloned()
     }
 
     fn toolbar_spread_slot_label(

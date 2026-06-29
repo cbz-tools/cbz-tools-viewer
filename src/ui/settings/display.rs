@@ -105,8 +105,18 @@ pub(super) fn show_viewer_tab(ui: &mut egui::Ui, language: UiLanguage, settings:
         subtle_text(ui, tr(language, TextKey::DefaultReadingDirectionNote));
     });
 
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(tr(language, TextKey::Startup)).strong());
     ui.checkbox(
         &mut settings.resume_from_last_reading_position,
         tr(language, TextKey::ResumeFromLastReadingPosition),
     );
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(tr(language, TextKey::PageDeleteSection)).strong());
+    ui.checkbox(
+        &mut settings.open_rebuilt_cbz_in_new_viewer,
+        tr(language, TextKey::OpenRebuiltCbzInNewViewer),
+    );
+    subtle_text(ui, tr(language, TextKey::OpenRebuiltCbzInNewViewerNote));
 }

@@ -71,11 +71,26 @@ pub(super) enum ViewerSyncEvent {
         current_path: PathBuf,
         response_tx: mpsc::Sender<FavoriteToggleResult>,
     },
+    RebuildSelectedImagesAsCbzAndNext {
+        request_id: u64,
+        book_id: BookId,
+        current_path: PathBuf,
+        delete_entries: Vec<String>,
+        next_path: Option<PathBuf>,
+        response_tx: mpsc::Sender<RebuildSelectedImagesAsCbzAndNextResult>,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub(super) enum FavoriteToggleResult {
     Success(ViewerFavoriteState),
+    Error(IpcErrorCode),
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum RebuildSelectedImagesAsCbzAndNextResult {
+    NavigateTo(PathBuf),
+    NoMoreBooks,
     Error(IpcErrorCode),
 }
 
@@ -169,52 +184,139 @@ impl App {
                             Ok(msg) => msg,
                             Err(_) => break,
                         };
-                        if let ViewerToLibrary::FavoriteToggle {
-                            request_id,
-                            current_path: request_path,
-                        } = msg
-                        {
-                            let (response_tx, response_rx) =
-                                mpsc::channel::<FavoriteToggleResult>();
-                            pending_viewer_sync_events.lock().push(
-                                ViewerSyncEvent::FavoriteToggle {
-                                    request_id,
-                                    current_path: request_path,
-                                    response_tx,
-                                },
-                            );
-                            repaint_ctx.request_repaint();
-                            let response = match response_rx.recv() {
-                                Ok(FavoriteToggleResult::Success(favorite_state)) => {
-                                    LibraryToViewer::FavoriteToggleResponse {
+                        let processed = match msg {
+                            ViewerToLibrary::FavoriteToggle {
+                                request_id,
+                                current_path: request_path,
+                            } => {
+                                let (response_tx, response_rx) =
+                                    mpsc::channel::<FavoriteToggleResult>();
+                                pending_viewer_sync_events.lock().push(
+                                    ViewerSyncEvent::FavoriteToggle {
                                         request_id,
-                                        favorite_state,
+                                        current_path: request_path,
+                                        response_tx,
+                                    },
+                                );
+                                repaint_ctx.request_repaint();
+                                let response = match response_rx.recv() {
+                                    Ok(FavoriteToggleResult::Success(favorite_state)) => {
+                                        LibraryToViewer::FavoriteToggleResponse {
+                                            request_id,
+                                            favorite_state,
+                                        }
                                     }
-                                }
-                                Ok(FavoriteToggleResult::Error(code)) => LibraryToViewer::Error {
-                                    request_id,
-                                    code,
-                                    retryable: false,
-                                },
-                                Err(_) => LibraryToViewer::Error {
-                                    request_id,
-                                    code: IpcErrorCode::Unknown,
-                                    retryable: false,
-                                },
-                            };
-                            if conn.send_to_viewer(&response).is_err() {
-                                break;
+                                    Ok(FavoriteToggleResult::Error(code)) => {
+                                        LibraryToViewer::Error {
+                                            request_id,
+                                            code,
+                                            retryable: false,
+                                        }
+                                    }
+                                    Err(_) => LibraryToViewer::Error {
+                                        request_id,
+                                        code: IpcErrorCode::Unknown,
+                                        retryable: false,
+                                    },
+                                };
+                                Some((response, None))
                             }
-                            continue;
-                        }
-                        let Some((response, sync_event)) = process_viewer_ipc_request(
-                            msg,
-                            &mut current_path,
-                            image_order_snapshot.as_ref(),
-                            &library_book_order,
-                            favorite_store.as_ref(),
-                            resume_from_last_reading_position,
-                        ) else {
+                            ViewerToLibrary::RebuildSelectedImagesAsCbzAndNext {
+                                request_id,
+                                book_id,
+                                delete_entries,
+                            } => {
+                                if !is_requested_book_current(current_path.as_path(), &book_id) {
+                                    Some(ipc_error_response(request_id, IpcErrorCode::FileNotFound))
+                                } else {
+                                    let books = resolved_navigation_books_for_delete(
+                                        current_path.as_path(),
+                                        &library_book_order,
+                                    );
+                                    let next_path = book_nav::move_target_path(
+                                        &books,
+                                        current_path.as_path(),
+                                        NavDirection::Next,
+                                        false,
+                                    )
+                                    .or_else(|| {
+                                        book_nav::move_target_path(
+                                            &books,
+                                            current_path.as_path(),
+                                            NavDirection::Previous,
+                                            false,
+                                        )
+                                    });
+                                    let (response_tx, response_rx) =
+                                        mpsc::channel::<RebuildSelectedImagesAsCbzAndNextResult>();
+                                    pending_viewer_sync_events.lock().push(
+                                        ViewerSyncEvent::RebuildSelectedImagesAsCbzAndNext {
+                                            request_id,
+                                            book_id,
+                                            current_path: current_path.clone(),
+                                            delete_entries,
+                                            next_path: next_path.clone(),
+                                            response_tx,
+                                        },
+                                    );
+                                    repaint_ctx.request_repaint();
+                                    let response = match response_rx.recv() {
+                                        Ok(
+                                            RebuildSelectedImagesAsCbzAndNextResult::NavigateTo(
+                                                path,
+                                            ),
+                                        ) => {
+                                            current_path.clone_from(&path);
+                                            let book_state = viewer_book_state_for_path(
+                                                favorite_store.as_ref(),
+                                                path.as_path(),
+                                                resume_from_last_reading_position,
+                                                None,
+                                            );
+                                            (
+                                                LibraryToViewer::NavigateTo {
+                                                    request_id,
+                                                    path: path.clone(),
+                                                    book_state,
+                                                },
+                                                Some(ViewerSyncEvent::Navigated { path }),
+                                            )
+                                        }
+                                        Ok(RebuildSelectedImagesAsCbzAndNextResult::NoMoreBooks) => {
+                                            (LibraryToViewer::NoMoreBooks { request_id }, None)
+                                        }
+                                        Ok(RebuildSelectedImagesAsCbzAndNextResult::Error(code)) => {
+                                            (
+                                                LibraryToViewer::Error {
+                                                    request_id,
+                                                    code,
+                                                    retryable: false,
+                                                },
+                                                None,
+                                            )
+                                        }
+                                        Err(_) => (
+                                            LibraryToViewer::Error {
+                                                request_id,
+                                                code: IpcErrorCode::Unknown,
+                                                retryable: false,
+                                            },
+                                            None,
+                                        ),
+                                    };
+                                    Some(response)
+                                }
+                            }
+                            other => process_viewer_ipc_request(
+                                other,
+                                &mut current_path,
+                                image_order_snapshot.as_ref(),
+                                &library_book_order,
+                                favorite_store.as_ref(),
+                                resume_from_last_reading_position,
+                            ),
+                        };
+                        let Some((response, sync_event)) = processed else {
                             break;
                         };
                         if let Some(event) = sync_event {
@@ -282,9 +384,7 @@ impl App {
         let Some(entry) = self.library.entries.get(idx).cloned() else {
             return;
         };
-        let Some((spec, history_path)) =
-            self.viewer_launch_spec_for_entry(&entry)
-        else {
+        let Some((spec, history_path)) = self.viewer_launch_spec_for_entry(&entry) else {
             return;
         };
         self.push_open_history(history_path);
@@ -303,9 +403,7 @@ impl App {
             self.show_toast("Path not found");
             return Err(());
         }
-        let Some((spec, history_path)) =
-            self.viewer_launch_spec_for_path(path.as_path())
-        else {
+        let Some((spec, history_path)) = self.viewer_launch_spec_for_path(path.as_path()) else {
             self.show_toast("Unsupported file type");
             return Err(());
         };
@@ -357,12 +455,14 @@ impl App {
                         path: meta.path.parent()?.to_path_buf(),
                         with_pipe: true,
                         start_page: self
-                            .viewer_start_page_for_path(meta.path.as_ref(), Some(start_page as usize))
+                            .viewer_start_page_for_path(
+                                meta.path.as_ref(),
+                                Some(start_page as usize),
+                            )
                             .map(|page| page as u32),
                         ipc_current_path: None,
-                        image_order_snapshot: self.image_order_snapshot_from_entries(
-                            meta.path.as_ref(),
-                        ),
+                        image_order_snapshot: self
+                            .image_order_snapshot_from_entries(meta.path.as_ref()),
                         snapshot_only_ipc: true,
                     },
                     meta.path.as_ref().to_path_buf(),
@@ -372,10 +472,7 @@ impl App {
         }
     }
 
-    fn viewer_launch_spec_for_path(
-        &self,
-        path: &Path,
-    ) -> Option<(ViewerLaunchSpec, PathBuf)> {
+    fn viewer_launch_spec_for_path(&self, path: &Path) -> Option<(ViewerLaunchSpec, PathBuf)> {
         if path.is_dir() {
             return Some((
                 ViewerLaunchSpec {
@@ -612,6 +709,14 @@ fn process_viewer_ipc_request(
                 }
                 None => deleted_response(request_id, deleted_path, None, None),
             }
+        }
+        ViewerToLibrary::RebuildSelectedImagesAsCbzAndNext {
+            request_id,
+            book_id,
+            delete_entries,
+        } => {
+            let _ = (book_id, delete_entries);
+            return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
         }
         ViewerToLibrary::RequestAdjacentBooks { request_id, kind } => {
             let resolved =

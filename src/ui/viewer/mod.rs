@@ -18,8 +18,8 @@ use crate::ui::i18n::{tr, TextKey};
 use self::draw::{
     draw_boundary_preview_card, draw_follow_placeholder_panel, draw_fullscreen_overlay,
     draw_key_feedback, draw_pages, draw_status_message, draw_viewer_overlays,
-    fullscreen_overlay_near, BoundaryPreviewCardAction, FullscreenOverlayContext,
-    ViewerOverlayContext,
+    fullscreen_overlay_near, compute_spread_rects, BoundaryPreviewCardAction,
+    FullscreenOverlayContext, ViewerOverlayContext,
 };
 use self::progress::render_page_progress_bar;
 use self::state::{now_ms, OverlayRenderResult};
@@ -38,14 +38,15 @@ mod toolbar;
 mod worker_manager;
 mod working_set;
 pub use self::state::{
-    BoundaryPreviewDirection, FullEquivalentSizeHint, FullEquivalentSizeHintSource, ViewerState,
-    ViewerStateInit,
+    BoundaryPreviewDirection, FullEquivalentSizeHint, FullEquivalentSizeHintSource,
+    ViewerDeleteRangeSelection, ViewerState, ViewerStateInit,
 };
 
 pub enum ViewerAction {
     None,
     ToggleFullscreen,
     RequestDelete,
+    RequestPageRangeDelete,
     ToggleFavorite,
     PreviousBook,
     NextBook,
@@ -54,6 +55,81 @@ pub enum ViewerAction {
         target_path: std::path::PathBuf,
         trigger: ExternalToolTrigger,
     },
+}
+
+fn delete_range_context_menu_target_page(
+    state: &ViewerState,
+    area: &Rect,
+    effective_spread: bool,
+    pointer_pos: Option<egui::Pos2>,
+) -> Option<u32> {
+    let pointer_pos = pointer_pos?;
+    if !effective_spread {
+        return state.current_displayed_page_min_max().map(|(page, _)| page);
+    }
+
+    let current_page = state.persistent.displayed_page;
+    let visible_pages = state.current_view_pages(current_page);
+    let reading_direction = state.effective_reading_direction();
+    let leading_cover_blank_spread = state.is_leading_cover_blank_spread(current_page);
+    let (left_size, right_size) = match reading_direction {
+        ReadingDirection::RightToLeft => (
+            state
+                .display_assets
+                .content_right
+                .as_ref()
+                .map(|c| c.texture().size_vec2()),
+            state
+                .display_assets
+                .content_left
+                .as_ref()
+                .map(|c| c.texture().size_vec2()),
+        ),
+        ReadingDirection::LeftToRight => (
+            state
+                .display_assets
+                .content_left
+                .as_ref()
+                .map(|c| c.texture().size_vec2()),
+            state
+                .display_assets
+                .content_right
+                .as_ref()
+                .map(|c| c.texture().size_vec2()),
+        ),
+    };
+    let (left_rect, right_rect) = if leading_cover_blank_spread {
+        let cover_size = state
+            .display_assets
+            .content_left
+            .as_ref()
+            .map(|c| c.texture().size_vec2())
+            .or(left_size)
+            .or(right_size);
+        match cover_size {
+            Some(size) => compute_spread_rects(area, Some(size), Some(size)),
+            None => (None, None),
+        }
+    } else {
+        compute_spread_rects(area, left_size, right_size)
+    };
+
+    let left_page = match reading_direction {
+        ReadingDirection::LeftToRight => visible_pages.0.or(visible_pages.1),
+        ReadingDirection::RightToLeft => visible_pages.1.or(visible_pages.0),
+    };
+    let right_page = match reading_direction {
+        ReadingDirection::LeftToRight => visible_pages.1.or(visible_pages.0),
+        ReadingDirection::RightToLeft => visible_pages.0.or(visible_pages.1),
+    };
+
+    if left_rect.is_some_and(|rect| rect.contains(pointer_pos)) {
+        return left_page;
+    }
+    if right_rect.is_some_and(|rect| rect.contains(pointer_pos)) {
+        return right_page;
+    }
+    None
 }
 
 #[derive(Clone, Copy)]
@@ -290,6 +366,28 @@ fn apply_boundary_preview_after_page_move(
     }
 }
 
+fn viewer_can_use_page_range_delete(
+    capabilities: ViewerUiCapabilities,
+    allow_page_range_delete: bool,
+) -> bool {
+    capabilities.allow_delete && allow_page_range_delete
+}
+
+fn format_delete_range_pages(state: &ViewerState) -> Option<String> {
+    let selection = state.delete_range_selection();
+    match (selection.start, selection.end) {
+        (Some(start), Some(end)) => {
+            if start == end {
+                Some(format!("p.{}", start + 1))
+            } else {
+                Some(format!("p.{}-{}", start + 1, end + 1))
+            }
+        }
+        (Some(start), None) => Some(format!("p.{}", start + 1)),
+        _ => None,
+    }
+}
+
 // ── アニメーションコンテンツ ──────────────────────────────────────────────────
 
 /// 1 ページ分の表示コンテンツ。
@@ -331,6 +429,7 @@ pub struct ViewerShowContext<'a> {
     pub external_tool_state: &'a ExternalToolToolbarState,
     pub global_quality: ViewerQuality,
     pub capabilities: ViewerUiCapabilities,
+    pub allow_page_range_delete: bool,
     pub boundary_preview_thumb_size: egui::Vec2,
     pub boundary_preview_hud_font_size: f32,
 }
@@ -627,6 +726,7 @@ pub fn show(
         external_tool_state,
         global_quality,
         capabilities,
+        allow_page_range_delete,
         boundary_preview_thumb_size,
         boundary_preview_hud_font_size,
     } = viewer;
@@ -638,6 +738,8 @@ pub fn show(
     let mut action = ViewerAction::None;
     let mut toolbar_events = ToolbarEvents::default();
     let ctx = ui.ctx().clone();
+    let page_range_delete_enabled =
+        viewer_can_use_page_range_delete(capabilities, allow_page_range_delete);
     state.update_full_equivalent_size_hint_from_viewer(ctx.input(|i| i.viewport().monitor_size));
     let now = Instant::now();
     let since_last_show_ms = state
@@ -996,6 +1098,8 @@ pub fn show(
 
         let (
             delete,
+            mark_delete_range,
+            clear_delete_range,
             next,
             prev,
             first,
@@ -1019,6 +1123,8 @@ pub fn show(
             };
             (
                 i.consume_key(egui::Modifiers::NONE, Key::Delete),
+                i.consume_key(egui::Modifiers::NONE, Key::M),
+                i.consume_key(egui::Modifiers::NONE, Key::Escape),
                 next_input || i.consume_key(egui::Modifiers::NONE, Key::PageDown),
                 prev_input || i.consume_key(egui::Modifiers::NONE, Key::PageUp),
                 i.consume_key(egui::Modifiers::NONE, Key::Home),
@@ -1034,12 +1140,30 @@ pub fn show(
         if toggle_slideshow {
             state.toggle_slideshow(now);
         }
-        if toggle_fullscreen_key {
+        let delete_range_selection = state.delete_range_selection();
+        let delete_range_has_any = delete_range_selection.has_any();
+        let delete_range_complete = delete_range_selection.is_complete();
+        if page_range_delete_enabled && mark_delete_range {
+            state.stop_slideshow();
+            let mark_page = match state.current_displayed_page_min_max() {
+                Some((min_page, _)) if !delete_range_has_any || delete_range_complete => min_page,
+                Some((_, max_page)) => max_page,
+                None => state.current_requested_page(),
+            };
+            state.delete_range_mark_current(mark_page);
+        } else if page_range_delete_enabled && clear_delete_range && delete_range_has_any {
+            state.stop_slideshow();
+            state.delete_range_clear();
+        } else if toggle_fullscreen_key {
             state.stop_slideshow();
             action = ViewerAction::ToggleFullscreen;
         } else if capabilities.allow_delete && delete {
             state.stop_slideshow();
-            action = ViewerAction::RequestDelete;
+            action = if page_range_delete_enabled && delete_range_complete {
+                ViewerAction::RequestPageRangeDelete
+            } else {
+                ViewerAction::RequestDelete
+            };
         } else {
             if next {
                 state.stop_slideshow();
@@ -1129,7 +1253,8 @@ pub fn show(
         state.ui_runtime.wheel_cooldown_until = None;
     }
 
-    let (used_rect, _) = ui.allocate_exact_size(vec2(content.width(), img_h), egui::Sense::hover());
+    let (used_rect, used_resp) =
+        ui.allocate_exact_size(vec2(content.width(), img_h), egui::Sense::click());
 
     let has_visible_content =
         state.display_assets.content_left.is_some() || state.display_assets.content_right.is_some();
@@ -1199,7 +1324,7 @@ pub fn show(
             tr(language, TextKey::ViewerLoading),
             theme::TEXT_SUBTLE,
         );
-    } else {
+    } else if has_visible_content {
         let show_operation_help = !is_fullscreen && !interaction_blocked;
         if show_operation_help {
             draw_viewer_overlays(
@@ -1221,6 +1346,15 @@ pub fn show(
             display_h,
             false,
         );
+        if used_resp.secondary_clicked() {
+            let context_menu_target_page = delete_range_context_menu_target_page(
+                state,
+                &used_rect,
+                draw_layout.effective_spread,
+                used_resp.interact_pointer_pos(),
+            );
+            state.set_delete_range_context_menu_target_page(context_menu_target_page);
+        }
         state.log_view_layout("current-draw", &draw_layout);
         let anim_remaining = draw_pages(ui, state, &used_rect, draw_layout.effective_spread);
         if anim_remaining < Duration::from_secs(60) {
@@ -1231,6 +1365,59 @@ pub fn show(
         draw_key_feedback(ui, &used_rect, text);
         ctx.request_repaint_after(Duration::from_millis(60));
     }
+    used_resp.context_menu(|ui| {
+        if !page_range_delete_enabled {
+            return;
+        }
+        let current_page = state
+            .delete_range_context_menu_target_page()
+            .unwrap_or_else(|| state.current_requested_page());
+        let selection = state.delete_range_selection();
+        match (selection.start, selection.end) {
+            (None, None) => {
+                if ui
+                    .button(tr(language, TextKey::DeleteRangeStartHere))
+                    .clicked()
+                {
+                    state.delete_range_set_start(current_page);
+                    ui.close();
+                }
+            }
+            (Some(_), None) => {
+                if ui
+                    .button(tr(language, TextKey::DeleteRangeEndHere))
+                    .clicked()
+                {
+                    state.delete_range_set_end(current_page);
+                    ui.close();
+                }
+                if ui.button(tr(language, TextKey::DeleteRangeClear)).clicked() {
+                    state.delete_range_clear();
+                    ui.close();
+                }
+            }
+            (Some(_), Some(_)) => {
+                let range_delete_label = if let Some(pages_label) = format_delete_range_pages(state)
+                {
+                    format!(
+                        "{} ({pages_label})",
+                        tr(language, TextKey::DeleteRangeRebuild)
+                    )
+                } else {
+                    tr(language, TextKey::DeleteRangeRebuild).to_owned()
+                };
+                if ui.button(range_delete_label).clicked() {
+                    action = ViewerAction::RequestPageRangeDelete;
+                    ui.close();
+                }
+                if ui.button(tr(language, TextKey::DeleteRangeClear)).clicked() {
+                    state.delete_range_clear();
+                    ui.close();
+                }
+            }
+            (None, Some(_)) => {}
+        }
+    });
     let mut overlay_interacting = false;
     let fullscreen_overlay_near =
         is_fullscreen && !in_fullscreen_transition && fullscreen_overlay_near(&ctx, &used_rect);

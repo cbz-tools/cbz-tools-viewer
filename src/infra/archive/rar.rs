@@ -2,13 +2,18 @@
 // --features rar でビルドした場合のみ有効
 use anyhow::Result;
 use bytes::Bytes;
+use std::io::{Seek, Write};
 use std::path::Path;
 #[cfg(feature = "rar")]
 use std::{path::PathBuf, time::Instant};
 
-use super::BookReader;
+use super::{
+    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry, BookReader,
+    CbzRebuildArchiveEntry, CbzRebuildArchiveEntryKind,
+};
 #[cfg(feature = "rar")]
 use crate::util::{archive_path::is_supported_image_name, natural_sort};
+use zip_writer::ZipWriter;
 
 // ── RarReader ─────────────────────────────────────────────────────────────────
 
@@ -50,6 +55,59 @@ impl RarReader {
         {
             Vec::new()
         }
+    }
+
+    pub(crate) fn page_entry_names(&self) -> Vec<String> {
+        #[cfg(feature = "rar")]
+        {
+            self.image_names.clone()
+        }
+
+        #[cfg(not(feature = "rar"))]
+        {
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) fn list_cbz_rebuild_entries(path: &Path) -> Result<Vec<CbzRebuildArchiveEntry>> {
+    #[cfg(feature = "rar")]
+    {
+        list_cbz_rebuild_entries_impl(path)
+    }
+
+    #[cfg(not(feature = "rar"))]
+    {
+        let _ = path;
+        anyhow::bail!("RAR サポートは無効です（--features rar でビルドしてください）")
+    }
+}
+
+pub(crate) fn write_cbz_rebuild_keep_entries<W: Write + Seek>(
+    path: &Path,
+    keep_entries: &[CbzRebuildArchiveEntry],
+    writer: &mut ZipWriter<W>,
+) -> Result<()> {
+    #[cfg(feature = "rar")]
+    {
+        for entry in keep_entries {
+            match entry.kind {
+                CbzRebuildArchiveEntryKind::Directory => {
+                    write_cbz_rebuild_directory_entry(writer, &entry.name)?;
+                }
+                CbzRebuildArchiveEntryKind::Image | CbzRebuildArchiveEntryKind::NonImage => {
+                    let bytes = read_entry_impl(path, &entry.name)?;
+                    write_cbz_rebuild_file_entry(writer, &entry.name, &bytes)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "rar"))]
+    {
+        let _ = (path, keep_entries, writer);
+        anyhow::bail!("RAR サポートは無効です（--features rar でビルドしてください）")
     }
 }
 
@@ -154,6 +212,37 @@ fn open_impl(path: &Path) -> Result<RarReader> {
         path: path.to_path_buf(),
         image_names: names,
     })
+}
+
+#[cfg(feature = "rar")]
+fn list_cbz_rebuild_entries_impl(path: &Path) -> Result<Vec<CbzRebuildArchiveEntry>> {
+    use unrar::Archive;
+
+    ensure_unrar_dll_for_current_target()?;
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-UTF8 パス: {}", path.display()))?;
+
+    let archive = Archive::new(path_str)
+        .open_for_listing()
+        .map_err(|e| anyhow::anyhow!("{}", format_rar_open_error(path, e.code)))?;
+
+    let mut entries = Vec::new();
+    for entry in archive.into_iter() {
+        let entry =
+            entry.map_err(|err| anyhow::anyhow!("{}", format_rar_listing_error(path, err.code)))?;
+        let name = entry.filename.to_string_lossy().into_owned();
+        let kind = if entry.is_directory() {
+            CbzRebuildArchiveEntryKind::Directory
+        } else if is_image_name(&name) {
+            CbzRebuildArchiveEntryKind::Image
+        } else {
+            CbzRebuildArchiveEntryKind::NonImage
+        };
+        entries.push(CbzRebuildArchiveEntry { name, kind });
+    }
+    Ok(entries)
 }
 
 #[cfg(feature = "rar")]

@@ -632,6 +632,7 @@ pub const LIBRARY_HUD_FONT_LEVEL_MAX: u16 = 9;
 /// 標準は 5 段目。現在の HUD フォントサイズを標準とする。
 pub const LIBRARY_HUD_FONT_LEVEL_DEFAULT: u16 = 5;
 pub const FOLDER_BOOK_OPEN_AS_VIEWER_DEFAULT: bool = true;
+pub const OPEN_REBUILT_CBZ_IN_NEW_VIEWER_DEFAULT: bool = false;
 
 // ── AppSettings ───────────────────────────────────────────────────────────────
 
@@ -706,6 +707,9 @@ pub struct AppSettings {
     /// 最後に読んだ位置から再開する
     #[serde(default = "default_resume_from_last_reading_position")]
     pub resume_from_last_reading_position: bool,
+    /// 再構築後に新しい CBZ を別 Viewer で開く
+    #[serde(default = "default_open_rebuilt_cbz_in_new_viewer")]
+    pub open_rebuilt_cbz_in_new_viewer: bool,
     /// 外部ツール設定（最大3件）
     #[serde(default = "default_external_tools")]
     pub external_tools: Vec<ExternalTool>,
@@ -783,6 +787,10 @@ fn default_resume_from_last_reading_position() -> bool {
     false
 }
 #[allow(dead_code)]
+fn default_open_rebuilt_cbz_in_new_viewer() -> bool {
+    OPEN_REBUILT_CBZ_IN_NEW_VIEWER_DEFAULT
+}
+#[allow(dead_code)]
 fn default_external_tools() -> Vec<ExternalTool> {
     Vec::new()
 }
@@ -842,6 +850,7 @@ impl Default for AppSettings {
             library_hud_font_level: LIBRARY_HUD_FONT_LEVEL_DEFAULT,
             folder_book_open_as_viewer: FOLDER_BOOK_OPEN_AS_VIEWER_DEFAULT,
             resume_from_last_reading_position: false,
+            open_rebuilt_cbz_in_new_viewer: OPEN_REBUILT_CBZ_IN_NEW_VIEWER_DEFAULT,
             external_tools: default_external_tools(),
         }
     }
@@ -1154,6 +1163,12 @@ fn load_app_settings_from_value(
         .and_then(serde_json::Value::as_bool)
     {
         settings.resume_from_last_reading_position = value;
+    }
+    if let Some(value) = obj
+        .get("open_rebuilt_cbz_in_new_viewer")
+        .and_then(serde_json::Value::as_bool)
+    {
+        settings.open_rebuilt_cbz_in_new_viewer = value;
     }
     if let Some(value) = obj.get("external_tools").and_then(parse_external_tools) {
         settings.external_tools = value;

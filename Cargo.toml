@@ -55,6 +55,7 @@ parking_lot       = "0.12"
 # --- ZIP / RAR (§11, §7) ---
 memmap2           = "0.9"
 flate2            = "1"   # 本番: --features zlib-ng で 2x 高速（cmake+cl.exe 必要）
+zip_writer        = { package = "zip", version = "2.4.2", default-features = false }
 unrar             = { version = "0.5", optional = true }   # feature "rar" で有効化
 unrar_sys         = { version = "0.5", optional = true }   # feature "rar" で有効化
 
