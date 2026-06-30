@@ -889,11 +889,18 @@ impl LibraryState {
         self.recompute_group_counts();
     }
 
-    pub(crate) fn register_rebuilt_cbz_entry(&mut self, old_path: &Path, rebuilt_entry: LibraryEntry) {
+    pub(crate) fn register_rebuilt_cbz_entry(
+        &mut self,
+        old_path: &Path,
+        rebuilt_entry: LibraryEntry,
+    ) {
         let rebuilt_path = Self::entry_path_ref(&rebuilt_entry).to_path_buf();
         self.raw_entries.retain(|entry| {
             !paths_equivalent_for_selection(Self::entry_path_ref(entry), old_path)
-                && !paths_equivalent_for_selection(Self::entry_path_ref(entry), rebuilt_path.as_path())
+                && !paths_equivalent_for_selection(
+                    Self::entry_path_ref(entry),
+                    rebuilt_path.as_path(),
+                )
         });
         self.raw_entries.push(rebuilt_entry.clone());
         self.prefill_kind_groups();
@@ -1865,9 +1872,15 @@ impl LibraryState {
                 let Ok(fs_meta) = std::fs::metadata(meta.path.as_ref()) else {
                     return;
                 };
-                (Arc::clone(&meta.path), fs_meta.len(), fs_meta.modified().ok())
+                (
+                    Arc::clone(&meta.path),
+                    fs_meta.len(),
+                    fs_meta.modified().ok(),
+                )
             }
-            LibraryEntry::ImageFile(meta) => (Arc::clone(&meta.path), meta.size, Some(meta.modified)),
+            LibraryEntry::ImageFile(meta) => {
+                (Arc::clone(&meta.path), meta.size, Some(meta.modified))
+            }
             LibraryEntry::Folder(_) => return,
         };
         let target_width = crate::domain::app_settings::AppSettings::storage_width();

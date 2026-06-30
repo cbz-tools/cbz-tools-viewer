@@ -770,7 +770,11 @@ fn decompress(raw: &[u8], entry: &ZipEntry) -> Result<Bytes> {
             Ok(out.into())
         }
         Compression::Unsupported(method) => {
-            bail!("unsupported compression method {} for '{}'", method, entry.name)
+            bail!(
+                "unsupported compression method {} for '{}'",
+                method,
+                entry.name
+            )
         }
     }
 }

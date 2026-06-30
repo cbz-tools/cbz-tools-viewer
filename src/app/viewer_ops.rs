@@ -282,19 +282,19 @@ impl App {
                                                 Some(ViewerSyncEvent::Navigated { path }),
                                             )
                                         }
-                                        Ok(RebuildSelectedImagesAsCbzAndNextResult::NoMoreBooks) => {
-                                            (LibraryToViewer::NoMoreBooks { request_id }, None)
-                                        }
-                                        Ok(RebuildSelectedImagesAsCbzAndNextResult::Error(code)) => {
-                                            (
-                                                LibraryToViewer::Error {
-                                                    request_id,
-                                                    code,
-                                                    retryable: false,
-                                                },
-                                                None,
-                                            )
-                                        }
+                                        Ok(
+                                            RebuildSelectedImagesAsCbzAndNextResult::NoMoreBooks,
+                                        ) => (LibraryToViewer::NoMoreBooks { request_id }, None),
+                                        Ok(RebuildSelectedImagesAsCbzAndNextResult::Error(
+                                            code,
+                                        )) => (
+                                            LibraryToViewer::Error {
+                                                request_id,
+                                                code,
+                                                retryable: false,
+                                            },
+                                            None,
+                                        ),
                                         Err(_) => (
                                             LibraryToViewer::Error {
                                                 request_id,

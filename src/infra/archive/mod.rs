@@ -173,12 +173,16 @@ pub fn write_cbz_rebuild_tmp_archive(
 
         let mut writer = ZipWriter::new(file);
         match book_source_kind(input_path) {
-            BookSourceKind::Zip => {
-                zip::write_cbz_rebuild_keep_entries(input_path, &selection.keep_entries, &mut writer)?
-            }
-            BookSourceKind::Rar => {
-                rar::write_cbz_rebuild_keep_entries(input_path, &selection.keep_entries, &mut writer)?
-            }
+            BookSourceKind::Zip => zip::write_cbz_rebuild_keep_entries(
+                input_path,
+                &selection.keep_entries,
+                &mut writer,
+            )?,
+            BookSourceKind::Rar => rar::write_cbz_rebuild_keep_entries(
+                input_path,
+                &selection.keep_entries,
+                &mut writer,
+            )?,
             BookSourceKind::Epub => anyhow::bail!("cbz rebuild does not support epub"),
             BookSourceKind::Folder => anyhow::bail!("cbz rebuild does not support folders"),
             BookSourceKind::Unsupported => {

@@ -5,7 +5,12 @@ use crate::domain::app_settings::UiLanguage;
 use crate::ui::i18n::format_page_count_label;
 
 use super::theme;
+use super::ViewerDeleteRangeSelection;
 use super::ViewerState;
+
+const DELETE_RANGE_OVERLAY_MIN_WIDTH: f32 = 5.0;
+const DELETE_RANGE_OVERLAY_FILL_ALPHA: u8 = 84;
+const DELETE_RANGE_OVERLAY_EDGE_ALPHA: u8 = 236;
 
 pub(super) fn render_page_progress_bar(
     ui: &mut egui::Ui,
@@ -114,6 +119,13 @@ pub(super) fn render_page_progress_bar(
             if filled_w > 0.0 {
                 painter.rect_filled(filled_rect, 3.0, theme::PROGRESS_FILL);
             }
+            draw_delete_range_overlay(
+                painter,
+                track_rect,
+                state.delete_range_selection(),
+                reading_direction,
+                max,
+            );
             let thumb_w = 6.0;
             let thumb_h = (track_rect.height() + 4.0).clamp(8.0, 12.0);
             let thumb_rect = egui::Rect::from_center_size(
@@ -181,6 +193,96 @@ pub(super) fn render_page_progress_bar(
         }
     });
     new_view
+}
+
+fn draw_delete_range_overlay(
+    painter: &egui::Painter,
+    track_rect: egui::Rect,
+    selection: ViewerDeleteRangeSelection,
+    reading_direction: ReadingDirection,
+    max_page: u32,
+) {
+    let Some(start) = selection.start else {
+        return;
+    };
+    let edge_color = egui::Color32::from_rgba_unmultiplied(
+        theme::DELETE_RED.r(),
+        theme::DELETE_RED.g(),
+        theme::DELETE_RED.b(),
+        DELETE_RANGE_OVERLAY_EDGE_ALPHA,
+    );
+    match selection.end {
+        None => {
+            let x = progress_x_for_physical_page(track_rect, start, max_page, reading_direction);
+            painter.line_segment(
+                [
+                    egui::pos2(x, track_rect.min.y),
+                    egui::pos2(x, track_rect.max.y),
+                ],
+                egui::Stroke::new(1.5, edge_color),
+            );
+        }
+        Some(end) => {
+            let start_visual = visual_page_from_physical(start, max_page, reading_direction);
+            let end_visual = visual_page_from_physical(end, max_page, reading_direction);
+            let left_x =
+                progress_x_for_visual_page(track_rect, start_visual.min(end_visual), max_page);
+            let right_x =
+                progress_x_for_visual_page(track_rect, start_visual.max(end_visual), max_page);
+            let mut left = left_x.min(right_x);
+            let mut right = left_x.max(right_x);
+            if right - left < DELETE_RANGE_OVERLAY_MIN_WIDTH {
+                let center = (left + right) * 0.5;
+                left = (center - DELETE_RANGE_OVERLAY_MIN_WIDTH * 0.5).clamp(
+                    track_rect.min.x,
+                    (track_rect.max.x - DELETE_RANGE_OVERLAY_MIN_WIDTH).max(track_rect.min.x),
+                );
+                right = (left + DELETE_RANGE_OVERLAY_MIN_WIDTH).min(track_rect.max.x);
+            }
+            let overlay_rect = egui::Rect::from_min_max(
+                egui::pos2(left, track_rect.min.y + 0.5),
+                egui::pos2(right, track_rect.max.y - 0.5),
+            );
+            let fill_color = egui::Color32::from_rgba_unmultiplied(
+                theme::DELETE_RED.r(),
+                theme::DELETE_RED.g(),
+                theme::DELETE_RED.b(),
+                DELETE_RANGE_OVERLAY_FILL_ALPHA,
+            );
+            painter.rect_filled(overlay_rect, 2.0, fill_color);
+            painter.line_segment(
+                [
+                    egui::pos2(overlay_rect.min.x, track_rect.min.y),
+                    egui::pos2(overlay_rect.min.x, track_rect.max.y),
+                ],
+                egui::Stroke::new(1.5, edge_color),
+            );
+            painter.line_segment(
+                [
+                    egui::pos2(overlay_rect.max.x, track_rect.min.y),
+                    egui::pos2(overlay_rect.max.x, track_rect.max.y),
+                ],
+                egui::Stroke::new(1.5, edge_color),
+            );
+        }
+    }
+}
+
+fn progress_x_for_visual_page(track_rect: egui::Rect, visual_page: u32, max_page: u32) -> f32 {
+    if max_page == 0 {
+        return track_rect.left();
+    }
+    track_rect.left() + track_rect.width() * (visual_page as f32 / max_page as f32)
+}
+
+fn progress_x_for_physical_page(
+    track_rect: egui::Rect,
+    physical_page: u32,
+    max_page: u32,
+    reading_direction: ReadingDirection,
+) -> f32 {
+    let visual_page = visual_page_from_physical(physical_page, max_page, reading_direction);
+    progress_x_for_visual_page(track_rect, visual_page, max_page)
 }
 
 fn build_page_label(language: UiLanguage, state: &ViewerState) -> String {

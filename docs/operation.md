@@ -178,7 +178,7 @@ Actions:
 * Right-click
   Use the clicked image page as Start or End.
 * Left-bottom help
-  Shows `Delete Range: S=... E=...` while a range is selected.
+  Shows `Range: S=...` / `Range: S=... E=...` while a range is selected.
 
 ### Toolbar
 

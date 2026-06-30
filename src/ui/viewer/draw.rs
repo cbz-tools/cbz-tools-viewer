@@ -12,6 +12,7 @@ use super::ExternalToolButtonModel;
 use super::ExternalToolToolbarState;
 use super::OverlayRenderResult;
 use super::ToolbarEvents;
+use super::ViewerDeleteRangeSelection;
 use super::ViewerState;
 use super::ViewerUiCapabilities;
 use crate::domain::app_settings::ReadingDirection;
@@ -31,6 +32,7 @@ const FULLSCREEN_OVERLAY_BOTTOM_H: f32 = 34.0;
 const FULLSCREEN_OVERLAY_TOP_MARGIN: f32 = 15.0;
 const FULLSCREEN_OVERLAY_TOP_HOVER_PADDING: f32 = 16.0;
 const KEY_FEEDBACK_FONT_SIZE: f32 = 22.0;
+const HELP_KEY_COL_WIDTH: usize = 10;
 #[cfg(debug_assertions)]
 const DEBUG_OVERLAY_MARGIN_X: f32 = 8.0;
 #[cfg(debug_assertions)]
@@ -188,53 +190,74 @@ fn operation_help_text(
     capabilities: ViewerUiCapabilities,
     state: &ViewerState,
 ) -> String {
-    let mut text = String::with_capacity(128);
+    let mut lines = Vec::with_capacity(10);
     let delete_range = state.delete_range_selection();
-    text.push_str("←→ / Wheel : Page\n");
-    if capabilities.allow_book_navigation {
-        text.push_str("↑↓         : Book\n");
+    lines.push(help_row("←→ / Wheel", "Page"));
+    if let Some(boundary_preview_help) = boundary_preview_enter_help(capabilities, state) {
+        lines.push(boundary_preview_help);
     }
-    text.push_str("Home / End : First / Last\n");
-    text.push_str("Space      : Slideshow\n");
-    text.push_str("F11        : Fullscreen\n");
+    if capabilities.allow_book_navigation {
+        lines.push(help_row("↑↓", "Book"));
+    }
+    lines.push(help_row("Home / End", "First / Last"));
+    lines.push(help_row("Space", "Slideshow"));
+    lines.push(help_row("F11", "Fullscreen"));
     if capabilities.allow_delete {
         match (delete_range.start, delete_range.end) {
             (None, None) => {
-                text.push_str("M          : Mark start\n");
-                text.push_str("Del        : Delete book\n");
+                lines.push(help_row("M", "Mark Start"));
+                lines.push(help_row("Del", "Del Book"));
             }
             (Some(_), None) => {
-                text.push_str("M          : Mark end\n");
-                text.push_str("Del        : Delete book\n");
+                lines.push(help_row("M", "Mark End"));
+                lines.push(help_row("Del", "Del Book"));
             }
             (Some(_), Some(_)) => {
-                text.push_str("M          : Restart range\n");
-                text.push_str("Del        : Delete range\n");
+                lines.push(help_row("M", "Restart Range"));
+                lines.push(help_row("Del", "Del Range"));
             }
             (None, Some(_)) => {}
         }
     }
     if delete_range.has_any() {
-        text.push_str("Esc        : Clear range");
+        lines.push(help_row("Esc", "Clear Range"));
     } else if capabilities.allow_book_navigation {
-        text.push_str("Esc        : Library");
+        lines.push(help_row("Esc", "Library"));
     } else {
-        text.push_str("Esc        : Close");
+        lines.push(help_row("Esc", "Close"));
     }
-    match (delete_range.start, delete_range.end) {
-        (Some(start), None) => {
-            text.push_str(&format!("\nDelete Range: S={}", start + 1));
-        }
-        (Some(start), Some(end)) => {
-            text.push_str(&format!(
-                "\nDelete Range: S={} E={}",
-                start + 1,
-                end + 1
-            ));
-        }
-        _ => {}
+    if let Some(range_text) = delete_range_text(delete_range) {
+        lines.push(help_row("Range", &range_text));
     }
-    text
+    lines.join("\n")
+}
+
+fn boundary_preview_enter_help(
+    capabilities: ViewerUiCapabilities,
+    state: &ViewerState,
+) -> Option<String> {
+    if !state.boundary_preview_visible(capabilities.allow_book_navigation, false) {
+        return None;
+    }
+    let view = state.boundary_preview_ready_view()?;
+    let text = match view.direction {
+        super::BoundaryPreviewDirection::Previous => help_row("Enter", "Prev Book"),
+        super::BoundaryPreviewDirection::Next => help_row("Enter", "Next Book"),
+    };
+    Some(text)
+}
+
+fn help_row(key: &str, action: &str) -> String {
+    format!("{key:<HELP_KEY_COL_WIDTH$}: {action}")
+}
+
+fn delete_range_text(selection: ViewerDeleteRangeSelection) -> Option<String> {
+    match (selection.start, selection.end) {
+        (Some(start), Some(end)) => Some(format!("S={} E={}", start + 1, end + 1)),
+        (Some(start), None) => Some(format!("S={}", start + 1)),
+        (None, None) => None,
+        (None, Some(_)) => None,
+    }
 }
 
 fn draw_operation_help_overlay(

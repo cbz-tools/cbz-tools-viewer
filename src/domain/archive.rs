@@ -9,7 +9,8 @@ use blake3::Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::infra::archive::{
-    collect_cbz_rebuild_archive_selection, write_cbz_rebuild_tmp_archive, CbzRebuildArchiveSelection,
+    collect_cbz_rebuild_archive_selection, write_cbz_rebuild_tmp_archive,
+    CbzRebuildArchiveSelection,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -214,7 +215,10 @@ impl std::fmt::Display for CbzRebuildPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnsupportedLibraryEntryKind => {
-                write!(f, "cbz rebuild only supports zip/cbz/rar/cbr library archives")
+                write!(
+                    f,
+                    "cbz rebuild only supports zip/cbz/rar/cbr library archives"
+                )
             }
             Self::EpubNotSupported => write!(f, "cbz rebuild does not support epub"),
             Self::EmptyDeleteEntries => write!(f, "delete_entries must not be empty"),
@@ -222,13 +226,21 @@ impl std::fmt::Display for CbzRebuildPlanError {
                 write!(f, "cbz rebuild would leave no image entries")
             }
             Self::OutputPathAlreadyExists(path) => {
-                write!(f, "cbz rebuild output path already exists: {}", path.display())
+                write!(
+                    f,
+                    "cbz rebuild output path already exists: {}",
+                    path.display()
+                )
             }
             Self::TmpPathAlreadyExists(path) => {
                 write!(f, "cbz rebuild tmp path already exists: {}", path.display())
             }
             Self::BackupPathAlreadyExists(path) => {
-                write!(f, "cbz rebuild backup path already exists: {}", path.display())
+                write!(
+                    f,
+                    "cbz rebuild backup path already exists: {}",
+                    path.display()
+                )
             }
         }
     }
@@ -240,16 +252,32 @@ impl std::fmt::Display for CbzRebuildFinalizeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::OldArchiveMissing(path) => {
-                write!(f, "cbz rebuild finalize failed before rename: old archive missing: {}", path.display())
+                write!(
+                    f,
+                    "cbz rebuild finalize failed before rename: old archive missing: {}",
+                    path.display()
+                )
             }
             Self::TmpArchiveMissing(path) => {
-                write!(f, "cbz rebuild finalize failed before rename: tmp archive missing: {}", path.display())
+                write!(
+                    f,
+                    "cbz rebuild finalize failed before rename: tmp archive missing: {}",
+                    path.display()
+                )
             }
             Self::BackupPathAlreadyExists(path) => {
-                write!(f, "cbz rebuild finalize failed before rename: backup path already exists: {}", path.display())
+                write!(
+                    f,
+                    "cbz rebuild finalize failed before rename: backup path already exists: {}",
+                    path.display()
+                )
             }
             Self::OutputPathAlreadyExists(path) => {
-                write!(f, "cbz rebuild finalize failed before rename: output path already exists: {}", path.display())
+                write!(
+                    f,
+                    "cbz rebuild finalize failed before rename: output path already exists: {}",
+                    path.display()
+                )
             }
             Self::RenameOldToBackup {
                 old_path,
@@ -378,8 +406,7 @@ pub fn prepare_cbz_rebuild_tmp_for_library_entry(
     entry: &LibraryEntry,
     options: CbzRebuildPlanOptions,
 ) -> anyhow::Result<CbzRebuildPreparedTmp> {
-    let plan = plan_cbz_rebuild_for_library_entry(entry, options)
-        .map_err(anyhow::Error::from)?;
+    let plan = plan_cbz_rebuild_for_library_entry(entry, options).map_err(anyhow::Error::from)?;
     let selection = collect_cbz_rebuild_archive_selection(&plan.input_path, &plan.delete_entries)?;
     write_cbz_rebuild_tmp_archive(&plan.input_path, &plan.tmp_path, &selection)?;
     Ok(CbzRebuildPreparedTmp { plan, selection })
@@ -400,8 +427,8 @@ pub fn rebuild_cbz_for_library_entry(
     options: CbzRebuildPlanOptions,
 ) -> anyhow::Result<CbzRebuildCompleted> {
     let prepared = prepare_cbz_rebuild_tmp_for_library_entry(entry, options)?;
-    let completed = finalize_cbz_rebuild_for_library_entry(prepared)
-        .map_err(anyhow::Error::from)?;
+    let completed =
+        finalize_cbz_rebuild_for_library_entry(prepared).map_err(anyhow::Error::from)?;
     Ok(completed)
 }
 

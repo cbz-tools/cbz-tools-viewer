@@ -178,7 +178,7 @@ FolderBook、EPUB、ImageFile は対象外です。
 * 右クリック
   クリックした画像ページを Start / End に使います。
 * 左下ヘルプ
-  範囲選択中は `Delete Range: S=... E=...` を表示します。
+  範囲選択中は `Range: S=...` / `Range: S=... E=...` を表示します。
 
 ### ツールバー
 

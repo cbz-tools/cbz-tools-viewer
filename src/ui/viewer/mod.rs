@@ -16,9 +16,9 @@ use crate::infra::ipc::ViewerFavoriteState;
 use crate::ui::i18n::{tr, TextKey};
 
 use self::draw::{
-    draw_boundary_preview_card, draw_follow_placeholder_panel, draw_fullscreen_overlay,
-    draw_key_feedback, draw_pages, draw_status_message, draw_viewer_overlays,
-    fullscreen_overlay_near, compute_spread_rects, BoundaryPreviewCardAction,
+    compute_spread_rects, draw_boundary_preview_card, draw_follow_placeholder_panel,
+    draw_fullscreen_overlay, draw_key_feedback, draw_pages, draw_status_message,
+    draw_viewer_overlays, fullscreen_overlay_near, BoundaryPreviewCardAction,
     FullscreenOverlayContext, ViewerOverlayContext,
 };
 use self::progress::render_page_progress_bar;
@@ -951,6 +951,8 @@ pub fn show(
 
     // ── キーボード / ホイール ─────────────────────────────────────────────────
     // スクロール入力は smooth_scroll_delta を正規ルートにする。
+    let boundary_preview_visible =
+        state.boundary_preview_visible(capabilities.allow_book_navigation, is_fullscreen);
     if !in_viewport_transition && !interaction_blocked {
         let shortcut_input_blocked = ctx.egui_wants_keyboard_input() || ctx.any_popup_open();
         let boundary_preview_enabled =
@@ -1106,6 +1108,7 @@ pub fn show(
             last,
             previous_book,
             next_book,
+            boundary_preview_enter,
             toggle_slideshow,
             toggle_fullscreen_key,
         ) = ctx.input_mut(|i| {
@@ -1133,6 +1136,11 @@ pub fn show(
                     || i.consume_key(egui::Modifiers::NONE, Key::W),
                 i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
                     || i.consume_key(egui::Modifiers::NONE, Key::S),
+                if boundary_preview_visible {
+                    i.consume_key(egui::Modifiers::NONE, Key::Enter)
+                } else {
+                    false
+                },
                 i.consume_key(egui::Modifiers::NONE, Key::Space),
                 i.consume_key(egui::Modifiers::NONE, Key::F11),
             )
@@ -1246,6 +1254,21 @@ pub fn show(
             if capabilities.allow_book_navigation && next_book {
                 state.stop_slideshow();
                 action = ViewerAction::NextBook;
+            }
+            if capabilities.allow_book_navigation && boundary_preview_enter {
+                state.stop_slideshow();
+                match state
+                    .boundary_preview_ready_view()
+                    .map(|view| view.direction)
+                {
+                    Some(BoundaryPreviewDirection::Previous) => {
+                        action = ViewerAction::PreviousBook;
+                    }
+                    Some(BoundaryPreviewDirection::Next) => {
+                        action = ViewerAction::NextBook;
+                    }
+                    None => {}
+                }
             }
         }
     } else {
@@ -1500,8 +1523,6 @@ pub fn show(
         }
     }
 
-    let boundary_preview_visible =
-        state.boundary_preview_visible(capabilities.allow_book_navigation, is_fullscreen);
     if boundary_preview_visible {
         if let Some(card_action) = draw_boundary_preview_card(
             ui,

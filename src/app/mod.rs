@@ -987,11 +987,15 @@ impl App {
                                             .push(sync_result.rebuilt_path);
                                     }
                                     match next_path {
-                                    Some(path) => {
-                                        RebuildSelectedImagesAsCbzAndNextResult::NavigateTo(path)
+                                        Some(path) => {
+                                            RebuildSelectedImagesAsCbzAndNextResult::NavigateTo(
+                                                path,
+                                            )
+                                        }
+                                        None => {
+                                            RebuildSelectedImagesAsCbzAndNextResult::NoMoreBooks
+                                        }
                                     }
-                                    None => RebuildSelectedImagesAsCbzAndNextResult::NoMoreBooks,
-                                }
                                 }
                                 Err(error) => {
                                     tracing::warn!(
@@ -1102,10 +1106,8 @@ impl App {
             );
         }
         self.apply_deleted_path_diff(completed.plan.input_path.as_path(), None);
-        self.library.register_rebuilt_cbz_entry(
-            completed.plan.input_path.as_path(),
-            rebuilt_entry,
-        );
+        self.library
+            .register_rebuilt_cbz_entry(completed.plan.input_path.as_path(), rebuilt_entry);
         Ok(RebuiltCbzLibrarySyncResult { rebuilt_path })
     }
 
