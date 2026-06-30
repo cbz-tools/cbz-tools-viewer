@@ -14,17 +14,30 @@ Download the latest release from [Latest Release](https://github.com/cbz-tools/c
 
 Extract the ZIP and run `cbz-viewer.exe` directly. No installation is required.
 
-It includes:
+---
 
-* Library management
-* Favorites
-* Groups
-* Book navigation
-* External tool integration
-* Default UI language: English
-* Japanese can be selected in Settings
-* Language changes take effect immediately
-* No restart is required
+# Screenshots
+
+| Library | Viewer | Fullscreen |
+|---|---|---|
+| [![Library](docs/assets/screenshots/Library.png)](docs/assets/screenshots/Library.png) | [![Viewer](docs/assets/screenshots/Viewer_Windowed.png)](docs/assets/screenshots/Viewer_Windowed.png) | [![Fullscreen](docs/assets/screenshots/Viewer_Fullscreen.png)](docs/assets/screenshots/Viewer_Fullscreen.png) |
+
+### Demo content
+
+**Sovereign Stars** is a fictional comic created with GPT for CBZ Viewer demos and screenshots.
+
+It is not related to any real work, person, or organization.
+
+The demo manga assets are also licensed under the MIT License.
+
+---
+
+# Highlights
+
+* Delete the current book and move on to the next one.
+* Select an unwanted page range in the viewer, exclude those pages, and rebuild the archive.
+* Predictive loading and caching help keep page turns responsive, even in large books.
+* Animated WebP streaming playback, including spread view.
 
 ---
 
@@ -40,9 +53,9 @@ CBZ Viewer is built as the Windows comic book viewer I personally wanted to use.
 
 # Design Philosophy
 
-CBZ Viewer focuses on minimizing page-turn latency.
+CBZ Viewer focuses on reducing page-turn latency.
 
-It prioritizes the pages that are needed next so that even large books remain comfortable to read.
+It uses CPU, RAM, and VRAM-aware settings for background predictive loading, caching, and thumbnail generation, so that even large books remain comfortable to read.
 
 It is also an offline application that does not require an internet connection.
 
@@ -50,48 +63,21 @@ It is also an offline application that does not require an internet connection.
 
 # Features
 
-## Reading
+CBZ Viewer provides three main workflows:
 
-* Right-to-left / Left-to-right
-* AUTO / Single / Spread
-* Cover blank
-* Slideshow
-* Quality: Speed, Balanced, High Quality, Original
-* Page Map based progress display
-* L1 / L2 Streaming Cache
-* Animated WebP streaming playback, including spread view
-
-Animation images do not use some of the quality processing.
-
-## Managing
-
-* Library management
-* Search
-* History
-* Favorites
-* Groups
-
-## Organizing
-
-* Rename
-* Copy
-* Delete
-* Open in Explorer
-* In the Library-connected Viewer, you can mark an image page range and rebuild the archive without those pages.
+* Reading: page navigation, spread view, slideshow, progress display, and predictive cache.
+* Managing: library, search, history, favorites, groups, and book navigation.
+* Organizing: rename, copy, delete, open in Explorer, and archive rebuild from selected page ranges.
 
 See the [Operation Guide](docs/operation.md) for details.
 
-### External tools
+---
 
-You can run:
+# External tools
 
-* Archive optimization
-* Format conversion
-* Size reduction
+CBZ Viewer can launch external tools while you read.
 
-while reading.
-
-The companion project **CBZ Tools Optimizer** lets you move smoothly between reading and optimization.
+With the companion project **CBZ Tools Optimizer**, you can run CBZ / ZIP archive optimization, format conversion, and size reduction workflows.
 
 ---
 
@@ -131,30 +117,6 @@ Text EPUB, reflow layout, CSS layout rendering, DRM-protected EPUB, audio, video
 * GIF
 
 When you open a single supported image file, CBZ Viewer opens the parent folder as a book and starts from that image.
-
----
-
-# Screenshots
-
-| Library | Viewer | Fullscreen |
-|---|---|---|
-| [![Library](docs/assets/screenshots/Library.png)](docs/assets/screenshots/Library.png) | [![Viewer](docs/assets/screenshots/Viewer_Windowed.png)](docs/assets/screenshots/Viewer_Windowed.png) | [![Fullscreen](docs/assets/screenshots/Viewer_Fullscreen.png)](docs/assets/screenshots/Viewer_Fullscreen.png) |
-
-### Demo content
-
-**Sovereign Stars** is a fictional comic created with GPT for CBZ Viewer demos and screenshots.
-
-It is not related to any real work, person, or organization.
-
-The demo manga assets are also licensed under the MIT License.
-
----
-
-# Installation
-
-Download the ZIP from Releases and extract it anywhere you like.
-
-No additional installation is required.
 
 ---
 
