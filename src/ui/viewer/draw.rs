@@ -33,6 +33,11 @@ const FULLSCREEN_OVERLAY_TOP_MARGIN: f32 = 15.0;
 const FULLSCREEN_OVERLAY_TOP_HOVER_PADDING: f32 = 16.0;
 const KEY_FEEDBACK_FONT_SIZE: f32 = 22.0;
 const HELP_KEY_COL_WIDTH: usize = 10;
+const DELETE_RANGE_OVERLAY_FONT_SIZE: f32 = theme::FONT_SIZE_BODY * 2.0;
+const DELETE_RANGE_OVERLAY_BAND_H: f32 = DELETE_RANGE_OVERLAY_FONT_SIZE * 2.0;
+const DELETE_RANGE_SELECTING_FILL_ALPHA: u8 = 120;
+const DELETE_RANGE_COMPLETE_FILL_ALPHA: u8 = 120;
+const DELETE_RANGE_TEXT: Color32 = Color32::WHITE;
 #[cfg(debug_assertions)]
 const DEBUG_OVERLAY_MARGIN_X: f32 = 8.0;
 #[cfg(debug_assertions)]
@@ -63,11 +68,16 @@ pub(super) fn draw_pages(
 ) -> Duration {
     let ctx = ui.ctx().clone();
     let mut min_remaining = Duration::from_secs(3600);
+    let current_page = state.persistent.displayed_page;
+    let visible_pages = state.current_view_pages(current_page);
+    let visible_page_bounds = visible_page_bounds(visible_pages);
+    let delete_range_selection = state.delete_range_selection();
 
     if effective_spread {
         let reading_direction = state.effective_reading_direction();
-        let leading_cover_blank_spread =
-            state.is_leading_cover_blank_spread(state.persistent.displayed_page);
+        let leading_cover_blank_spread = state.is_leading_cover_blank_spread(current_page);
+        let (screen_left_page, screen_right_page) =
+            spread_screen_pages(visible_pages, reading_direction);
         let (left_size, right_size) = match reading_direction {
             ReadingDirection::RightToLeft => (
                 state
@@ -130,6 +140,21 @@ pub(super) fn draw_pages(
                     min_remaining = min_remaining.min(r);
                     if let Some(rect) = ldraw {
                         draw_image_at_rect(ui, c.texture(), &rect);
+                        if let Some(page) = screen_left_page {
+                            if let Some(overlay) = delete_range_overlay_for_page(
+                                delete_range_selection,
+                                visible_page_bounds,
+                                page,
+                                false,
+                            ) {
+                                draw_delete_range_image_overlay(
+                                    ui,
+                                    &rect,
+                                    delete_range_selection,
+                                    overlay,
+                                );
+                            }
+                        }
                     }
                 }
                 if let Some(c) = &mut state.display_assets.content_left {
@@ -137,6 +162,21 @@ pub(super) fn draw_pages(
                     min_remaining = min_remaining.min(r);
                     if let Some(rect) = rdraw {
                         draw_image_at_rect(ui, c.texture(), &rect);
+                        if let Some(page) = screen_right_page {
+                            if let Some(overlay) = delete_range_overlay_for_page(
+                                delete_range_selection,
+                                visible_page_bounds,
+                                page,
+                                false,
+                            ) {
+                                draw_delete_range_image_overlay(
+                                    ui,
+                                    &rect,
+                                    delete_range_selection,
+                                    overlay,
+                                );
+                            }
+                        }
                     }
                 } else if leading_cover_blank_spread {
                     if let Some(rect) = rdraw {
@@ -151,6 +191,21 @@ pub(super) fn draw_pages(
                     min_remaining = min_remaining.min(r);
                     if let Some(rect) = ldraw {
                         draw_image_at_rect(ui, c.texture(), &rect);
+                        if let Some(page) = screen_left_page {
+                            if let Some(overlay) = delete_range_overlay_for_page(
+                                delete_range_selection,
+                                visible_page_bounds,
+                                page,
+                                false,
+                            ) {
+                                draw_delete_range_image_overlay(
+                                    ui,
+                                    &rect,
+                                    delete_range_selection,
+                                    overlay,
+                                );
+                            }
+                        }
                     }
                 } else if leading_cover_blank_spread {
                     if let Some(rect) = ldraw {
@@ -168,6 +223,21 @@ pub(super) fn draw_pages(
                     min_remaining = min_remaining.min(r);
                     if let Some(rect) = rdraw {
                         draw_image_at_rect(ui, c.texture(), &rect);
+                        if let Some(page) = screen_right_page {
+                            if let Some(overlay) = delete_range_overlay_for_page(
+                                delete_range_selection,
+                                visible_page_bounds,
+                                page,
+                                false,
+                            ) {
+                                draw_delete_range_image_overlay(
+                                    ui,
+                                    &rect,
+                                    delete_range_selection,
+                                    overlay,
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -176,9 +246,20 @@ pub(super) fn draw_pages(
         if let Some(c) = &mut state.display_assets.content_left {
             let r = c.tick("viewer_page", &ctx);
             min_remaining = min_remaining.min(r);
-            draw_page_in_rect(ui, Some(c.texture()), area);
+            if let Some(rect) = draw_page_in_rect(ui, Some(c.texture()), area) {
+                if let Some(page) = visible_pages.0.or(visible_pages.1) {
+                    if let Some(overlay) = delete_range_overlay_for_page(
+                        delete_range_selection,
+                        visible_page_bounds,
+                        page,
+                        false,
+                    ) {
+                        draw_delete_range_image_overlay(ui, &rect, delete_range_selection, overlay);
+                    }
+                }
+            }
         } else {
-            draw_page_in_rect(ui, None, area);
+            let _ = draw_page_in_rect(ui, None, area);
         }
     }
 
@@ -795,21 +876,207 @@ fn draw_image_at_rect(ui: &egui::Ui, tex: &egui::TextureHandle, rect: &Rect) {
     ui.painter().image(tex.id(), *rect, uv, Color32::WHITE);
 }
 
-fn draw_page_in_rect(ui: &egui::Ui, tex: Option<&egui::TextureHandle>, area: &Rect) {
+fn draw_page_in_rect(
+    ui: &egui::Ui,
+    tex: Option<&egui::TextureHandle>,
+    area: &Rect,
+) -> Option<Rect> {
     match tex {
         None => {
             ui.painter()
                 .rect_filled(*area, egui::CornerRadius::ZERO, Color32::WHITE);
+            None
         }
         Some(t) => {
-            let ts = t.size_vec2();
-            let scale = (area.width() / ts.x).min(area.height() / ts.y);
-            let disp = ts * scale;
-            let off = (area.size() - disp) * 0.5;
-            let rect = Rect::from_min_size(area.min + off, disp);
+            let rect = fit_image_rect(area, t.size_vec2());
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
-            ui.painter().image(t.id(), rect, uv, Color32::WHITE);
+            if let Some(rect) = rect {
+                ui.painter().image(t.id(), rect, uv, Color32::WHITE);
+                Some(rect)
+            } else {
+                None
+            }
         }
+    }
+}
+
+fn fit_image_rect(area: &Rect, tex_size: egui::Vec2) -> Option<Rect> {
+    if area.width() <= 0.0 || area.height() <= 0.0 || tex_size.x <= 0.0 || tex_size.y <= 0.0 {
+        return None;
+    }
+    let scale = (area.width() / tex_size.x).min(area.height() / tex_size.y);
+    let disp = tex_size * scale;
+    let off = (area.size() - disp) * 0.5;
+    Some(Rect::from_min_size(area.min + off, disp))
+}
+
+#[derive(Clone, Copy)]
+enum DeleteRangeImageOverlayKind {
+    Start,
+    Selecting,
+    Complete,
+}
+
+fn delete_range_overlay_for_page(
+    selection: ViewerDeleteRangeSelection,
+    visible_page_bounds: Option<(u32, u32)>,
+    page: u32,
+    is_blank_slot: bool,
+) -> Option<DeleteRangeImageOverlayKind> {
+    if is_blank_slot {
+        return None;
+    }
+
+    match (selection.start, selection.end) {
+        (Some(start), Some(end)) => {
+            let low = start.min(end);
+            let high = start.max(end);
+            if (low..=high).contains(&page) {
+                Some(DeleteRangeImageOverlayKind::Complete)
+            } else {
+                None
+            }
+        }
+        (Some(start), None) => {
+            let (visible_min, visible_max) = visible_page_bounds?;
+            let low = start.min(visible_min);
+            let high = start.max(visible_max);
+            if !(low..=high).contains(&page) {
+                return None;
+            }
+            if page == start {
+                Some(DeleteRangeImageOverlayKind::Start)
+            } else {
+                Some(DeleteRangeImageOverlayKind::Selecting)
+            }
+        }
+        _ => None,
+    }
+}
+
+fn draw_delete_range_image_overlay(
+    ui: &egui::Ui,
+    image_rect: &Rect,
+    selection: ViewerDeleteRangeSelection,
+    overlay: DeleteRangeImageOverlayKind,
+) {
+    let text = delete_range_overlay_text(selection, overlay);
+    match overlay {
+        DeleteRangeImageOverlayKind::Start => draw_top_band_overlay(
+            ui,
+            image_rect,
+            DELETE_RANGE_OVERLAY_BAND_H,
+            &text,
+            delete_range_selecting_fill(),
+            DELETE_RANGE_TEXT,
+        ),
+        DeleteRangeImageOverlayKind::Selecting => draw_top_band_overlay(
+            ui,
+            image_rect,
+            DELETE_RANGE_OVERLAY_BAND_H,
+            &text,
+            delete_range_selecting_fill(),
+            DELETE_RANGE_TEXT,
+        ),
+        DeleteRangeImageOverlayKind::Complete => draw_top_band_overlay(
+            ui,
+            image_rect,
+            DELETE_RANGE_OVERLAY_BAND_H,
+            &text,
+            delete_range_complete_fill(),
+            DELETE_RANGE_TEXT,
+        ),
+    }
+}
+
+fn draw_top_band_overlay(
+    ui: &egui::Ui,
+    image_rect: &Rect,
+    band_height: f32,
+    text: &str,
+    fill: Color32,
+    text_color: Color32,
+) {
+    let band_h = band_height.min(image_rect.height());
+    let band_rect = Rect::from_min_size(image_rect.min, vec2(image_rect.width(), band_h));
+    draw_band_overlay(ui, band_rect, text, fill, text_color);
+}
+
+fn draw_band_overlay(
+    ui: &egui::Ui,
+    band_rect: Rect,
+    text: &str,
+    fill: Color32,
+    text_color: Color32,
+) {
+    let painter = ui.painter();
+    painter.rect_filled(band_rect, egui::CornerRadius::ZERO, fill);
+    painter.text(
+        band_rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::proportional(DELETE_RANGE_OVERLAY_FONT_SIZE),
+        text_color,
+    );
+}
+
+fn delete_range_overlay_text(
+    selection: ViewerDeleteRangeSelection,
+    overlay: DeleteRangeImageOverlayKind,
+) -> String {
+    match overlay {
+        DeleteRangeImageOverlayKind::Start => match selection.start {
+            Some(start) => format!(
+                "Delete Range: Start {}",
+                format_delete_range_page_number(start)
+            ),
+            None => String::new(),
+        },
+        DeleteRangeImageOverlayKind::Selecting => match selection.start {
+            Some(start) => format!(
+                "Delete Range: Start {} …",
+                format_delete_range_page_number(start)
+            ),
+            None => String::new(),
+        },
+        DeleteRangeImageOverlayKind::Complete => match (selection.start, selection.end) {
+            (Some(start), Some(end)) => format!(
+                "Delete Range: {} - {}",
+                format_delete_range_page_number(start),
+                format_delete_range_page_number(end)
+            ),
+            _ => String::new(),
+        },
+    }
+}
+
+fn format_delete_range_page_number(page: u32) -> String {
+    format!("{}p", page.saturating_add(1))
+}
+
+fn delete_range_selecting_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(217, 119, 6, DELETE_RANGE_SELECTING_FILL_ALPHA)
+}
+
+fn delete_range_complete_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(220, 38, 38, DELETE_RANGE_COMPLETE_FILL_ALPHA)
+}
+
+fn visible_page_bounds(visible_pages: (Option<u32>, Option<u32>)) -> Option<(u32, u32)> {
+    match (visible_pages.0, visible_pages.1) {
+        (Some(left), Some(right)) => Some((left.min(right), left.max(right))),
+        (Some(page), None) | (None, Some(page)) => Some((page, page)),
+        (None, None) => None,
+    }
+}
+
+fn spread_screen_pages(
+    visible_pages: (Option<u32>, Option<u32>),
+    reading_direction: ReadingDirection,
+) -> (Option<u32>, Option<u32>) {
+    match reading_direction {
+        ReadingDirection::RightToLeft => (visible_pages.1, visible_pages.0),
+        ReadingDirection::LeftToRight => (visible_pages.0, visible_pages.1),
     }
 }
 
