@@ -74,6 +74,8 @@ pub struct GridResult {
     pub scroll_y: f32,
     /// キーナビ後にスクロール追従が必要な場合の目標 offset（次フレームに適用）
     pub request_scroll_y: Option<f32>,
+    /// 現在描画中の visible entry index 範囲（両端含む）
+    pub visible_range: Option<std::ops::RangeInclusive<usize>>,
     /// コンテキストメニューからの操作（対象 idx, 操作種別）
     pub context_action: Option<(usize, ContextAction)>,
     /// 選択中ファイルの外部ドラッグ開始
@@ -264,6 +266,8 @@ pub fn show_grid(
     let mut ctx_action: Option<(usize, ContextAction)> = None;
     let mut drag_started: Option<usize> = None;
     let mut any_context_menu_open = false;
+    let mut visible_start: Option<usize> = None;
+    let mut visible_end: Option<usize> = None;
 
     let mut sa = egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
@@ -288,6 +292,8 @@ pub fn show_grid(
                 for col in 0..layout.cols {
                     let idx = row * layout.cols + col;
                     if let Some(entry) = entries.get(idx) {
+                        visible_start = Some(visible_start.map_or(idx, |start| start.min(idx)));
+                        visible_end = Some(visible_end.map_or(idx, |end| end.max(idx)));
                         let is_primary = selected_idx == Some(idx);
                         let is_in_set = selected_set.contains(&idx);
 
@@ -390,6 +396,9 @@ pub fn show_grid(
             keyboard_opened,
             scroll_y: scroll_out.state.offset.y,
             request_scroll_y,
+            visible_range: visible_start
+                .zip(visible_end)
+                .map(|(start, end)| start..=end),
             ctx_action,
             drag_started,
         },
@@ -449,7 +458,7 @@ fn is_entry_openable(
             }
             LibraryEntry::Archive(entry) => book_states
                 .get(&entry.id)
-                .is_some_and(|state| state.texture.is_some() && !state.thumb_failed),
+                .is_some_and(|state| state.thumb_ready && !state.thumb_failed),
         })
         .unwrap_or(false)
 }
@@ -531,6 +540,7 @@ struct GridResultParts {
     keyboard_opened: Option<usize>,
     scroll_y: f32,
     request_scroll_y: Option<f32>,
+    visible_range: Option<std::ops::RangeInclusive<usize>>,
     ctx_action: Option<(usize, ContextAction)>,
     drag_started: Option<usize>,
 }
@@ -813,6 +823,7 @@ fn assemble_grid_result(
         opened: parts.click_opened.or(parts.keyboard_opened),
         scroll_y: parts.scroll_y,
         request_scroll_y: parts.request_scroll_y,
+        visible_range: parts.visible_range,
         context_action: parts.ctx_action,
         drag_started: parts.drag_started,
     }

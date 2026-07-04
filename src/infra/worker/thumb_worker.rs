@@ -51,6 +51,8 @@ const RETRY_DELAYS: [Duration; 3] = [
 ];
 /// OOM と長時間ブロックを避けるための thumb 用 raw データ上限。
 const MAX_THUMB_RAW_BYTES: usize = 256 * 1024 * 1024;
+/// Library thumbnail cache budget を CPU 側 ThumbMemCache にも適用する。
+const THUMB_MEM_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 // ── 公開型 ────────────────────────────────────────────────────────────────────
 
@@ -494,7 +496,7 @@ fn worker_main(
         Arc::clone(&artifact_gate),
     ));
     let shared = Arc::new(WorkerShared {
-        mem_cache: ThumbMemCache::new(500),
+        mem_cache: ThumbMemCache::new(THUMB_MEM_CACHE_MAX_BYTES),
         disk_cache: Arc::clone(&disk_cache),
         page_map_cache,
         page_map_coordinator,

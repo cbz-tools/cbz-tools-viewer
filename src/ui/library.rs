@@ -16,6 +16,9 @@ use std::{
 const POLL_INTERVAL_MS: u64 = 80;
 // 1フレームで UI スレッドが反映するサムネイル結果の上限
 const MAX_THUMB_RESULTS_PER_FRAME: usize = 48;
+// visible 範囲を優先して保持する Library thumbnail TextureHandle 上限
+const LIBRARY_THUMB_TEXTURE_KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
+const RGBA_BYTES_PER_PIXEL: usize = 4;
 // ライブラリフォルダのリアルタイム追従用ポーリング間隔
 const LIBRARY_DIR_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -233,6 +236,8 @@ pub struct LibraryState {
 
 pub(crate) struct BookViewState {
     pub texture: Option<egui::TextureHandle>,
+    pub texture_size: Option<[usize; 2]>,
+    pub thumb_ready: bool,
     pub thumb_requested: bool,
     pub thumb_failed: bool,
     pub force_reload: bool,
@@ -515,7 +520,7 @@ impl LibraryState {
             return LibraryAction::OpenArchive(idx);
         }
         if let Some(LibraryEntry::Archive(entry)) = self.entries.get(idx) {
-            if self.has_ready_texture(&entry.id) {
+            if self.has_ready_thumbnail(&entry.id) {
                 return LibraryAction::OpenArchive(idx);
             }
         }
@@ -847,6 +852,8 @@ impl LibraryState {
             .entry(id.clone())
             .or_insert_with(|| BookViewState {
                 texture: None,
+                texture_size: None,
+                thumb_ready: false,
                 thumb_requested: false,
                 thumb_failed: false,
                 force_reload: false,
@@ -858,9 +865,9 @@ impl LibraryState {
         self.book_states.get(id)
     }
 
-    fn has_ready_texture(&self, id: &BookId) -> bool {
+    fn has_ready_thumbnail(&self, id: &BookId) -> bool {
         self.book_state(id)
-            .is_some_and(|s| s.texture.is_some() && !s.thumb_failed)
+            .is_some_and(|s| s.thumb_ready && !s.thumb_failed)
     }
 
     fn ready_texture_count(&self) -> usize {
@@ -1247,6 +1254,8 @@ impl LibraryState {
                     // worker 側にも古い cache を使わず再生成させる。
                     let state = self.book_state_mut(id);
                     state.texture = None;
+                    state.texture_size = None;
+                    state.thumb_ready = false;
                     state.thumb_requested = false;
                     state.thumb_failed = false;
                     content_changed_ids.insert(id.clone());
@@ -1277,6 +1286,8 @@ impl LibraryState {
                 Some(old_snapshot) if old_snapshot != new_snapshot => {
                     let state = self.book_state_mut(id);
                     state.texture = None;
+                    state.texture_size = None;
+                    state.thumb_ready = false;
                     state.thumb_requested = false;
                     state.thumb_failed = false;
                     changed = true;
@@ -1563,6 +1574,8 @@ impl LibraryState {
                 .entry(meta.id.clone())
                 .or_insert_with(|| BookViewState {
                     texture: None,
+                    texture_size: None,
+                    thumb_ready: false,
                     thumb_requested: false,
                     thumb_failed: false,
                     force_reload: false,
@@ -1725,9 +1738,11 @@ impl LibraryState {
                     );
                     {
                         let state = self.book_state_mut(&resp.book_id);
+                        state.thumb_ready = true;
                         state.thumb_failed = false;
                         state.force_reload = false;
-                        state.thumb_requested = true;
+                        state.thumb_requested = false;
+                        state.texture_size = Some([resp.width as usize, resp.height as usize]);
                         state.texture = Some(handle);
                     }
                     ctx.request_repaint();
@@ -1749,6 +1764,8 @@ impl LibraryState {
                     {
                         let state = self.book_state_mut(&id);
                         state.texture = None;
+                        state.texture_size = None;
+                        state.thumb_ready = false;
                         state.force_reload = false;
                         state.thumb_failed = true;
                     }
@@ -1844,8 +1861,14 @@ impl LibraryState {
                 continue;
             }
             let state = self.book_state_mut(&book_id);
-            state.thumb_requested = true;
             let bypass_cache = state.force_reload;
+            if state.texture.is_some() && !bypass_cache {
+                continue;
+            }
+            state.thumb_requested = true;
+            if bypass_cache {
+                state.thumb_ready = false;
+            }
             state.force_reload = false;
             tasks.push(ThumbTask {
                 book_id,
@@ -1885,8 +1908,15 @@ impl LibraryState {
         };
         let target_width = crate::domain::app_settings::AppSettings::storage_width();
         let state = self.book_state_mut(&book_id);
+        let should_bypass_cache = bypass_cache || state.force_reload;
+        if state.texture.is_some() && !should_bypass_cache {
+            return;
+        }
         if state.thumb_requested {
             return;
+        }
+        if should_bypass_cache {
+            state.thumb_ready = false;
         }
         state.thumb_failed = false;
         state.thumb_requested = true;
@@ -1897,8 +1927,122 @@ impl LibraryState {
             target_width,
             expected_size,
             expected_modified,
-            bypass_cache,
+            bypass_cache: should_bypass_cache,
         });
+    }
+
+    fn estimate_texture_bytes_for_entry(&self, entry: &LibraryEntry) -> usize {
+        let Some(book_id) = entry.thumb_id() else {
+            return 0;
+        };
+        let Some(state) = self.book_state(&book_id) else {
+            return 0;
+        };
+        if state.texture.is_none() {
+            return 0;
+        }
+        let Some([width, height]) = state.texture_size else {
+            return 0;
+        };
+        width
+            .saturating_mul(height)
+            .saturating_mul(RGBA_BYTES_PER_PIXEL)
+    }
+
+    fn compute_texture_keep_indices_by_budget(
+        &self,
+        visible_range: std::ops::RangeInclusive<usize>,
+    ) -> std::collections::HashSet<usize> {
+        let mut keep_indices = std::collections::HashSet::new();
+        let visible_start = *visible_range.start();
+        let visible_end = *visible_range.end();
+        let mut visible_bytes = 0usize;
+
+        for idx in visible_range.clone() {
+            keep_indices.insert(idx);
+            if let Some(entry) = self.entries.get(idx) {
+                visible_bytes =
+                    visible_bytes.saturating_add(self.estimate_texture_bytes_for_entry(entry));
+            }
+        }
+
+        let mut remaining_budget =
+            LIBRARY_THUMB_TEXTURE_KEEP_MAX_BYTES.saturating_sub(visible_bytes);
+        let mut before = visible_start.checked_sub(1);
+        let mut after = visible_end
+            .checked_add(1)
+            .filter(|idx| *idx < self.entries.len());
+        let mut prefer_before = true;
+
+        while before.is_some() || after.is_some() {
+            let candidate = if prefer_before {
+                before
+                    .take()
+                    .map(|idx| (idx, true))
+                    .or_else(|| after.take().map(|idx| (idx, false)))
+            } else {
+                after
+                    .take()
+                    .map(|idx| (idx, false))
+                    .or_else(|| before.take().map(|idx| (idx, true)))
+            };
+            let Some((idx, was_before)) = candidate else {
+                break;
+            };
+            let estimated_bytes = self
+                .entries
+                .get(idx)
+                .map(|entry| self.estimate_texture_bytes_for_entry(entry))
+                .unwrap_or(0);
+            if estimated_bytes <= remaining_budget {
+                keep_indices.insert(idx);
+                remaining_budget = remaining_budget.saturating_sub(estimated_bytes);
+            }
+            if was_before {
+                before = idx.checked_sub(1);
+            } else {
+                after = idx.checked_add(1).filter(|next| *next < self.entries.len());
+            }
+            prefer_before = !prefer_before;
+        }
+
+        keep_indices
+    }
+
+    fn evict_thumb_textures_outside_keep_indices(
+        &mut self,
+        keep_indices: &std::collections::HashSet<usize>,
+    ) {
+        for (idx, entry) in self.entries.iter().enumerate() {
+            if keep_indices.contains(&idx) {
+                continue;
+            }
+            let Some(book_id) = entry.thumb_id() else {
+                continue;
+            };
+            if let Some(state) = self.book_states.get_mut(&book_id) {
+                state.texture = None;
+                state.texture_size = None;
+            }
+        }
+    }
+
+    fn ensure_visible_thumb_textures(&mut self, visible_range: &std::ops::RangeInclusive<usize>) {
+        let visible_entries: Vec<LibraryEntry> = visible_range
+            .clone()
+            .filter_map(|idx| self.entries.get(idx).cloned())
+            .collect();
+        for entry in &visible_entries {
+            let Some(book_id) = entry.thumb_id() else {
+                continue;
+            };
+            let Some(state) = self.book_state(&book_id) else {
+                continue;
+            };
+            if state.texture.is_none() && !state.thumb_failed && !state.thumb_requested {
+                self.request_thumb_for_entry(entry, false);
+            }
+        }
     }
 
     // ── 選択ユーティリティ ────────────────────────────────────────────────────
@@ -2131,6 +2275,12 @@ pub fn show(
             reset_context_menu_cache: reset_cache,
         },
     );
+
+    if let Some(visible_range) = result.visible_range.clone() {
+        let keep_indices = state.compute_texture_keep_indices_by_budget(visible_range.clone());
+        state.evict_thumb_textures_outside_keep_indices(&keep_indices);
+        state.ensure_visible_thumb_textures(&visible_range);
+    }
 
     // ── 選択状態を更新 ────────────────────────────────────────────────────────
     if let Some(sel) = result.selected {

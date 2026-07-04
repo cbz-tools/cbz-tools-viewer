@@ -8,6 +8,9 @@
 - Fixed viewer toolbar page titles for cover-blank spreads, including left-to-right and right-to-left reading directions.
 - Localized the viewer cover-blank toolbar label so English shows `Blank` and Japanese shows `ブランク`.
 - Added Viewer page-range delete and archive rebuild for ZIP/CBZ/RAR/CBR, with ZIP/CBZ rebuilt in place, RAR/CBR rebuilt as CBZ, all-image-delete prevention, and an option to open the rebuilt archive in a new Viewer.
+- Bound the Library thumbnail GPU texture cache to a 256 MiB budget, prioritizing visible thumbnails while evicting off-screen textures.
+- Changed the Library thumbnail CPU memory cache from a fixed 500-entry limit to a 256 MiB byte budget.
+- Reduced CPU/GPU memory high-water usage after bulk thumbnail generation in large libraries without changing Viewer L1/L2 caches or thumbnail request policy.
 
 - Reorganized the Settings window into General, Library, Viewer, Performance, and External Tools tabs.
 - Added favorite indicators to Library card HUDs.
