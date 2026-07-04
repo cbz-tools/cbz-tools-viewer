@@ -1002,9 +1002,11 @@ fn failed_thumb_msg_for_image_decode(id: BookId, raw: &[u8], err: &anyhow::Error
 
 fn is_permanent_thumb_error(
     _path: Option<&Path>,
-    _image_format: Option<ImageFormatHint>,
+    image_format: Option<ImageFormatHint>,
     err: &anyhow::Error,
 ) -> bool {
+    #[cfg(feature = "avif")]
+    let _ = image_format;
     let err_text = format!("{err:#}").to_ascii_lowercase();
 
     // rar feature 無効時だけ RAR/CBR を恒久失敗にする。feature 有効時は retry queue に任せる。

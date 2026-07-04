@@ -299,12 +299,14 @@ fn resolve_fmt(data: &[u8], hint: ImageFormatHint) -> ImageFormatHint {
 
 /// JPEG → RGBA8（zune-jpeg: image crate より高速）
 fn decode_jpeg(data: &[u8]) -> Result<DecodedImage> {
+    use std::io::Cursor;
+
     use zune_core::colorspace::ColorSpace;
     use zune_core::options::DecoderOptions;
     use zune_jpeg::JpegDecoder;
 
     let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
-    let mut dec = JpegDecoder::new_with_options(data, opts);
+    let mut dec = JpegDecoder::new_with_options(Cursor::new(data), opts);
     dec.decode_headers()
         .map_err(|e| anyhow::anyhow!("JPEG header: {e:?}"))?;
     let info = dec.info().context("JPEG info missing")?;

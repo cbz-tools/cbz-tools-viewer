@@ -7,12 +7,15 @@ use std::path::Path;
 #[cfg(feature = "rar")]
 use std::{path::PathBuf, time::Instant};
 
-use super::{
-    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry, BookReader,
-    CbzRebuildArchiveEntry, CbzRebuildArchiveEntryKind,
-};
 #[cfg(feature = "rar")]
-use crate::util::{archive_path::is_supported_image_name, natural_sort};
+use super::{
+    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry, CbzRebuildArchiveEntryKind,
+};
+use super::{BookReader, CbzRebuildArchiveEntry};
+#[cfg(feature = "rar")]
+use crate::util::archive_path::is_supported_image_name;
+#[cfg(feature = "rar")]
+use crate::util::natural_sort;
 use zip_writer::ZipWriter;
 
 // ── RarReader ─────────────────────────────────────────────────────────────────
@@ -485,16 +488,21 @@ impl BookReader for RarReader {
             read_entry_impl(&self.path, name)
         }
         #[cfg(not(feature = "rar"))]
-        anyhow::bail!("RAR サポートが無効です")
+        {
+            let _ = n;
+            anyhow::bail!("RAR サポートが無効です")
+        }
     }
 }
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "rar")]
 fn is_image_name(name: &str) -> bool {
     is_supported_image_name(name.rsplit('.').next().unwrap_or(""))
 }
 
+#[cfg(feature = "rar")]
 fn extension_of(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or("")
 }
