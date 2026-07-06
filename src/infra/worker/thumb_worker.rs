@@ -1853,6 +1853,10 @@ fn process_zip_book_artifacts(
                 lightweight_pages: 0,
                 compressed_bytes_touched: 0,
                 uncompressed_bytes_produced: 0,
+                slow_fallback_pages: 0,
+                slow_fallback_failed_pages: 0,
+                slow_fallback_ms: Duration::default(),
+                slowest_fallback_entry: None,
                 elapsed: Duration::default(),
             },
         };
@@ -1887,6 +1891,10 @@ fn process_zip_book_artifacts(
         lightweight_pages: page_map_lightweight_pages,
         compressed_bytes_touched: page_map_compressed_bytes_touched,
         uncompressed_bytes_produced: page_map_uncompressed_bytes_produced,
+        slow_fallback_pages: page_map_slow_fallback_pages,
+        slow_fallback_failed_pages: page_map_slow_fallback_failed_pages,
+        slow_fallback_ms: page_map_slow_fallback_ms,
+        slowest_fallback_entry: page_map_slowest_fallback_entry,
         issue: page_map_issue,
         elapsed: page_map_elapsed,
     } = page_map_result;
@@ -1915,6 +1923,10 @@ fn process_zip_book_artifacts(
         page_map_lightweight_pages = page_map_lightweight_pages,
         page_map_compressed_bytes_touched = page_map_compressed_bytes_touched,
         page_map_uncompressed_bytes_produced = page_map_uncompressed_bytes_produced,
+        page_map_slow_fallback_pages = page_map_slow_fallback_pages,
+        page_map_slow_fallback_failed_pages = page_map_slow_fallback_failed_pages,
+        page_map_slow_fallback_ms = page_map_slow_fallback_ms.as_millis(),
+        slowest_fallback_entry = ?page_map_slowest_fallback_entry,
         page_map_issue = ?page_map_issue,
         "zip thumbnail/page-map lanes complete"
     );

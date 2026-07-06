@@ -137,7 +137,20 @@ pub(crate) struct ZipPageMapFastOutput {
     pub lightweight_pages: usize,
     pub compressed_bytes_touched: usize,
     pub uncompressed_bytes_produced: usize,
+    pub slow_fallback_pages: usize,
+    pub slow_fallback_failed_pages: usize,
+    pub slow_fallback_ms: Duration,
+    pub slowest_fallback_entry: Option<ZipPageMapSlowFallbackEntry>,
     pub elapsed: Duration,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ZipPageMapSlowFallbackEntry {
+    pub page_index: u32,
+    pub entry_index: u32,
+    pub name: String,
+    pub reason: ZipPageMapIssueReason,
+    pub elapsed_ms: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -403,6 +416,10 @@ pub(crate) fn build_zip_page_map_fast_lanes(reader: &ZipReader) -> ZipPageMapFas
     let mut lightweight_pages = 0usize;
     let mut compressed_bytes_touched = 0usize;
     let mut uncompressed_bytes_produced = 0usize;
+    let mut slow_fallback_pages = 0usize;
+    let mut slow_fallback_failed_pages = 0usize;
+    let mut slow_fallback_ms = Duration::default();
+    let mut slowest_fallback_entry = None;
 
     for info in reader.page_map_image_entry_infos() {
         compressed_bytes_seen += info.compressed_size;
@@ -411,29 +428,107 @@ pub(crate) fn build_zip_page_map_fast_lanes(reader: &ZipReader) -> ZipPageMapFas
         let meta = match read_zip_page_map_fast_entry(reader, info.entry_index as usize) {
             ZipPageMapFastEntryResult::Ready(meta) => meta,
             ZipPageMapFastEntryResult::SlowRequired(reason) => {
-                status = ZipPageMapFastStatus::SlowRequired(reason);
-                issue = Some(ZipPageMapIssue {
-                    page_index: info.page_index,
-                    entry_index: info.entry_index,
-                    reason: match reason {
-                        ZipPageMapSlowReason::HeaderLimit => ZipPageMapIssueReason::HeaderLimit,
-                        ZipPageMapSlowReason::UnsupportedLightweightFormat => {
-                            ZipPageMapIssueReason::UnsupportedLightweightFormat
+                if matches!(page_map_format_for_name(info.name), Some(PageFormat::Jpeg))
+                    && matches!(reason, ZipPageMapSlowReason::HeaderLimit)
+                {
+                    match fallback_zip_page_map_jpeg_entry(
+                        reader,
+                        &info,
+                        ZipPageMapIssueReason::HeaderLimit,
+                    ) {
+                        Ok(meta) => {
+                            slow_fallback_pages += 1;
+                            slow_fallback_ms += meta.elapsed;
+                            maybe_update_slowest_fallback_entry(
+                                &mut slowest_fallback_entry,
+                                &info,
+                                ZipPageMapIssueReason::HeaderLimit,
+                                meta.elapsed,
+                            );
+                            meta.entry
                         }
-                    },
-                });
-                pages.clear();
-                break;
+                        Err(fallback_failure) => {
+                            slow_fallback_pages += 1;
+                            slow_fallback_failed_pages += 1;
+                            slow_fallback_ms += fallback_failure.elapsed;
+                            maybe_update_slowest_fallback_entry(
+                                &mut slowest_fallback_entry,
+                                &info,
+                                ZipPageMapIssueReason::HeaderLimit,
+                                fallback_failure.elapsed,
+                            );
+                            status = ZipPageMapFastStatus::Failed(fallback_failure.reason);
+                            issue = Some(ZipPageMapIssue {
+                                page_index: info.page_index,
+                                entry_index: info.entry_index,
+                                reason: fallback_failure.reason,
+                            });
+                            pages.clear();
+                            break;
+                        }
+                    }
+                } else {
+                    status = ZipPageMapFastStatus::SlowRequired(reason);
+                    issue = Some(ZipPageMapIssue {
+                        page_index: info.page_index,
+                        entry_index: info.entry_index,
+                        reason: match reason {
+                            ZipPageMapSlowReason::HeaderLimit => ZipPageMapIssueReason::HeaderLimit,
+                            ZipPageMapSlowReason::UnsupportedLightweightFormat => {
+                                ZipPageMapIssueReason::UnsupportedLightweightFormat
+                            }
+                        },
+                    });
+                    pages.clear();
+                    break;
+                }
             }
             ZipPageMapFastEntryResult::Failed(reason) => {
-                status = ZipPageMapFastStatus::Failed(reason);
-                issue = Some(ZipPageMapIssue {
-                    page_index: info.page_index,
-                    entry_index: info.entry_index,
-                    reason,
-                });
-                pages.clear();
-                break;
+                if matches!(page_map_format_for_name(info.name), Some(PageFormat::Jpeg))
+                    && matches!(reason, ZipPageMapIssueReason::InvalidHeader)
+                {
+                    match fallback_zip_page_map_jpeg_entry(reader, &info, reason) {
+                        Ok(meta) => {
+                            slow_fallback_pages += 1;
+                            slow_fallback_ms += meta.elapsed;
+                            maybe_update_slowest_fallback_entry(
+                                &mut slowest_fallback_entry,
+                                &info,
+                                reason,
+                                meta.elapsed,
+                            );
+                            meta.entry
+                        }
+                        Err(fallback_failure) => {
+                            slow_fallback_pages += 1;
+                            slow_fallback_failed_pages += 1;
+                            slow_fallback_ms += fallback_failure.elapsed;
+                            maybe_update_slowest_fallback_entry(
+                                &mut slowest_fallback_entry,
+                                &info,
+                                reason,
+                                fallback_failure.elapsed,
+                            );
+                            status = ZipPageMapFastStatus::Failed(fallback_failure.reason);
+                            issue = Some(ZipPageMapIssue {
+                                page_index: info.page_index,
+                                entry_index: info.entry_index,
+                                reason: fallback_failure.reason,
+                            });
+                            pages.clear();
+                            break;
+                        }
+                    }
+                } else {
+                    status = ZipPageMapFastStatus::Failed(reason);
+                    issue = Some(ZipPageMapIssue {
+                        page_index: info.page_index,
+                        entry_index: info.entry_index,
+                        reason,
+                    });
+                    pages.clear();
+                    break;
+                }
             }
         };
         if meta.used_lightweight {
@@ -464,7 +559,154 @@ pub(crate) fn build_zip_page_map_fast_lanes(reader: &ZipReader) -> ZipPageMapFas
         lightweight_pages,
         compressed_bytes_touched,
         uncompressed_bytes_produced,
+        slow_fallback_pages,
+        slow_fallback_failed_pages,
+        slow_fallback_ms,
+        slowest_fallback_entry,
         elapsed: started.elapsed(),
+    }
+}
+
+struct ZipPageMapFallbackSuccess {
+    entry: ZipPageMapFastEntrySuccess,
+    elapsed: Duration,
+}
+
+struct ZipPageMapFallbackFailure {
+    reason: ZipPageMapIssueReason,
+    elapsed: Duration,
+}
+
+fn fallback_zip_page_map_jpeg_entry(
+    reader: &ZipReader,
+    info: &crate::infra::archive::zip::ZipImageEntryInfo<'_>,
+    fast_failure_reason: ZipPageMapIssueReason,
+) -> Result<ZipPageMapFallbackSuccess, ZipPageMapFallbackFailure> {
+    let full_read_started = Instant::now();
+    let raw = match reader.read_entry_by_index_for_page_map(info.entry_index as usize) {
+        Ok(raw) => raw,
+        Err(reason) => {
+            let elapsed = full_read_started.elapsed();
+            tracing::debug!(
+                page_index = info.page_index,
+                entry_index = info.entry_index,
+                entry_name = info.name,
+                fast_failure_reason = ?fast_failure_reason,
+                fallback_full_read_elapsed_ms = elapsed.as_millis(),
+                fallback_metadata_elapsed_ms = 0u128,
+                fallback_result = "failed",
+                fallback_failure_reason = ?reason,
+                "zip page-map jpeg slow fallback"
+            );
+            return Err(ZipPageMapFallbackFailure {
+                reason: map_zip_page_map_slow_failure_reason(reason),
+                elapsed,
+            });
+        }
+    };
+    let full_read_elapsed = full_read_started.elapsed();
+
+    let metadata_started = Instant::now();
+    let metadata = match read_image_metadata(&raw) {
+        Ok(Some(metadata)) => metadata,
+        Ok(None) => {
+            let elapsed = full_read_elapsed + metadata_started.elapsed();
+            tracing::debug!(
+                page_index = info.page_index,
+                entry_index = info.entry_index,
+                entry_name = info.name,
+                fast_failure_reason = ?fast_failure_reason,
+                fallback_full_read_elapsed_ms = full_read_elapsed.as_millis(),
+                fallback_metadata_elapsed_ms = metadata_started.elapsed().as_millis(),
+                fallback_result = "failed",
+                fallback_failure_reason = ?ZipPageMapIssueReason::UnsupportedFormat,
+                "zip page-map jpeg slow fallback"
+            );
+            return Err(ZipPageMapFallbackFailure {
+                reason: ZipPageMapIssueReason::UnsupportedFormat,
+                elapsed,
+            });
+        }
+        Err(_) => {
+            let elapsed = full_read_elapsed + metadata_started.elapsed();
+            tracing::debug!(
+                page_index = info.page_index,
+                entry_index = info.entry_index,
+                entry_name = info.name,
+                fast_failure_reason = ?fast_failure_reason,
+                fallback_full_read_elapsed_ms = full_read_elapsed.as_millis(),
+                fallback_metadata_elapsed_ms = metadata_started.elapsed().as_millis(),
+                fallback_result = "failed",
+                fallback_failure_reason = ?ZipPageMapIssueReason::InvalidHeader,
+                "zip page-map jpeg slow fallback"
+            );
+            return Err(ZipPageMapFallbackFailure {
+                reason: ZipPageMapIssueReason::InvalidHeader,
+                elapsed,
+            });
+        }
+    };
+    let metadata_elapsed = metadata_started.elapsed();
+    let (format, width, height) = metadata;
+    let elapsed = full_read_elapsed + metadata_elapsed;
+
+    tracing::debug!(
+        page_index = info.page_index,
+        entry_index = info.entry_index,
+        entry_name = info.name,
+        fast_failure_reason = ?fast_failure_reason,
+        fallback_full_read_elapsed_ms = full_read_elapsed.as_millis(),
+        fallback_metadata_elapsed_ms = metadata_elapsed.as_millis(),
+        fallback_result = "success",
+        width = width,
+        height = height,
+        "zip page-map jpeg slow fallback"
+    );
+
+    Ok(ZipPageMapFallbackSuccess {
+        entry: ZipPageMapFastEntrySuccess {
+            format,
+            width,
+            height,
+            used_lightweight: false,
+            compressed_bytes_touched: info.compressed_size as usize,
+            uncompressed_bytes_produced: raw.len(),
+        },
+        elapsed,
+    })
+}
+
+fn maybe_update_slowest_fallback_entry(
+    slowest_fallback_entry: &mut Option<ZipPageMapSlowFallbackEntry>,
+    info: &crate::infra::archive::zip::ZipImageEntryInfo<'_>,
+    reason: ZipPageMapIssueReason,
+    elapsed: Duration,
+) {
+    let next = ZipPageMapSlowFallbackEntry {
+        page_index: info.page_index,
+        entry_index: info.entry_index,
+        name: info.name.to_owned(),
+        reason,
+        elapsed_ms: elapsed.as_millis(),
+    };
+    match slowest_fallback_entry {
+        Some(current) if current.elapsed_ms >= next.elapsed_ms => {}
+        _ => *slowest_fallback_entry = Some(next),
+    }
+}
+
+fn map_zip_page_map_slow_failure_reason(
+    reason: ZipPageMapSlowFailureReason,
+) -> ZipPageMapIssueReason {
+    match reason {
+        ZipPageMapSlowFailureReason::ZipOpenError | ZipPageMapSlowFailureReason::EntryReadError => {
+            ZipPageMapIssueReason::ZipStructure
+        }
+        ZipPageMapSlowFailureReason::InflateError => ZipPageMapIssueReason::DeflateError,
+        ZipPageMapSlowFailureReason::InvalidHeader => ZipPageMapIssueReason::InvalidHeader,
+        ZipPageMapSlowFailureReason::MetadataError => ZipPageMapIssueReason::InvalidHeader,
+        ZipPageMapSlowFailureReason::UnsupportedFormat
+        | ZipPageMapSlowFailureReason::NoImageEntries => ZipPageMapIssueReason::UnsupportedFormat,
     }
 }
 

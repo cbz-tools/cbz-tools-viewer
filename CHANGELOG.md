@@ -11,6 +11,7 @@
 - Bound the Library thumbnail GPU texture cache to a 256 MiB budget, prioritizing visible thumbnails while evicting off-screen textures.
 - Changed the Library thumbnail CPU memory cache from a fixed 500-entry limit to a 256 MiB byte budget.
 - Reduced CPU/GPU memory high-water usage after bulk thumbnail generation in large libraries without changing Viewer L1/L2 caches or thumbnail request policy.
+- Fixed a Page Map issue where some JPEG files could fail lightweight metadata probing when a JPEG marker was split across an internal read chunk boundary.
 
 - Reorganized the Settings window into General, Library, Viewer, Performance, and External Tools tabs.
 - Added favorite indicators to Library card HUDs.

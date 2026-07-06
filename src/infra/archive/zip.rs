@@ -323,6 +323,13 @@ impl ZipReader {
             .ok_or(ZipPageMapSlowFailureReason::EntryReadError)?;
         self.core.read_entry_by_index_for_page_map(entry_idx)
     }
+
+    pub(crate) fn read_entry_by_index_for_page_map(
+        &self,
+        entry_idx: usize,
+    ) -> std::result::Result<Bytes, ZipPageMapSlowFailureReason> {
+        self.core.read_entry_by_index_for_page_map(entry_idx)
+    }
 }
 
 pub(crate) fn list_cbz_rebuild_entries(path: &Path) -> Result<Vec<CbzRebuildArchiveEntry>> {

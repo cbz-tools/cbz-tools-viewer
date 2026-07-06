@@ -54,17 +54,33 @@ impl JpegMetadataProbe {
                         self.pos += 1;
                     }
                     if self.pos >= data.len() {
+                        self.state = JpegProbeState::MarkerCode;
+                        return Ok(MetadataProbeResult::NeedMore);
+                    }
+                    self.state = JpegProbeState::MarkerCode;
+                }
+                JpegProbeState::MarkerCode => {
+                    if self.pos >= data.len() {
+                        return Ok(MetadataProbeResult::NeedMore);
+                    }
+                    while self.pos < data.len() && data[self.pos] == 0xFF {
+                        self.pos += 1;
+                    }
+                    if self.pos >= data.len() {
+                        self.state = JpegProbeState::MarkerCode;
                         return Ok(MetadataProbeResult::NeedMore);
                     }
                     let marker = data[self.pos];
                     self.pos += 1;
                     if marker == 0xD8 {
+                        self.state = JpegProbeState::Scan;
                         continue;
                     }
                     if marker == 0xD9 || marker == 0xDA {
                         return Ok(MetadataProbeResult::Invalid);
                     }
                     if is_jpeg_standalone_marker(marker) {
+                        self.state = JpegProbeState::Scan;
                         continue;
                     }
                     self.state = JpegProbeState::NeedSegmentLength {
@@ -156,6 +172,7 @@ impl JpegMetadataProbe {
 enum JpegProbeState {
     Start,
     Scan,
+    MarkerCode,
     NeedSegmentLength {
         marker: u8,
         len_bytes: [u8; 2],
