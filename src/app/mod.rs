@@ -9,6 +9,7 @@ use std::process::Child;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use chrono::{Local, TimeZone};
 use eframe::egui::{self, Key, PointerButton};
 use parking_lot::RwLock;
 
@@ -62,6 +63,16 @@ pub(super) struct RebuiltCbzLibrarySyncResult {
     pub rebuilt_path: PathBuf,
 }
 
+#[derive(Clone, Debug)]
+struct EntryProperties {
+    name: String,
+    path: String,
+    kind: String,
+    size_bytes: Option<u64>,
+    modified: Option<SystemTime>,
+    page_count: Option<u32>,
+}
+
 pub struct App {
     library: LibraryState,
     favorites: Vec<PathBuf>,
@@ -90,6 +101,7 @@ pub struct App {
 
     // ── ファイル操作モーダル状態 ───────────────────────────────────────────
     renaming: Option<(usize, String)>,
+    properties_dialog: Option<EntryProperties>,
     deleting: Option<Vec<usize>>,
     delete_dialog_choice: DeleteDialogChoice,
     book_settings_clearing: Option<Vec<usize>>,
@@ -211,6 +223,7 @@ impl App {
             saved_win_pos: None,
             saved_win_size: None,
             renaming: None,
+            properties_dialog: None,
             deleting: None,
             delete_dialog_choice: DeleteDialogChoice::Ok,
             book_settings_clearing: None,
@@ -1171,6 +1184,7 @@ impl App {
             self.render_topbar_and_apply_result(ctx, ui_language, TOPBAR_H);
 
         let modal_open = self.renaming.is_some()
+            || self.properties_dialog.is_some()
             || self.deleting.is_some()
             || self.book_settings_clearing.is_some()
             || self.setting_group_open;
@@ -1367,6 +1381,7 @@ impl App {
     ) -> bool {
         match action {
             LibraryAction::Rename(idx) => self.begin_rename(*idx),
+            LibraryAction::Properties(idx) => self.show_entry_properties(*idx),
             LibraryAction::Delete(idxs) => self.begin_delete(idxs.clone()),
             LibraryAction::Copy(idxs) => self.do_copy(idxs.clone()),
             LibraryAction::ExternalDrag(idxs) => self.start_external_drag(idxs, frame),
@@ -1409,6 +1424,7 @@ impl App {
     ) {
         egui::CentralPanel::default().show(ctx, |ui| {
             let modal_open = self.renaming.is_some()
+                || self.properties_dialog.is_some()
                 || self.deleting.is_some()
                 || self.book_settings_clearing.is_some()
                 || self.setting_group_open;
@@ -1596,9 +1612,101 @@ impl App {
         ui_language: crate::domain::app_settings::UiLanguage,
     ) {
         self.render_rename_dialog(ctx, ui_language);
+        self.render_properties_dialog(ctx, ui_language);
         self.render_delete_dialog(ctx, ui_language);
         self.render_clear_book_settings_dialog(ctx, ui_language);
         self.render_group_settings_dialog(ctx, ui_language);
+    }
+
+    fn render_properties_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        ui_language: crate::domain::app_settings::UiLanguage,
+    ) {
+        if let Some(props) = self.properties_dialog.clone() {
+            let mut open = true;
+            let mut close_requested = false;
+
+            egui::Window::new(tr(ui_language, TextKey::PropertiesTitle))
+                .open(&mut open)
+                .resizable(false)
+                .collapsible(false)
+                .min_width(540.0)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(520.0);
+                    egui::Frame::new()
+                        .fill(theme::SURFACE_BG)
+                        .inner_margin(egui::Margin::symmetric(22, 20))
+                        .corner_radius(egui::CornerRadius::same(7))
+                        .show(ui, |ui| {
+                            render_properties_value_row(
+                                ui,
+                                tr(ui_language, TextKey::NameLabel),
+                                &props.name,
+                                Some(tr(ui_language, TextKey::Copy)),
+                            );
+                            render_properties_value_row(
+                                ui,
+                                tr(ui_language, TextKey::PathLabel),
+                                &props.path,
+                                Some(tr(ui_language, TextKey::Copy)),
+                            );
+                            render_properties_value_row(
+                                ui,
+                                tr(ui_language, TextKey::TypeLabel),
+                                &props.kind,
+                                None,
+                            );
+                            if let Some(size_bytes) = props.size_bytes {
+                                render_properties_value_row(
+                                    ui,
+                                    tr(ui_language, TextKey::SizeLabel),
+                                    &format_entry_info_file_size(size_bytes),
+                                    None,
+                                );
+                            }
+                            if let Some(modified) = props.modified {
+                                render_properties_value_row(
+                                    ui,
+                                    tr(ui_language, TextKey::ModifiedAt),
+                                    &format_entry_info_modified(modified),
+                                    None,
+                                );
+                            }
+                            if let Some(page_count) = props.page_count {
+                                render_properties_value_row(
+                                    ui,
+                                    tr(ui_language, TextKey::PageCountLabel),
+                                    &page_count.to_string(),
+                                    None,
+                                );
+                            }
+                            ui.add_space(12.0);
+                            let buttons = dialog_button_row(
+                                ui,
+                                31.0,
+                                &[DialogButtonSpec {
+                                    id: ui.id().with(("properties_dialog", "close")),
+                                    label: tr(ui_language, TextKey::Close),
+                                    width: 132.0,
+                                    is_default: true,
+                                }],
+                            );
+                            if buttons[0].clicked
+                                || ui.input(|i| {
+                                    i.key_pressed(Key::Escape) || i.key_pressed(Key::Enter)
+                                })
+                            {
+                                close_requested = true;
+                            }
+                        });
+                });
+
+            if close_requested || !open {
+                self.properties_dialog = None;
+            }
+        }
     }
 
     fn render_rename_dialog(
@@ -2138,4 +2246,114 @@ impl App {
     }
 
     // ── ビューアウィンドウ管理 ────────────────────────────────────────────────
+}
+
+fn render_properties_value_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &str,
+    copy_label: Option<&str>,
+) {
+    let row_h = ui.spacing().interact_size.y;
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(72.0, row_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add(egui::Label::new(label));
+            },
+        );
+        ui.allocate_ui_with_layout(
+            egui::vec2(360.0, row_h),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                ui.add(
+                    egui::Label::new(egui::RichText::new(value).color(theme::TEXT_MAIN)).truncate(),
+                );
+            },
+        );
+        if let Some(copy_label) = copy_label {
+            if ui.button(copy_label).clicked() {
+                ui.ctx().copy_text(value.to_owned());
+            }
+        }
+    });
+}
+
+fn entry_properties_for(entry: &LibraryEntry) -> EntryProperties {
+    let path = entry.path();
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let kind = match entry {
+        LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) => String::from("DIR"),
+        LibraryEntry::Archive(_) | LibraryEntry::ImageFile(_) => format_entry_kind(path),
+    };
+    let size_bytes = match entry {
+        LibraryEntry::Archive(entry) => Some(entry.size),
+        LibraryEntry::ImageFile(entry) => Some(entry.size),
+        LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) => None,
+    };
+    let page_count = match entry {
+        LibraryEntry::Archive(entry) => entry.page_count,
+        LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => None,
+    };
+
+    EntryProperties {
+        name,
+        path: path.display().to_string(),
+        kind,
+        size_bytes,
+        modified: Some(entry.modified()),
+        page_count,
+    }
+}
+
+fn format_entry_kind(path: &Path) -> String {
+    let ext = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_uppercase());
+    match ext.as_deref() {
+        Some("JPG") | Some("JPEG") => String::from("JPEG"),
+        Some("PNG") => String::from("PNG"),
+        Some("WEBP") => String::from("WebP"),
+        Some("AVIF") => String::from("AVIF"),
+        Some("BMP") => String::from("BMP"),
+        Some("TIF") | Some("TIFF") => String::from("TIFF"),
+        Some("GIF") => String::from("GIF"),
+        Some(other) => other.to_string(),
+        None => String::from("FILE"),
+    }
+}
+
+fn format_entry_info_file_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    if bytes == 0 {
+        return String::from("0 B");
+    }
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.0} KB", b / KB)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_entry_info_modified(modified: SystemTime) -> String {
+    match modified.duration_since(UNIX_EPOCH) {
+        Ok(duration) => Local
+            .timestamp_opt(duration.as_secs() as i64, duration.subsec_nanos())
+            .single()
+            .map(|dt| dt.format("%Y/%m/%d %H:%M").to_string())
+            .unwrap_or_else(|| String::from("-")),
+        Err(_) => String::from("-"),
+    }
 }

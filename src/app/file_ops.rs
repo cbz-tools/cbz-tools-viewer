@@ -68,6 +68,12 @@ impl App {
         }
     }
 
+    pub(super) fn show_entry_properties(&mut self, idx: usize) {
+        if let Some(entry) = self.library.entries.get(idx) {
+            self.properties_dialog = Some(super::entry_properties_for(entry));
+        }
+    }
+
     pub(super) fn commit_rename(&mut self, idx: usize, new_stem: String) {
         let book = match self.book_entry_at(idx).cloned() {
             Some(e) => e,

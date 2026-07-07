@@ -46,6 +46,7 @@ pub enum ContextAction {
     Open,
     MoveToFolder,
     Rename,
+    Properties,
     Delete,
     Copy,
     OpenInExplorer,
@@ -472,6 +473,7 @@ struct CellAction {
     ctx_open: bool,
     ctx_move_to_folder: bool,
     ctx_rename: bool,
+    ctx_properties: bool,
     ctx_delete: bool,
     ctx_copy: bool,
     ctx_open_in_explorer: bool,
@@ -550,6 +552,7 @@ struct CellContextMenuActions {
     open: bool,
     move_to_folder: bool,
     rename: bool,
+    properties: bool,
     delete: bool,
     copy: bool,
     open_in_explorer: bool,
@@ -682,6 +685,8 @@ fn context_action_from_cell_action(
         Some((idx, ContextAction::MoveToFolder))
     } else if action.ctx_rename {
         Some((idx, ContextAction::Rename))
+    } else if action.ctx_properties {
+        Some((idx, ContextAction::Properties))
     } else if action.ctx_delete {
         Some((idx, ContextAction::Delete))
     } else if action.ctx_copy {
@@ -1243,6 +1248,18 @@ fn render_context_menu_rename_copy_delete_section(
         menu_actions.delete = true;
         ui.close();
     }
+    begin_context_menu_section(ui, section_state);
+    if context_menu_item(
+        ui,
+        icons::ICON_INFO,
+        tr(language, TextKey::Properties),
+        None,
+        !is_multi_selection,
+        false,
+    ) {
+        menu_actions.properties = true;
+        ui.close();
+    }
 }
 
 fn render_context_menu_external_tools_section(
@@ -1311,6 +1328,7 @@ fn build_cell_action(
         ctx_open: menu_actions.open,
         ctx_move_to_folder: menu_actions.move_to_folder,
         ctx_rename: menu_actions.rename,
+        ctx_properties: menu_actions.properties,
         ctx_delete: menu_actions.delete,
         ctx_copy: menu_actions.copy,
         ctx_open_in_explorer: menu_actions.open_in_explorer,

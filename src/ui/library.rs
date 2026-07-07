@@ -60,6 +60,8 @@ pub enum LibraryAction {
     OpenInExplorer(usize),
     /// 名前変更（対象 idx）
     Rename(usize),
+    /// プロパティ表示（対象 idx）
+    Properties(usize),
     /// 削除確認（対象 idx のリスト）
     Delete(Vec<usize>),
     /// ファイルをクリップボードへコピー（対象 idx のリスト）
@@ -550,6 +552,7 @@ impl LibraryState {
                 }
             }
             ContextAction::Rename => Some(LibraryAction::Rename(idx)),
+            ContextAction::Properties => Some(LibraryAction::Properties(idx)),
             ContextAction::Delete => {
                 let targets = self.context_target_indices(idx);
                 Some(LibraryAction::Delete(targets))
