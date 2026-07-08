@@ -21,3 +21,5 @@
 - Refined the Library card selection presentation.
 - Fixed ImageFile viewer navigation so pages opened from the Library follow the current Library order.
 - Added current image file names to the Viewer toolbar.
+- Added a Library entry Properties dialog for archives, folder books, and image files, showing the file name, full path, kind, size, modified time, and archive page count when available.
+- Stabilized the Library entry Properties dialog layout with fixed value/copy columns, three-line name/path display, full-text copy buttons, and a centered close button.
