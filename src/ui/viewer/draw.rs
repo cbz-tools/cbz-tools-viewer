@@ -22,8 +22,6 @@ use crate::ui::i18n::{tr, TextKey};
 use crate::ui::thumb_cache::LoadedDiskThumb;
 
 #[cfg(debug_assertions)]
-use super::working_set::{page_render_signature_rank, DisplayRequirement, RenderSignature};
-#[cfg(debug_assertions)]
 use crate::domain::archive_settings::SpreadMode;
 
 const FULLSCREEN_OVERLAY_EDGE_THRESHOLD: f32 = 56.0;
@@ -420,69 +418,6 @@ fn format_mib_pair(current_bytes: usize, max_bytes: usize) -> String {
 }
 
 #[cfg(debug_assertions)]
-#[derive(Clone)]
-struct DebugTextureCandidate {
-    page: u32,
-    bytes: usize,
-    signature: RenderSignature,
-    source: &'static str,
-}
-
-#[cfg(debug_assertions)]
-fn best_debug_texture_candidate(
-    candidates: &[DebugTextureCandidate],
-    page: u32,
-    requirement: DisplayRequirement,
-) -> Option<&DebugTextureCandidate> {
-    let mut best: Option<(DebugTextureCandidateRank, &DebugTextureCandidate)> = None;
-    for candidate in candidates {
-        let Some(rank) = page_render_signature_rank(
-            candidate.page,
-            candidate.signature,
-            page,
-            requirement,
-            candidate.bytes,
-        ) else {
-            continue;
-        };
-        if best.as_ref().is_none_or(|(prev, _)| rank < *prev) {
-            best = Some((rank, candidate));
-        }
-    }
-    best.map(|(_, candidate)| candidate)
-}
-
-#[cfg(debug_assertions)]
-fn debug_hit_source_for_page(
-    page: u32,
-    requirement: DisplayRequirement,
-    interactive: &[DebugTextureCandidate],
-    history: &[DebugTextureCandidate],
-    future: &[DebugTextureCandidate],
-) -> Option<&'static str> {
-    if best_debug_texture_candidate(interactive, page, requirement).is_some() {
-        return Some("Interactive");
-    }
-
-    let history = best_debug_texture_candidate(history, page, requirement)?;
-    let future = best_debug_texture_candidate(future, page, requirement);
-    match future {
-        Some(future) => {
-            let history_score = history.signature.target_w.abs_diff(requirement.required_w) as u64
-                + history.signature.target_h.abs_diff(requirement.required_h) as u64;
-            let future_score = future.signature.target_w.abs_diff(requirement.required_w) as u64
-                + future.signature.target_h.abs_diff(requirement.required_h) as u64;
-            if history_score <= future_score {
-                Some(history.source)
-            } else {
-                Some(future.source)
-            }
-        }
-        None => Some(history.source),
-    }
-}
-
-#[cfg(debug_assertions)]
 fn debug_overlay_state_label(
     bg: Option<&super::worker_manager::ViewerWorkerManagerDebugState>,
     configured_workers: usize,
@@ -510,14 +445,7 @@ fn debug_overlay_state_label(
 }
 
 #[cfg(debug_assertions)]
-fn draw_debug_cache_overlay(
-    ui: &mut egui::Ui,
-    state: &mut ViewerState,
-    area: &Rect,
-    display_w: u32,
-    display_h: u32,
-    max_tex_side: u32,
-) {
+fn draw_debug_cache_overlay(ui: &mut egui::Ui, state: &mut ViewerState, area: &Rect) {
     if !debug_cache_overlay_enabled() {
         return;
     }
@@ -529,66 +457,11 @@ fn draw_debug_cache_overlay(
         .into_iter()
         .flatten()
         .collect();
-    let current_requirement =
-        state.display_requirement_for_request(display_w, display_h, max_tex_side);
     let gpu_history = state.gpu_texture_history_snapshot();
     let gpu_warmup = state.gpu_warmup_cache_snapshot();
     let gpu_warmup_plan = state.gpu_warmup_plan_snapshot();
     let bg_debug_state = state.request.worker_manager.debug_state();
     let bg_rgba_cache = state.request.worker_manager.bg_rgba_cache();
-    let interactive_candidates = state
-        .display_assets
-        .interactive_rgba_cache
-        .ready_entry_snapshots()
-        .into_iter()
-        .map(|entry| DebugTextureCandidate {
-            page: entry.page,
-            bytes: entry.bytes,
-            signature: entry.signature,
-            source: "Interactive",
-        })
-        .collect::<Vec<_>>();
-    let history_candidates = state
-        .display_assets
-        .gpu_texture_history
-        .entry_snapshots()
-        .into_iter()
-        .map(|entry| DebugTextureCandidate {
-            page: entry.page,
-            bytes: entry.bytes,
-            signature: entry.key.render_signature,
-            source: "History",
-        })
-        .collect::<Vec<_>>();
-    let future_candidates = state
-        .display_assets
-        .gpu_warmup_cache
-        .entry_snapshots()
-        .into_iter()
-        .map(|entry| DebugTextureCandidate {
-            page: entry.page,
-            bytes: entry.bytes,
-            signature: entry.key.render_signature,
-            source: "Future",
-        })
-        .collect::<Vec<_>>();
-    let hit_label = if visible_pages_list.is_empty() {
-        "-"
-    } else {
-        visible_pages_list
-            .iter()
-            .copied()
-            .find_map(|page| {
-                debug_hit_source_for_page(
-                    page,
-                    current_requirement,
-                    &interactive_candidates,
-                    &history_candidates,
-                    &future_candidates,
-                )
-            })
-            .unwrap_or("Miss")
-    };
     let page_mode = format_spread_mode_tag(state.persistent.spread_setting.clone());
     let display_unit = if visible_pages_list.len() >= 2 {
         "2P"
@@ -628,7 +501,6 @@ fn draw_debug_cache_overlay(
             gpu_history.entry_count,
             format_mib_pair(gpu_history.current_bytes, gpu_history.max_bytes)
         ),
-        format!("  Hit     : {}", hit_label),
         format!(
             "  Upload  : {}",
             gpu_warmup_plan
@@ -1109,7 +981,7 @@ pub(super) fn draw_viewer_overlays(ui: &mut egui::Ui, overlay: ViewerOverlayCont
     } = overlay;
     #[cfg(debug_assertions)]
     {
-        draw_debug_cache_overlay(ui, _state, area, _display_w, _display_h, _max_tex_side);
+        draw_debug_cache_overlay(ui, _state, area);
     }
     draw_operation_help_overlay(ui, area, language, capabilities, _state);
 }
@@ -1461,9 +1333,6 @@ fn paint_hover_border(ui: &egui::Ui, resp: &egui::Response) {
         );
     }
 }
-#[cfg(debug_assertions)]
-type DebugTextureCandidateRank = (u64, u32, u32, usize);
-
 pub(super) struct FullscreenOverlayContext<'a> {
     pub(super) state: &'a mut ViewerState,
     pub(super) language: UiLanguage,

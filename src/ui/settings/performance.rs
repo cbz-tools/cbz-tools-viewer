@@ -329,6 +329,15 @@ fn danger_zone_block(
                     }
                 });
                 subtle_text(ui, tr(language, TextKey::AdjacentBookPreloadRamDescription));
+                subtle_text(
+                    ui,
+                    &format!(
+                        "{}: {}～{} %",
+                        tr(language, TextKey::InputRangeLabel),
+                        SPAD_RAM_RATIO_MIN_PERCENT,
+                        SPAD_RAM_RATIO_MAX_PERCENT,
+                    ),
+                );
             });
 
             setting_block(ui, tr(language, TextKey::BackgroundWorkers), |ui| {

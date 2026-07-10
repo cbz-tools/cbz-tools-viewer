@@ -153,6 +153,12 @@ pub(super) struct L2StreamingStatus {
     pub(super) generation: u64,
     pub(super) book_id: Option<BookId>,
     pub(super) settled: bool,
+    /// SPAD の追加予約分を除いた、現在本向け L2 RGBA cache の実使用量。
+    pub(super) current_bytes: usize,
+    /// SPAD の追加予約分を除いた、現在本向け L2 RGBA cache の有効上限。
+    pub(super) max_bytes: usize,
+    /// 現在本向けL2 RGBA cacheにある物理ページ数。同じページの別signatureは重複しない。
+    pub(super) cached_page_count: usize,
 }
 
 #[derive(Debug)]
@@ -830,7 +836,7 @@ fn handle_background_result_streaming(
     result: ViewerResult,
 ) -> bool {
     let Some(snapshot) = state.snapshot.clone() else {
-        update_l2_settled_status(l2_status, None, false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, None, false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "missing_snapshot",
@@ -838,7 +844,7 @@ fn handle_background_result_streaming(
         return false;
     };
     if result.kind == ViewerResultKind::AnimationFramesChunk {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "animation_stream_not_managed_here",
@@ -847,7 +853,7 @@ fn handle_background_result_streaming(
     }
 
     let Some(entry) = state.bg_inflight_by_request_id.remove(&result.request_id) else {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "untracked_bg_result",
@@ -859,7 +865,7 @@ fn handle_background_result_streaming(
     release_prefetch_inflight_slot(state, entry.page);
 
     if let Some(reason) = bg_result_is_stale(&snapshot, &entry) {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason,
@@ -878,7 +884,7 @@ fn handle_background_result_streaming(
                 .filter(|_| !result.right_is_animation_stream)
         });
     let Some(frames) = frames else {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "background_empty_frames",
@@ -886,7 +892,7 @@ fn handle_background_result_streaming(
         return false;
     };
     let Some(bytes) = RgbaPageCache::static_rgba_bytes(frames.as_ref()) else {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "background_non_static_frames",
@@ -894,7 +900,7 @@ fn handle_background_result_streaming(
         return false;
     };
     let Some(mut cache) = bg_rgba_cache.write().ok() else {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::Error {
             message: "bg cache lock poisoned".to_owned(),
         });
@@ -961,8 +967,9 @@ fn handle_background_result_streaming(
             entry.render_signature.target_h,
             entry.render_signature.max_tex_side
         );
-        update_l2_settled_status(
+        update_l2_streaming_status(
             l2_status,
+            bg_rgba_cache,
             Some(&snapshot),
             state.bg_inflight_by_request_id.is_empty(),
         );
@@ -1004,8 +1011,9 @@ fn handle_background_result_streaming(
             entry.render_signature.target_h,
             entry.render_signature.max_tex_side
         );
-        update_l2_settled_status(
+        update_l2_streaming_status(
             l2_status,
+            bg_rgba_cache,
             Some(&snapshot),
             state.bg_inflight_by_request_id.is_empty(),
         );
@@ -1031,8 +1039,9 @@ fn handle_background_result_streaming(
     );
 
     repaint_ctx.request_repaint();
-    update_l2_settled_status(
+    update_l2_streaming_status(
         l2_status,
+        bg_rgba_cache,
         Some(&snapshot),
         state.bg_inflight_by_request_id.is_empty(),
     );
@@ -1082,12 +1091,12 @@ fn pump_background_work(
     refill_reason: &'static str,
 ) {
     let Some(snapshot) = state.snapshot.clone() else {
-        update_l2_settled_status(l2_status, None, false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, None, false);
         bg_trace_debug!("[viewer-worker-manager-pump-skip] reason=missing_snapshot");
         return;
     };
     if snapshot.page_count == 0 {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         bg_trace_debug!(
             "[viewer-worker-manager-pump-skip] reason=empty_page_count generation={} book_id={:?}",
             snapshot.generation,
@@ -1098,7 +1107,7 @@ fn pump_background_work(
     if snapshot.active_animation_stream_view.is_some()
         || snapshot.animation_stream_request_id.is_some()
     {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         bg_trace_debug!(
             "[viewer-worker-manager-pump-skip] reason=animation_stream_active generation={} book_id={:?} active_view={:?} request_id={:?}",
             snapshot.generation,
@@ -1109,7 +1118,7 @@ fn pump_background_work(
         return;
     }
     if snapshot.prefetch_dir == 0 {
-        update_l2_settled_status(l2_status, Some(&snapshot), false);
+        update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         bg_trace_debug!(
             "[viewer-worker-manager-pump-skip] reason=zero_prefetch_dir generation={} book_id={:?} requested_page={} displayed_page={} target_page={}",
             snapshot.generation,
@@ -1123,7 +1132,7 @@ fn pump_background_work(
 
     let (bg_cache_pages, bg_cache_current_bytes, bg_cache_max_bytes) = {
         let Some(mut cache) = bg_rgba_cache.write().ok() else {
-            update_l2_settled_status(l2_status, Some(&snapshot), false);
+            update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=bg_cache_lock_poisoned generation={} book_id={:?}",
                 snapshot.generation,
@@ -1161,7 +1170,7 @@ fn pump_background_work(
 
     match plan.stop_reason {
         Some(StreamingCacheStopReason::NoWorkerCapacity) => {
-            update_l2_settled_status(l2_status, Some(&snapshot), false);
+            update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=no_available_slots generation={} book_id={:?} refill_reason={}",
                 snapshot.generation,
@@ -1171,7 +1180,7 @@ fn pump_background_work(
             return;
         }
         Some(StreamingCacheStopReason::CacheLimitUnavailable) => {
-            update_l2_settled_status(l2_status, Some(&snapshot), false);
+            update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=cache_limit_unavailable generation={} book_id={:?} refill_reason={}",
                 snapshot.generation,
@@ -1181,8 +1190,9 @@ fn pump_background_work(
             return;
         }
         Some(StreamingCacheStopReason::CacheFullNoPriorityImprovement) => {
-            update_l2_settled_status(
+            update_l2_streaming_status(
                 l2_status,
+                bg_rgba_cache,
                 Some(&snapshot),
                 state.bg_inflight_by_request_id.is_empty(),
             );
@@ -1199,8 +1209,9 @@ fn pump_background_work(
             return;
         }
         Some(StreamingCacheStopReason::NoDispatchablePages) => {
-            update_l2_settled_status(
+            update_l2_streaming_status(
                 l2_status,
+                bg_rgba_cache,
                 Some(&snapshot),
                 state.bg_inflight_by_request_id.is_empty(),
             );
@@ -1245,11 +1256,12 @@ fn pump_background_work(
         state.bg_inflight_by_request_id.len(),
         bg_cache_revision(bg_rgba_cache)
     );
-    update_l2_settled_status(l2_status, Some(&snapshot), false);
+    update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
 }
 
-fn update_l2_settled_status(
+fn update_l2_streaming_status(
     l2_status: &Arc<RwLock<L2StreamingStatus>>,
+    bg_rgba_cache: &Arc<RwLock<RgbaPageCache>>,
     snapshot: Option<&ViewerWorkerManagerSnapshot>,
     settled: bool,
 ) {
@@ -1259,6 +1271,10 @@ fn update_l2_settled_status(
     status.generation = snapshot.map(|snapshot| snapshot.generation).unwrap_or(0);
     status.book_id = snapshot.map(|snapshot| snapshot.book_id.clone());
     status.settled = settled;
+    if let Ok(cache) = bg_rgba_cache.try_read() {
+        (status.current_bytes, status.max_bytes) = (cache.current_bytes(), cache.max_bytes());
+        status.cached_page_count = cache.page_order().len();
+    }
 }
 
 /// streaming / working-set の基準に使う物理ページ。

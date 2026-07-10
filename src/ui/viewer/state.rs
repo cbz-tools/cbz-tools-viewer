@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -58,23 +58,13 @@ const KEY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 const INTERACTIVE_DISPLAY_CANDIDATE_LIMIT: usize = 8;
 const LOG_VIEWPORT_TRANSITION: bool = cfg!(debug_assertions);
 const TRANSITION_LOG_FRAMES: u8 = 30;
-fn spad_trace_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("CBZ_VIEWER_SPAD_TRACE")
-            .map(|value| {
-                let value = value.trim();
-                !value.is_empty() && value != "0" && value != "false"
-            })
-            .unwrap_or(false)
-    })
-}
-
+/// SPAD最低保証を先行開始する割合。ユーザー設定ではなく調整用の内部定数。
+/// L2バイト使用率と、Page Mapがある場合のL2保持ページ率で共用する。
+const SPAD_EARLY_START_THRESHOLD_PERCENT: usize = 30;
+const SPAD_GUARANTEED_PAGE_COUNT: usize = 2;
 macro_rules! spad_trace_debug {
     ($($arg:tt)*) => {
-        if spad_trace_enabled() {
-            tracing::debug!($($arg)*);
-        }
+        tracing::debug!($($arg)*);
     };
 }
 pub(super) fn now_ms() -> u128 {
@@ -289,6 +279,12 @@ struct InteractiveRgbaCacheInsertContext<'a> {
 enum SpadSide {
     Prev,
     Next,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpadDispatchScope {
+    GuaranteedOnly,
+    All,
 }
 
 impl SpadSide {
@@ -3331,6 +3327,7 @@ pub fn configure_spad_targets(
     fn dispatch_spad_request(
         &mut self,
         side: SpadSide,
+        scope: SpadDispatchScope,
         full_equivalent_w: u32,
         full_equivalent_h: u32,
         current_decode_w: u32,
@@ -3351,6 +3348,11 @@ pub fn configure_spad_targets(
                 return false;
             };
             if target.exhausted {
+                return false;
+            }
+            if scope == SpadDispatchScope::GuaranteedOnly
+                && target.ready_pages.len() >= SPAD_GUARANTEED_PAGE_COUNT
+            {
                 return false;
             }
             if target.current_bytes >= target.max_bytes {
@@ -3474,25 +3476,57 @@ pub fn configure_spad_targets(
         }
         {
             let l2_status = self.l2_settled_status();
-            let skip_reason = if !l2_status.settled {
-                Some("not_settled")
+            let display_stable = self.ui_runtime.last_display_commit_show_seq.is_some()
+                && !self.ui_runtime.loading
+                && self.persistent.displayed_page == self.persistent.requested_page
+                && self.persistent.displayed_page == self.persistent.target_page;
+            let l2_usage_threshold_reached = l2_status.max_bytes > 0
+                && l2_status.current_bytes.saturating_mul(100)
+                    >= l2_status
+                        .max_bytes
+                        .saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT);
+            let page_map_page_count = match &self.persistent.page_map_mode {
+                ViewerPageMapMode::Mapped(page_map) => Some(page_map.page_count()),
+                ViewerPageMapMode::Unavailable => None,
+            };
+            let l2_page_threshold_reached = page_map_page_count.is_some_and(|page_count| {
+                page_count > 0
+                    && l2_status.cached_page_count.saturating_mul(100)
+                        >= page_count.saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT)
+            });
+            let scope = if l2_status.settled {
+                Some(SpadDispatchScope::All)
+            } else if l2_usage_threshold_reached || l2_page_threshold_reached {
+                Some(SpadDispatchScope::GuaranteedOnly)
+            } else {
+                None
+            };
+            let skip_reason = if !display_stable {
+                Some("display_not_stable")
             } else if l2_status.book_id.as_ref() != Some(&current_book_id) {
                 Some("book_mismatch")
             } else if l2_status.generation != current_generation {
                 Some("generation_mismatch")
+            } else if scope.is_none() {
+                Some("l2_below_early_usage_threshold")
             } else {
                 None
             };
             if let Some(reason) = skip_reason {
                 spad_trace_debug!(
-                    "[spad-skip-not-settled] reason={} generation={} settled={} inflight={}",
+                    "[spad-skip] reason={} generation={} settled={} l2_bytes={}/{} l2_pages={}/{} inflight={}",
                     reason,
                     l2_status.generation,
                     l2_status.settled,
+                    l2_status.current_bytes,
+                    l2_status.max_bytes,
+                    l2_status.cached_page_count,
+                    page_map_page_count.unwrap_or(0),
                     self.spad.next_inflight.is_some() || self.spad.prev_inflight.is_some()
                 );
                 return handled;
             }
+            let scope = scope.expect("SPAD dispatch scope is set after gate validation");
             for side in [SpadSide::Next, SpadSide::Prev] {
                 let session = self.spad.session;
                 let generation = self.spad.generation;
@@ -3509,8 +3543,8 @@ pub fn configure_spad_targets(
                     }
                 }
             }
-            let next_dispatchable = Self::spad_target_dispatchable(self.spad.next.as_ref());
-            let prev_dispatchable = Self::spad_target_dispatchable(self.spad.prev.as_ref());
+            let next_dispatchable = Self::spad_target_dispatchable(self.spad.next.as_ref(), scope);
+            let prev_dispatchable = Self::spad_target_dispatchable(self.spad.prev.as_ref(), scope);
             if !next_dispatchable && !prev_dispatchable {
                 let has_any_target = Self::spad_target_exists(self.spad.next.as_ref())
                     || Self::spad_target_exists(self.spad.prev.as_ref());
@@ -3547,6 +3581,7 @@ pub fn configure_spad_targets(
             }
             self.spad.no_dispatch_logged = false;
             if self.dispatch_spad_requests(
+                scope,
                 layout.full_equivalent_area_w,
                 layout.full_equivalent_area_h,
                 layout.page_decode_w,
@@ -3560,12 +3595,17 @@ pub fn configure_spad_targets(
         handled
     }
 
-    fn spad_target_dispatchable(target: Option<&SpadTargetState>) -> bool {
+    fn spad_target_dispatchable(
+        target: Option<&SpadTargetState>,
+        scope: SpadDispatchScope,
+    ) -> bool {
         let Some(target) = target else {
             return false;
         };
         !target.exhausted
             && target.current_bytes < target.max_bytes
+            && (scope == SpadDispatchScope::All
+                || target.ready_pages.len() < SPAD_GUARANTEED_PAGE_COUNT)
             && Self::spad_target_has_pending_page(target)
     }
 
@@ -3589,8 +3629,10 @@ pub fn configure_spad_targets(
         target.is_some_and(|target| target.exhausted)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_spad_requests(
         &mut self,
+        scope: SpadDispatchScope,
         full_equivalent_w: u32,
         full_equivalent_h: u32,
         current_decode_w: u32,
@@ -3600,6 +3642,7 @@ pub fn configure_spad_targets(
     ) -> bool {
         let next_dispatched = self.dispatch_spad_request(
             SpadSide::Next,
+            scope,
             full_equivalent_w,
             full_equivalent_h,
             current_decode_w,
@@ -3609,6 +3652,7 @@ pub fn configure_spad_targets(
         );
         let prev_dispatched = self.dispatch_spad_request(
             SpadSide::Prev,
+            scope,
             full_equivalent_w,
             full_equivalent_h,
             current_decode_w,
