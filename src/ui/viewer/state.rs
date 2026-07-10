@@ -1065,6 +1065,8 @@ pub(super) struct ViewerRequestState {
     pub(super) last_bg_admission_requirement: Option<DisplayRequirement>,
     /// RGBA cache 上限（MB）。interactive / BG worker manager の共通設定値。
     pub(super) rgba_cache_max_mb: u16,
+    /// Danger Zoneでのみ設定可能な、隣接本1冊あたりのSPAD追加RAM割合（%）。
+    pub(super) spad_ram_ratio_percent: u8,
     /// BG RGBA admission の判定結果。page + render_signature 単位で保持する。
     /// 容量は decode 後の実RGBAサイズで判定し、予測 byte では切らない。
     /// 本の置換では全消去が必要。現状は ViewerState 再生成でリセットされる前提。
@@ -1687,6 +1689,7 @@ pub fn configure_spad_targets(
                 quality,
                 last_bg_admission_requirement: None,
                 rgba_cache_max_mb: performance_settings.l2_ram_cache_max_mib,
+                spad_ram_ratio_percent: performance_settings.spad_ram_ratio_percent,
                 bg_admission_state: HashMap::new(),
                 interactive_request_plan_cache: None,
                 background_worker_count,
@@ -2897,6 +2900,7 @@ pub fn configure_spad_targets(
         max_tex_side.hash(&mut hasher);
         self.request.background_worker_count.hash(&mut hasher);
         self.request.rgba_cache_max_mb.hash(&mut hasher);
+        self.request.spad_ram_ratio_percent.hash(&mut hasher);
         self.request.active_animation_stream_view.hash(&mut hasher);
         self.request.animation_stream_request_id.hash(&mut hasher);
         hasher.finish()
@@ -3144,14 +3148,25 @@ pub fn configure_spad_targets(
             .next
             .as_ref()
             .map_or(0, |_| next_decode_target.two_page_rgba_bytes);
-        let extra_5_percent_bytes = total_bytes / 20;
-        let prev_extra_budget_bytes = if self.spad.prev.is_some() { extra_5_percent_bytes } else { 0 };
-        let next_extra_budget_bytes = if self.spad.next.is_some() { extra_5_percent_bytes } else { 0 };
+        let extra_spad_bytes = total_bytes
+            .saturating_mul(self.request.spad_ram_ratio_percent as usize)
+            / 100;
+        let prev_extra_budget_bytes = if self.spad.prev.is_some() {
+            extra_spad_bytes
+        } else {
+            0
+        };
+        let next_extra_budget_bytes = if self.spad.next.is_some() {
+            extra_spad_bytes
+        } else {
+            0
+        };
         let prev_total_budget_bytes =
             prev_guaranteed_bytes.saturating_add(prev_extra_budget_bytes);
         let next_total_budget_bytes =
             next_guaranteed_bytes.saturating_add(next_extra_budget_bytes);
-        let reserved = prev_total_budget_bytes.saturating_add(next_total_budget_bytes);
+        // The two-page guarantees are outside the L2/SPAD percentage allocation.
+        let reserved = prev_extra_budget_bytes.saturating_add(next_extra_budget_bytes);
         let minimum_l2_bytes = 1024 * 1024;
         let l2_effective_bytes = total_bytes
             .saturating_sub(reserved)

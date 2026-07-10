@@ -50,9 +50,9 @@ Changes are applied immediately.
 ### Performance
 
 * L1 VRAM Cache: Stores GPU textures for upcoming and recently viewed pages.
-* L2 RAM Cache: Stores decoded RGBA images in system memory.
+* L2 RAM Cache: Stores decoded RGBA images in system memory. Adjacent-book preloading uses 5% of this setting for each of the next and previous books by default.
 * Background Workers: Controls background decoding parallelism.
-* Danger Zone: Allows manual values beyond the normal hardware-based limits.
+* Danger Zone: Allows manual values beyond the normal hardware-based limits, including Adjacent Book Preload RAM (5–30% per adjacent book). The two-page preload guarantee is separate, and changes take effect the next time the Viewer starts.
 
 ---
 

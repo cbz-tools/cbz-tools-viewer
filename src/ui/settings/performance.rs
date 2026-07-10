@@ -2,7 +2,10 @@ use eframe::egui;
 
 use crate::domain::app_settings::AppSettings;
 use crate::domain::app_settings::UiLanguage;
-use crate::domain::performance::{PerformanceResources, PERFORMANCE_CACHE_MIN_MIB};
+use crate::domain::performance::{
+    PerformanceResources, PERFORMANCE_CACHE_MIN_MIB, SPAD_RAM_RATIO_MAX_PERCENT,
+    SPAD_RAM_RATIO_MIN_PERCENT,
+};
 
 use super::super::i18n::{tr, TextKey};
 use super::super::{icons, theme};
@@ -109,7 +112,7 @@ pub(super) fn show_performance_tab(
             ),
             id_suffix: "viewer_rgba_cache_max_mb",
             selection_width: PERFORMANCE_SELECT_WIDTH,
-            description: tr(language, TextKey::CacheUsage),
+            description: tr(language, TextKey::L2RamCacheDescription),
             value_formatter: format_mib_label,
         },
     );
@@ -302,6 +305,30 @@ fn danger_zone_block(
                         tr(language, TextKey::MiB)
                     ),
                 );
+            });
+
+            setting_block(ui, tr(language, TextKey::AdjacentBookPreloadRam), |ui| {
+                let mut ratio = settings.viewer_spad_ram_ratio_percent as i32;
+                ui.horizontal(|ui| {
+                    ui.label("%");
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut ratio)
+                                .range(
+                                    SPAD_RAM_RATIO_MIN_PERCENT as i32
+                                        ..=SPAD_RAM_RATIO_MAX_PERCENT as i32,
+                                )
+                                .speed(1.0),
+                        )
+                        .changed()
+                    {
+                        settings.viewer_spad_ram_ratio_percent = ratio.clamp(
+                            SPAD_RAM_RATIO_MIN_PERCENT as i32,
+                            SPAD_RAM_RATIO_MAX_PERCENT as i32,
+                        ) as u8;
+                    }
+                });
+                subtle_text(ui, tr(language, TextKey::AdjacentBookPreloadRamDescription));
             });
 
             setting_block(ui, tr(language, TextKey::BackgroundWorkers), |ui| {

@@ -7,6 +7,7 @@
 - Added adjacent-book scratchpad preloading for smoother next/previous book navigation.
 - Improved adjacent-book preloading by decoding next and previous books in parallel.
 - Improved adjacent-book layout matching by using the existing Page Map cache when available to reduce spread/single-page promotion misses.
+- Added a Danger Zone setting for adjacent-book preload RAM, with a 5% default and a 5–30% per-book range.
 
 ### Fixed
 

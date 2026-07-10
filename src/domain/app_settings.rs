@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::performance::{
     PerformanceResources, PerformanceSettingsResolved, PERFORMANCE_CACHE_MIN_MIB,
+    SPAD_RAM_RATIO_MAX_PERCENT, SPAD_RAM_RATIO_MIN_PERCENT,
 };
 
 // ── 定数 ─────────────────────────────────────────────────────────────────────
@@ -665,6 +666,12 @@ pub struct AppSettings {
     /// Danger Zone を有効にする
     #[serde(default = "default_viewer_danger_zone_enabled")]
     pub viewer_danger_zone_enabled: bool,
+    /// Danger Zone時の隣接本1冊あたりSPAD RAM割合（%）
+    #[serde(
+        default = "default_viewer_spad_ram_ratio_percent",
+        deserialize_with = "deserialize_viewer_spad_ram_ratio_percent"
+    )]
+    pub viewer_spad_ram_ratio_percent: u8,
     /// ライブラリから Viewer を開くときの起動モード
     #[serde(default = "default_viewer_open_mode", with = "viewer_open_mode_serde")]
     pub viewer_open_mode: ViewerOpenMode,
@@ -751,6 +758,10 @@ fn default_viewer_danger_zone_enabled() -> bool {
     false
 }
 #[allow(dead_code)]
+fn default_viewer_spad_ram_ratio_percent() -> u8 {
+    SPAD_RAM_RATIO_MIN_PERCENT
+}
+#[allow(dead_code)]
 fn default_viewer_open_mode() -> ViewerOpenMode {
     VIEWER_OPEN_MODE_DEFAULT
 }
@@ -831,6 +842,16 @@ where
     Ok(raw.max(1))
 }
 
+#[allow(dead_code)]
+fn deserialize_viewer_spad_ram_ratio_percent<'de, D>(deserializer: D) -> Result<u8, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u16::deserialize(deserializer)?;
+    Ok((raw.min(u8::MAX as u16) as u8)
+        .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT))
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -841,6 +862,7 @@ impl Default for AppSettings {
             viewer_rgba_cache_max_mb: VIEWER_RGBA_CACHE_MAX_MB_DEFAULT,
             viewer_background_worker_count: VIEWER_BACKGROUND_WORKER_COUNT_DEFAULT,
             viewer_danger_zone_enabled: false,
+            viewer_spad_ram_ratio_percent: SPAD_RAM_RATIO_MIN_PERCENT,
             viewer_open_mode: VIEWER_OPEN_MODE_DEFAULT,
             reading_direction: READING_DIRECTION_DEFAULT,
             library_hud_mode: LIBRARY_HUD_MODE_DEFAULT,
@@ -947,6 +969,7 @@ impl AppSettings {
             self.viewer_rgba_cache_max_mb,
             self.viewer_background_worker_count,
             self.viewer_danger_zone_enabled,
+            self.viewer_spad_ram_ratio_percent,
         )
     }
 
@@ -963,6 +986,9 @@ impl AppSettings {
             self.viewer_background_worker_count,
             self.viewer_danger_zone_enabled,
         );
+        self.viewer_spad_ram_ratio_percent = self
+            .viewer_spad_ram_ratio_percent
+            .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT);
     }
 
     pub const fn external_tool_shortcut_candidates() -> &'static [ExternalToolShortcut] {
@@ -1122,6 +1148,9 @@ fn load_app_settings_from_value(
     {
         settings.viewer_danger_zone_enabled = value;
     }
+    if let Some(value) = obj.get("viewer_spad_ram_ratio_percent").and_then(parse_u8) {
+        settings.viewer_spad_ram_ratio_percent = value;
+    }
     if let Some(value) = obj.get("viewer_open_mode").and_then(parse_viewer_open_mode) {
         settings.viewer_open_mode = value;
     }
@@ -1174,11 +1203,19 @@ fn load_app_settings_from_value(
         settings.external_tools = value;
     }
 
+    settings.viewer_spad_ram_ratio_percent = settings
+        .viewer_spad_ram_ratio_percent
+        .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT);
+
     Some(settings)
 }
 
 fn parse_u16(value: &serde_json::Value) -> Option<u16> {
     value.as_u64().and_then(|raw| u16::try_from(raw).ok())
+}
+
+fn parse_u8(value: &serde_json::Value) -> Option<u8> {
+    value.as_u64().map(|raw| raw.min(u8::MAX as u64) as u8)
 }
 
 fn parse_ui_language(value: &serde_json::Value) -> Option<UiLanguage> {

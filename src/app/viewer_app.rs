@@ -431,11 +431,12 @@ impl ViewerApp {
         let performance_settings =
             app_settings.normalized_performance_settings(&performance_resources);
         tracing::debug!(
-            "[viewer.settings.applied] source=app_settings viewer_quality={:?} viewer_l1_vram_cache_max_mb={} viewer_l2_ram_cache_max_mib={} viewer_background_worker_count={}",
+            "[viewer.settings.applied] source=app_settings viewer_quality={:?} viewer_l1_vram_cache_max_mb={} viewer_l2_ram_cache_max_mib={} viewer_background_worker_count={} spad_ram_ratio_percent={}",
             app_settings.viewer_quality,
             performance_settings.l1_vram_cache_max_mib,
             performance_settings.l2_ram_cache_max_mib,
-            performance_settings.background_worker_count
+            performance_settings.background_worker_count,
+            performance_settings.spad_ram_ratio_percent
         );
 
         let mut mode = match launch.mode {

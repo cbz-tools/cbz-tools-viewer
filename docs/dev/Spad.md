@@ -197,13 +197,15 @@ failed
     decode失敗、range外、budget不採用などの再dispatch抑止。
 
 budget
-    targetごとのRGBA byte上限。target layoutに対応する2ページ保証を含む。
+    targetごとのRGBA byte上限。target layoutに対応する2ページ保証と、L2 RAM Cache設定容量に対する追加割合で構成する。
 
 exhausted
     targetが明示的にdispatch停止状態になったこと。すべての停止理由を表さない。
 ```
 
 decode失敗やrange外は当該pageを`failed`へ記録する。候補枯渇はdispatch可能候補なしとして扱う。SPADのdispatch停止は、exhausted、候補pageなし、budget不足、ready / failed済みなどの組み合わせで決まる。
+
+通常時の追加割合はNext / PrevそれぞれL2 RAM Cache設定容量の5%固定である。Danger Zoneでは隣接本1冊あたり5～30%を保存でき、Next / Prevに同じ割合をそれぞれ適用する。target layoutに対応する2ページ保証はこの割合の外数であり、L2の割合配分からも差し引かない。設定は保存時ではなく、次回Viewer起動時に解決される。
 
 NextとPrevは別Targetなので、片側が明示的にexhaustedでも反対側は継続できる。
 

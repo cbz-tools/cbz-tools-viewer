@@ -11,10 +11,13 @@ pub struct PerformanceSettingsResolved {
     pub l1_vram_cache_max_mib: u16,
     pub l2_ram_cache_max_mib: u16,
     pub background_worker_count: usize,
+    pub spad_ram_ratio_percent: u8,
 }
 
 pub const PERFORMANCE_CACHE_MIN_MIB: u16 = 256;
 pub const PERFORMANCE_BG_MIN_WORKERS: u16 = 2;
+pub const SPAD_RAM_RATIO_MIN_PERCENT: u8 = 5;
+pub const SPAD_RAM_RATIO_MAX_PERCENT: u8 = 30;
 
 fn bytes_to_mib(bytes: u64) -> u64 {
     bytes / (1024 * 1024)
@@ -220,6 +223,7 @@ impl PerformanceResources {
             l1_vram_cache_max_mib: self.l1_default_mib(),
             l2_ram_cache_max_mib: self.l2_default_mib(),
             background_worker_count: self.bg_default_workers() as usize,
+            spad_ram_ratio_percent: SPAD_RAM_RATIO_MIN_PERCENT,
         }
     }
 
@@ -229,6 +233,7 @@ impl PerformanceResources {
         l2_ram_cache_max_mib: u16,
         background_worker_count: u16,
         danger_zone_enabled: bool,
+        spad_ram_ratio_percent: u8,
     ) -> PerformanceSettingsResolved {
         PerformanceSettingsResolved {
             l1_vram_cache_max_mib: self
@@ -237,6 +242,11 @@ impl PerformanceResources {
             background_worker_count: self
                 .normalize_bg_workers(background_worker_count, danger_zone_enabled)
                 as usize,
+            spad_ram_ratio_percent: if danger_zone_enabled {
+                spad_ram_ratio_percent.clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT)
+            } else {
+                SPAD_RAM_RATIO_MIN_PERCENT
+            },
         }
     }
 }

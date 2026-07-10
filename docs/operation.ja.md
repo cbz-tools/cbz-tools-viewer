@@ -50,9 +50,9 @@
 ### Performance
 
 * L1 VRAM Cache: 先読み・履歴ページのGPU Textureを保持する容量
-* L2 RAM Cache: デコード済みRGBAをRAMへ保持する容量
+* L2 RAM Cache: デコード済みRGBAをRAMへ保持する容量。通常時は、次本・前本の先読みがそれぞれこの設定の5%を使用します。
 * Background Workers: バックグラウンド処理の並列数
-* Danger Zone: 通常のハードウェア基準上限を超えて手入力する設定
+* Danger Zone: 通常のハードウェア基準上限を超えて手入力する設定。隣接本の先読みRAMは隣接本1冊あたり5～30%で設定でき、2ページ保証は別枠です。変更はViewerを次回起動した後に反映されます。
 
 ---
 
