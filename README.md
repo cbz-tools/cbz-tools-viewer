@@ -37,6 +37,7 @@ The demo manga assets are also licensed under the MIT License.
 * Delete the current book and move on to the next one.
 * Select an unwanted page range in the viewer, exclude those pages, and rebuild the archive.
 * Predictive loading and caching help keep page turns responsive, even in large books.
+* Adjacent book preloading prepares nearby pages from the next and previous books in the background, reducing the delay when moving between books.
 * Animated WebP streaming playback, including spread view.
 
 ---
@@ -128,6 +129,7 @@ See the following for detailed usage:
 * [Library display settings](docs/operation.md#library-display-settings)
 * [Danger Zone Recovery](docs/DANGER_ZONE_RECOVERY.md)
 * [L1 / L2 Streaming Cache](docs/dev/SimpleStreaming.md)
+* [SPAD: Adjacent Book Scratchpad](docs/dev/Spad.md)
 
 See `docs` for implementation and architecture details.
 
