@@ -18,6 +18,13 @@ impl PageMapDiskCache {
         Ok(Self { root })
     }
 
+    pub fn open_existing(root: PathBuf) -> Result<Self> {
+        if !root.is_dir() {
+            anyhow::bail!("page map cache directory does not exist");
+        }
+        Ok(Self { root })
+    }
+
     pub fn default_root() -> PathBuf {
         let local = std::env::var("LOCALAPPDATA")
             .map(PathBuf::from)
@@ -31,6 +38,24 @@ impl PageMapDiskCache {
         &self,
         id: &BookId,
         revision: &SourceRevision,
+    ) -> Option<BookPageMap> {
+        self.get_page_map_for_revision_inner(id, revision, true)
+    }
+
+    /// Read a cached map without repairing or deleting cache entries.
+    pub fn get_existing_page_map_for_revision(
+        &self,
+        id: &BookId,
+        revision: &SourceRevision,
+    ) -> Option<BookPageMap> {
+        self.get_page_map_for_revision_inner(id, revision, false)
+    }
+
+    fn get_page_map_for_revision_inner(
+        &self,
+        id: &BookId,
+        revision: &SourceRevision,
+        remove_invalid_entry: bool,
     ) -> Option<BookPageMap> {
         if !revision.is_persistable() {
             return None;
@@ -48,7 +73,9 @@ impl PageMapDiskCache {
                     cache_path = %path.display(),
                     "page-map cache miss"
                 );
-                let _ = std::fs::remove_file(&path);
+                if remove_invalid_entry {
+                    let _ = std::fs::remove_file(&path);
+                }
                 None
             }
             Err(e) => {

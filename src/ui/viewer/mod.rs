@@ -27,6 +27,7 @@ use self::toolbar::{is_reserved_viewer_key, render_viewer_toolbar, ViewerToolbar
 use super::{icons, theme};
 
 mod auto_spread_plan;
+mod decode_layout;
 mod draw;
 mod gpu_texture_history;
 mod gpu_warmup_cache;
@@ -39,8 +40,13 @@ mod worker_manager;
 mod working_set;
 pub use self::state::{
     BoundaryPreviewDirection, FullEquivalentSizeHint, FullEquivalentSizeHintSource,
-    ViewerDeleteRangeSelection, ViewerState, ViewerStateInit,
+    SpadTargetLayoutSettings, ViewerDeleteRangeSelection, ViewerState, ViewerStateInit,
 };
+
+pub(crate) fn max_texture_side_from_context(ctx: &egui::Context) -> u32 {
+    ctx.input(|i| i.raw.max_texture_side)
+        .unwrap_or(img::DEFAULT_MAX_TEXTURE_SIDE as usize) as u32
+}
 
 pub enum ViewerAction {
     None,
@@ -761,9 +767,7 @@ pub fn show(
 
     // ── display_w / max_tex_side を確定 ─────────────────────────────────────
     let measured_display_w = ui.available_width() as u32;
-    let max_tex_side = ctx
-        .input(|i| i.raw.max_texture_side)
-        .unwrap_or(img::DEFAULT_MAX_TEXTURE_SIDE as usize) as u32;
+    let max_tex_side = max_texture_side_from_context(&ctx);
 
     // ── ツールバー（Windowed） ──────────────────────────────────────────────
     let pre_in_fullscreen_transition = state.ui_runtime.fullscreen_transition_frames > 0;
@@ -890,6 +894,7 @@ pub fn show(
     }
     if !in_viewport_transition {
         state.poll_worker_manager_notifications(display_w, display_h, max_tex_side);
+        state.poll_spad(&ctx, display_w, display_h, max_tex_side);
     }
     // pending 可視状態は poll_loader 後の最新状態で判定する。
     state.update_pending_progress_state(now);

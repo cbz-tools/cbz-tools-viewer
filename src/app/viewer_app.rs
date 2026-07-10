@@ -90,6 +90,7 @@ pub struct ViewerApp {
     saved_viewer_win_size: Option<[f32; 2]>,
     saved_viewer_window_maximized: Option<bool>,
     image_order_snapshot_applied: bool,
+    spad_session_id: u64,
 }
 
 enum ViewerMode {
@@ -102,6 +103,7 @@ enum ViewerMode {
         pending_action_request_id: Option<u64>,
         pending_viewer_state_request_id: Option<u64>,
         pending_favorite_toggle_request_id: Option<u64>,
+        pending_spad_request_id: Option<u64>,
     },
     SnapshotOnly {
         request_tx: mpsc::Sender<ViewerToLibrary>,
@@ -498,6 +500,7 @@ impl ViewerApp {
                                     pending_action_request_id: None,
                                     pending_viewer_state_request_id: None,
                                     pending_favorite_toggle_request_id: None,
+                                    pending_spad_request_id: None,
                                 }
                             }
                         }
@@ -538,6 +541,7 @@ impl ViewerApp {
             viewer::ViewerStateInit {
                 entry,
                 start_page: book_state.start_page.map(|page| page as u32).unwrap_or(0),
+                spad_session_id: 1,
                 cover_blank: file_settings.cover_blank,
                 quality_override: file_settings.quality_override,
                 global_reading_direction: app_settings.reading_direction,
@@ -586,7 +590,7 @@ impl ViewerApp {
         }
         set_viewer_title(&cc.egui_ctx, path.as_path());
 
-        Ok(Self {
+        let mut app = Self {
             state,
             settings,
             app_settings,
@@ -622,7 +626,10 @@ impl ViewerApp {
             saved_viewer_win_size,
             saved_viewer_window_maximized,
             image_order_snapshot_applied: false,
-        })
+            spad_session_id: 1,
+        };
+        app.send_spad_request();
+        Ok(app)
     }
 
     fn reopen_to_path(
@@ -656,13 +663,22 @@ impl ViewerApp {
                 monitor_size_points,
                 source: viewer::FullEquivalentSizeHintSource::ViewerViewport,
             });
+        let spad_ready_pages = self.state.take_spad_ready_pages_for_target(path);
+        tracing::info!(
+            target_path = %path.display(),
+            ready_count = spad_ready_pages.len(),
+            "viewer.spad.reopen.take_ready"
+        );
+        self.state.cancel_spad("reopen");
         self.state.clear_gpu_texture_history("book_changed");
         self.state.flush_worker();
+        self.spad_session_id = self.spad_session_id.saturating_add(1);
         self.state = ViewerState::new(
             ctx.clone(),
             viewer::ViewerStateInit {
                 entry,
                 start_page: book_state.start_page.map(|page| page as u32).unwrap_or(0),
+                spad_session_id: self.spad_session_id,
                 cover_blank: file_settings.cover_blank,
                 quality_override: file_settings.quality_override,
                 global_reading_direction: self.app_settings.reading_direction,
@@ -676,8 +692,25 @@ impl ViewerApp {
             },
         )
         .map_err(|e| anyhow::anyhow!(e))?;
+        if !spad_ready_pages.is_empty() {
+            let viewport_size = ctx
+                .input(|i| i.viewport_rect().size())
+                .max(egui::Vec2::ZERO);
+            let current_display_w = viewport_size.x.max(1.0) as u32;
+            let current_display_h = viewport_size.y.max(1.0) as u32;
+            let current_max_tex_side = viewer::max_texture_side_from_context(ctx);
+            self.state
+                .promote_spad_ready_pages_to_l1_future(
+                    ctx,
+                    spad_ready_pages,
+                    current_display_w,
+                    current_display_h,
+                    current_max_tex_side,
+                );
+        }
         self.book_state = book_state;
         self.favorite_state = book_state.favorite_state;
+        self.send_spad_request();
         set_viewer_title(ctx, path);
         tracing::info!(
             target_path = %path.display(),
@@ -808,6 +841,30 @@ impl ViewerApp {
             return;
         }
         self.state.boundary_preview_mark_request_sent(request_id);
+    }
+
+    fn send_spad_request(&mut self) {
+        let ViewerMode::Library {
+            request_tx,
+            last_request_id,
+            pending_spad_request_id,
+            ..
+        } = &mut self.mode
+        else {
+            return;
+        };
+        *last_request_id = last_request_id.saturating_add(1);
+        let request_id = *last_request_id;
+        if request_tx
+            .send(ViewerToLibrary::RequestAdjacentBooks {
+                request_id,
+                kind: AdjacentBooksKind::Spad,
+            })
+            .is_err()
+        {
+            return;
+        }
+        *pending_spad_request_id = Some(request_id);
     }
 
     fn book_meta_for_preview_path(path: &Path) -> Option<BookMeta> {
@@ -1109,8 +1166,8 @@ impl ViewerApp {
                                 continue;
                             };
                             let candidate_path = match probe {
-                                BoundaryPreviewDirection::Previous => prev.as_deref(),
-                                BoundaryPreviewDirection::Next => next.as_deref(),
+                                BoundaryPreviewDirection::Previous => prev.as_ref().map(|book| book.path.as_path()),
+                                BoundaryPreviewDirection::Next => next.as_ref().map(|book| book.path.as_path()),
                             };
                             let Some(path) = candidate_path else {
                                 let _ = self.state.boundary_preview_clear_if_matches(request_id);
@@ -1131,6 +1188,45 @@ impl ViewerApp {
                             };
                             if !self.load_boundary_preview_thumbnail(ctx, request_id, &book) {
                                 let _ = self.state.boundary_preview_clear_if_matches(request_id);
+                            }
+                        }
+                        AdjacentBooksKind::Spad => {
+                            let is_current = matches!(
+                                self.mode,
+                                ViewerMode::Library {
+                                    pending_spad_request_id: Some(current_request_id),
+                                    ..
+                                } if current_request_id == request_id
+                            );
+                            if !is_current {
+                                continue;
+                            }
+                            let prev_layout_settings = prev.as_ref().map(|book| {
+                                let settings = self.settings.get(&book.path);
+                                viewer::SpadTargetLayoutSettings {
+                                    spread_setting: settings.spread_mode,
+                                    cover_blank: settings.cover_blank,
+                                }
+                            });
+                            let next_layout_settings = next.as_ref().map(|book| {
+                                let settings = self.settings.get(&book.path);
+                                viewer::SpadTargetLayoutSettings {
+                                    spread_setting: settings.spread_mode,
+                                    cover_blank: settings.cover_blank,
+                                }
+                            });
+                            self.state.configure_spad_targets(
+                                prev.clone(),
+                                next.clone(),
+                                prev_layout_settings,
+                                next_layout_settings,
+                            );
+                            if let ViewerMode::Library {
+                                pending_spad_request_id,
+                                ..
+                            } = &mut self.mode
+                            {
+                                *pending_spad_request_id = None;
                             }
                         }
                     },

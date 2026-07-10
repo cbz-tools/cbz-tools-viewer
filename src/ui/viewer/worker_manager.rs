@@ -17,6 +17,7 @@ use crate::{
 
 use super::{
     auto_spread_plan::AutoSpreadPlan,
+    decode_layout::request_display_width_for_pair,
     state::{RgbaCacheKey, RgbaPageCache},
     streaming_cache::{
         desired_auto_streaming_sequence, SimpleStreamingCachePolicy, StreamingCachePlanner,
@@ -147,6 +148,13 @@ pub(super) struct ViewerWorkerManagerDebugState {
     pub(super) dispatch_limit_reason: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub(super) struct L2StreamingStatus {
+    pub(super) generation: u64,
+    pub(super) book_id: Option<BookId>,
+    pub(super) settled: bool,
+}
+
 #[derive(Debug)]
 enum ViewerWorkerManagerCommand {
     Update(ViewerWorkerManagerSnapshot),
@@ -167,6 +175,7 @@ pub(super) struct ViewerWorkerManagerHandle {
     command_tx: mpsc::Sender<ViewerWorkerManagerCommand>,
     notification_rx: Mutex<mpsc::Receiver<ViewerWorkerManagerNotification>>,
     bg_rgba_cache: Arc<RwLock<RgbaPageCache>>,
+    l2_status: Arc<RwLock<L2StreamingStatus>>,
 }
 
 impl ViewerWorkerManagerHandle {
@@ -175,6 +184,8 @@ impl ViewerWorkerManagerHandle {
         let (notification_tx, notification_rx) = mpsc::channel();
         let bg_rgba_cache = Arc::new(RwLock::new(RgbaPageCache::new()));
         let bg_rgba_cache_thread = Arc::clone(&bg_rgba_cache);
+        let l2_status = Arc::new(RwLock::new(L2StreamingStatus::default()));
+        let l2_status_thread = Arc::clone(&l2_status);
         let repaint_ctx_thread = repaint_ctx.clone();
 
         thread::Builder::new()
@@ -183,6 +194,7 @@ impl ViewerWorkerManagerHandle {
                 worker_manager_loop(
                     loader,
                     bg_rgba_cache_thread,
+                    l2_status_thread,
                     repaint_ctx_thread,
                     command_rx,
                     notification_tx,
@@ -194,6 +206,7 @@ impl ViewerWorkerManagerHandle {
             command_tx,
             notification_rx: Mutex::new(notification_rx),
             bg_rgba_cache,
+            l2_status,
         }
     }
 
@@ -230,6 +243,13 @@ impl ViewerWorkerManagerHandle {
     pub(super) fn bg_rgba_cache(&self) -> Arc<RwLock<RgbaPageCache>> {
         Arc::clone(&self.bg_rgba_cache)
     }
+
+    pub(super) fn l2_status(&self) -> L2StreamingStatus {
+        self.l2_status
+            .read()
+            .map(|status| status.clone())
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for ViewerWorkerManagerHandle {
@@ -253,6 +273,7 @@ struct ViewerWorkerManagerState {
 fn worker_manager_loop(
     loader: Arc<ViewerLoader>,
     bg_rgba_cache: Arc<RwLock<RgbaPageCache>>,
+    l2_status: Arc<RwLock<L2StreamingStatus>>,
     repaint_ctx: egui::Context,
     command_rx: mpsc::Receiver<ViewerWorkerManagerCommand>,
     notification_tx: mpsc::Sender<ViewerWorkerManagerNotification>,
@@ -274,6 +295,7 @@ fn worker_manager_loop(
             drain_worker_manager_commands(
                 &loader,
                 &bg_rgba_cache,
+                &l2_status,
                 &mut state,
                 &notification_tx,
                 &command_rx,
@@ -289,6 +311,7 @@ fn worker_manager_loop(
             handled_any = true;
             let should_pump = handle_background_result_streaming(
                 &bg_rgba_cache,
+                &l2_status,
                 &mut state,
                 &repaint_ctx,
                 &notification_tx,
@@ -297,6 +320,7 @@ fn worker_manager_loop(
             let command_outcome = drain_worker_manager_commands(
                 &loader,
                 &bg_rgba_cache,
+                &l2_status,
                 &mut state,
                 &notification_tx,
                 &command_rx,
@@ -309,6 +333,7 @@ fn worker_manager_loop(
                 pump_background_work(
                     &loader,
                     &bg_rgba_cache,
+                    &l2_status,
                     &mut state,
                     &notification_tx,
                     "bg_completion",
@@ -327,6 +352,7 @@ fn worker_manager_loop(
                         command,
                         &loader,
                         &bg_rgba_cache,
+                        &l2_status,
                         &mut state,
                         &notification_tx,
                     ),
@@ -345,6 +371,7 @@ fn apply_worker_manager_command(
     command: ViewerWorkerManagerCommand,
     loader: &Arc<ViewerLoader>,
     bg_rgba_cache: &Arc<RwLock<RgbaPageCache>>,
+    l2_status: &Arc<RwLock<L2StreamingStatus>>,
     state: &mut ViewerWorkerManagerState,
     notification_tx: &mpsc::Sender<ViewerWorkerManagerNotification>,
 ) -> WorkerManagerCommandOutcome {
@@ -370,6 +397,7 @@ fn apply_worker_manager_command(
             pump_background_work(
                 loader,
                 bg_rgba_cache,
+                l2_status,
                 state,
                 notification_tx,
                 "initial_pump",
@@ -388,6 +416,7 @@ fn apply_worker_manager_command(
 fn drain_worker_manager_commands(
     loader: &Arc<ViewerLoader>,
     bg_rgba_cache: &Arc<RwLock<RgbaPageCache>>,
+    l2_status: &Arc<RwLock<L2StreamingStatus>>,
     state: &mut ViewerWorkerManagerState,
     notification_tx: &mpsc::Sender<ViewerWorkerManagerNotification>,
     command_rx: &mpsc::Receiver<ViewerWorkerManagerCommand>,
@@ -405,6 +434,7 @@ fn drain_worker_manager_commands(
                     command,
                     loader,
                     bg_rgba_cache,
+                    l2_status,
                     state,
                     notification_tx,
                 ) {
@@ -793,12 +823,14 @@ fn capture_debug_state_streaming(
 /// 追跡済みの BG 完了を処理できたとき true。通常の pump を続ける合図にする。
 fn handle_background_result_streaming(
     bg_rgba_cache: &Arc<RwLock<RgbaPageCache>>,
+    l2_status: &Arc<RwLock<L2StreamingStatus>>,
     state: &mut ViewerWorkerManagerState,
     repaint_ctx: &egui::Context,
     notification_tx: &mpsc::Sender<ViewerWorkerManagerNotification>,
     result: ViewerResult,
 ) -> bool {
     let Some(snapshot) = state.snapshot.clone() else {
+        update_l2_settled_status(l2_status, None, false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "missing_snapshot",
@@ -806,6 +838,7 @@ fn handle_background_result_streaming(
         return false;
     };
     if result.kind == ViewerResultKind::AnimationFramesChunk {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "animation_stream_not_managed_here",
@@ -814,6 +847,7 @@ fn handle_background_result_streaming(
     }
 
     let Some(entry) = state.bg_inflight_by_request_id.remove(&result.request_id) else {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "untracked_bg_result",
@@ -825,6 +859,7 @@ fn handle_background_result_streaming(
     release_prefetch_inflight_slot(state, entry.page);
 
     if let Some(reason) = bg_result_is_stale(&snapshot, &entry) {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason,
@@ -843,6 +878,7 @@ fn handle_background_result_streaming(
                 .filter(|_| !result.right_is_animation_stream)
         });
     let Some(frames) = frames else {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "background_empty_frames",
@@ -850,6 +886,7 @@ fn handle_background_result_streaming(
         return false;
     };
     let Some(bytes) = RgbaPageCache::static_rgba_bytes(frames.as_ref()) else {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
             request_id: result.request_id,
             reason: "background_non_static_frames",
@@ -857,6 +894,7 @@ fn handle_background_result_streaming(
         return false;
     };
     let Some(mut cache) = bg_rgba_cache.write().ok() else {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         let _ = notification_tx.send(ViewerWorkerManagerNotification::Error {
             message: "bg cache lock poisoned".to_owned(),
         });
@@ -923,6 +961,11 @@ fn handle_background_result_streaming(
             entry.render_signature.target_h,
             entry.render_signature.max_tex_side
         );
+        update_l2_settled_status(
+            l2_status,
+            Some(&snapshot),
+            state.bg_inflight_by_request_id.is_empty(),
+        );
         return true;
     }
 
@@ -961,6 +1004,11 @@ fn handle_background_result_streaming(
             entry.render_signature.target_h,
             entry.render_signature.max_tex_side
         );
+        update_l2_settled_status(
+            l2_status,
+            Some(&snapshot),
+            state.bg_inflight_by_request_id.is_empty(),
+        );
         return true;
     }
 
@@ -983,6 +1031,11 @@ fn handle_background_result_streaming(
     );
 
     repaint_ctx.request_repaint();
+    update_l2_settled_status(
+        l2_status,
+        Some(&snapshot),
+        state.bg_inflight_by_request_id.is_empty(),
+    );
     true
 }
 
@@ -1023,15 +1076,18 @@ fn release_prefetch_inflight_slot(state: &mut ViewerWorkerManagerState, page: u3
 fn pump_background_work(
     loader: &Arc<ViewerLoader>,
     bg_rgba_cache: &Arc<RwLock<RgbaPageCache>>,
+    l2_status: &Arc<RwLock<L2StreamingStatus>>,
     state: &mut ViewerWorkerManagerState,
     notification_tx: &mpsc::Sender<ViewerWorkerManagerNotification>,
     refill_reason: &'static str,
 ) {
     let Some(snapshot) = state.snapshot.clone() else {
+        update_l2_settled_status(l2_status, None, false);
         bg_trace_debug!("[viewer-worker-manager-pump-skip] reason=missing_snapshot");
         return;
     };
     if snapshot.page_count == 0 {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         bg_trace_debug!(
             "[viewer-worker-manager-pump-skip] reason=empty_page_count generation={} book_id={:?}",
             snapshot.generation,
@@ -1042,6 +1098,7 @@ fn pump_background_work(
     if snapshot.active_animation_stream_view.is_some()
         || snapshot.animation_stream_request_id.is_some()
     {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         bg_trace_debug!(
             "[viewer-worker-manager-pump-skip] reason=animation_stream_active generation={} book_id={:?} active_view={:?} request_id={:?}",
             snapshot.generation,
@@ -1052,6 +1109,7 @@ fn pump_background_work(
         return;
     }
     if snapshot.prefetch_dir == 0 {
+        update_l2_settled_status(l2_status, Some(&snapshot), false);
         bg_trace_debug!(
             "[viewer-worker-manager-pump-skip] reason=zero_prefetch_dir generation={} book_id={:?} requested_page={} displayed_page={} target_page={}",
             snapshot.generation,
@@ -1065,6 +1123,7 @@ fn pump_background_work(
 
     let (bg_cache_pages, bg_cache_current_bytes, bg_cache_max_bytes) = {
         let Some(mut cache) = bg_rgba_cache.write().ok() else {
+            update_l2_settled_status(l2_status, Some(&snapshot), false);
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=bg_cache_lock_poisoned generation={} book_id={:?}",
                 snapshot.generation,
@@ -1102,6 +1161,7 @@ fn pump_background_work(
 
     match plan.stop_reason {
         Some(StreamingCacheStopReason::NoWorkerCapacity) => {
+            update_l2_settled_status(l2_status, Some(&snapshot), false);
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=no_available_slots generation={} book_id={:?} refill_reason={}",
                 snapshot.generation,
@@ -1111,6 +1171,7 @@ fn pump_background_work(
             return;
         }
         Some(StreamingCacheStopReason::CacheLimitUnavailable) => {
+            update_l2_settled_status(l2_status, Some(&snapshot), false);
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=cache_limit_unavailable generation={} book_id={:?} refill_reason={}",
                 snapshot.generation,
@@ -1120,6 +1181,11 @@ fn pump_background_work(
             return;
         }
         Some(StreamingCacheStopReason::CacheFullNoPriorityImprovement) => {
+            update_l2_settled_status(
+                l2_status,
+                Some(&snapshot),
+                state.bg_inflight_by_request_id.is_empty(),
+            );
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=cache_full_no_priority_improvement generation={} book_id={:?} refill_reason={} desired_sequence_len={} cache_pages={} cache_bytes={}/{}",
                 snapshot.generation,
@@ -1133,6 +1199,11 @@ fn pump_background_work(
             return;
         }
         Some(StreamingCacheStopReason::NoDispatchablePages) => {
+            update_l2_settled_status(
+                l2_status,
+                Some(&snapshot),
+                state.bg_inflight_by_request_id.is_empty(),
+            );
             bg_trace_debug!(
                 "[viewer-worker-manager-pump-skip] reason=no_dispatchable_pages generation={} book_id={:?} refill_reason={} desired_sequence_len={} cache_pages={}",
                 snapshot.generation,
@@ -1174,6 +1245,20 @@ fn pump_background_work(
         state.bg_inflight_by_request_id.len(),
         bg_cache_revision(bg_rgba_cache)
     );
+    update_l2_settled_status(l2_status, Some(&snapshot), false);
+}
+
+fn update_l2_settled_status(
+    l2_status: &Arc<RwLock<L2StreamingStatus>>,
+    snapshot: Option<&ViewerWorkerManagerSnapshot>,
+    settled: bool,
+) {
+    let Ok(mut status) = l2_status.write() else {
+        return;
+    };
+    status.generation = snapshot.map(|snapshot| snapshot.generation).unwrap_or(0);
+    status.book_id = snapshot.map(|snapshot| snapshot.book_id.clone());
+    status.settled = settled;
 }
 
 /// streaming / working-set の基準に使う物理ページ。
@@ -1255,14 +1340,6 @@ fn resolve_candidate_layout(
         effective_spread,
         page_decode_w,
         page_decode_h: snapshot.full_equivalent_area_h,
-    }
-}
-
-fn request_display_width_for_pair(display_w: u32, has_right_page: bool) -> u32 {
-    if has_right_page {
-        display_w.div_ceil(2).max(1)
-    } else {
-        display_w
     }
 }
 

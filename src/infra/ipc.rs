@@ -68,6 +68,13 @@ pub struct ViewerBookState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AdjacentBook {
+    pub path: PathBuf,
+    pub book_state: ViewerBookState,
+    pub page_count: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImageOrderSnapshot {
     pub folder: PathBuf,
     pub start_image: PathBuf,
@@ -103,8 +110,8 @@ pub enum LibraryToViewer {
     AdjacentBooks {
         request_id: u64,
         kind: AdjacentBooksKind,
-        prev: Option<PathBuf>,
-        next: Option<PathBuf>,
+        prev: Option<AdjacentBook>,
+        next: Option<AdjacentBook>,
     },
     NoMoreBooks {
         request_id: u64,
@@ -120,6 +127,7 @@ pub enum LibraryToViewer {
 pub enum AdjacentBooksKind {
     DeleteDialog,
     BoundaryPreview,
+    Spad,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

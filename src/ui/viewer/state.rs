@@ -1,6 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    sync::Arc,
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
+    path::{Path, PathBuf},
+    sync::{Arc, OnceLock},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,13 +13,17 @@ use crate::domain::archive_settings::{clamp_slideshow_interval_secs, SpreadMode}
 use crate::domain::performance::{mib_to_bytes, split_mib_evenly, PerformanceSettingsResolved};
 use crate::infra::archive::{viewer_page_display_labels, viewer_page_entry_names};
 use crate::infra::image::decode as img;
+use crate::infra::ipc::AdjacentBook;
 use crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode;
+use crate::infra::page_map::viewer_bootstrap::try_load_existing_viewer_page_map_for_spad;
 use crate::infra::worker::viewer_loader::{
     ViewerLoadRequest, ViewerLoader, ViewerResult, ViewerResultKind,
 };
 use crate::ui::thumb_cache::LoadedDiskThumb;
+use crate::util::path_eq::paths_equivalent_for_selection;
 
 use super::auto_spread_plan::{build_auto_spread_plan, AutoSpreadPlan};
+use super::decode_layout::{request_display_width_for_pair, static_rgba_bytes_for_decode};
 #[cfg(debug_assertions)]
 use super::gpu_texture_history::GpuTextureHistorySnapshot;
 use super::gpu_texture_history::{GpuTextureHistory, GpuTextureHit, GpuTextureHitSource};
@@ -31,7 +36,8 @@ use super::gpu_warmup_planner::{
 };
 use super::streaming_cache::SimpleStreamingCachePolicy;
 use super::worker_manager::{
-    ViewerWorkerManagerHandle, ViewerWorkerManagerNotification, ViewerWorkerManagerSnapshot,
+    L2StreamingStatus, ViewerWorkerManagerHandle, ViewerWorkerManagerNotification,
+    ViewerWorkerManagerSnapshot,
 };
 use super::working_set::{
     page_render_signature_rank, BgAdmissionState, Direction, DisplayRequirement,
@@ -52,6 +58,25 @@ const KEY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 const INTERACTIVE_DISPLAY_CANDIDATE_LIMIT: usize = 8;
 const LOG_VIEWPORT_TRANSITION: bool = cfg!(debug_assertions);
 const TRANSITION_LOG_FRAMES: u8 = 30;
+fn spad_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("CBZ_VIEWER_SPAD_TRACE")
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && value != "false"
+            })
+            .unwrap_or(false)
+    })
+}
+
+macro_rules! spad_trace_debug {
+    ($($arg:tt)*) => {
+        if spad_trace_enabled() {
+            tracing::debug!($($arg)*);
+        }
+    };
+}
 pub(super) fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -133,6 +158,7 @@ pub(super) struct OverlayRenderResult {
 pub struct ViewerStateInit {
     pub entry: BookMeta,
     pub start_page: u32,
+    pub spad_session_id: u64,
     pub cover_blank: bool,
     pub quality_override: Option<ViewerQuality>,
     pub global_reading_direction: ReadingDirection,
@@ -257,6 +283,124 @@ struct InteractiveRgbaCacheInsertContext<'a> {
     target_h: u32,
     quality: &'a ViewerQuality,
     max_tex_side: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpadSide {
+    Prev,
+    Next,
+}
+
+impl SpadSide {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prev => "prev",
+            Self::Next => "next",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SpadReadyPage {
+    frames: Arc<Vec<img::FrameData>>,
+    render_signature: RenderSignature,
+}
+
+#[derive(Clone)]
+pub struct SpadTargetLayoutSettings {
+    pub spread_setting: SpreadMode,
+    pub cover_blank: bool,
+}
+
+#[derive(Clone, Copy)]
+enum SpadDecodeLayoutSource {
+    CurrentLayout,
+    TargetPageMap,
+}
+
+impl SpadDecodeLayoutSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::CurrentLayout => "current_layout",
+            Self::TargetPageMap => "target_page_map",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SpadTargetLayoutHint {
+    source: SpadDecodeLayoutSource,
+    page_count: u32,
+    resolved_entry_page: u32,
+    effective_spread: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SpadResolvedDecodeTarget {
+    source: SpadDecodeLayoutSource,
+    effective_spread: bool,
+    decode_w: u32,
+    decode_h: u32,
+    two_page_rgba_bytes: usize,
+}
+
+struct SpadTargetState {
+    path: PathBuf,
+    _book_state: crate::infra::ipc::ViewerBookState,
+    page_count: Option<u32>,
+    entry_page: u32,
+    layout_hint: Option<SpadTargetLayoutHint>,
+    scheduled_pages: Vec<u32>,
+    next_dispatch_index: usize,
+    ready_pages: BTreeMap<u32, SpadReadyPage>,
+    failed_pages: HashSet<u32>,
+    current_bytes: usize,
+    max_bytes: usize,
+    guaranteed_bytes: usize,
+    extra_budget_bytes: usize,
+    exhausted: bool,
+}
+
+struct SpadInflightRequest {
+    request_id: u64,
+    session: u64,
+    generation: u64,
+    side: SpadSide,
+    path: PathBuf,
+    page: u32,
+    render_signature: RenderSignature,
+}
+
+#[derive(Default)]
+struct ViewerSpadState {
+    session: u64,
+    generation: u64,
+    next_inflight: Option<SpadInflightRequest>,
+    prev_inflight: Option<SpadInflightRequest>,
+    prev: Option<SpadTargetState>,
+    next: Option<SpadTargetState>,
+    no_dispatch_logged: bool,
+}
+
+pub(crate) struct SpadPromotionPage {
+    page: u32,
+    frames: Arc<Vec<img::FrameData>>,
+    render_signature: RenderSignature,
+    target_path: PathBuf,
+    session: u64,
+    generation: u64,
+    target_page_count: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SpadBudgetPlan {
+    prev_guaranteed_bytes: usize,
+    next_guaranteed_bytes: usize,
+    prev_extra_budget_bytes: usize,
+    next_extra_budget_bytes: usize,
+    prev_total_budget_bytes: usize,
+    next_total_budget_bytes: usize,
+    l2_effective_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1121,6 +1265,7 @@ pub struct ViewerState {
     pub(super) ui_runtime: ViewerUiRuntimeState,
     pub(super) boundary_preview: BoundaryPreviewState,
     pub(super) full_equivalent_size_hint: Option<FullEquivalentSizeHint>,
+    spad: ViewerSpadState,
     delete_range_selection: ViewerDeleteRangeSelection,
     reading_session: ReadingSessionState,
 }
@@ -1322,6 +1467,69 @@ impl ViewerState {
         self.display_assets.gpu_warmup_cache.clear(reason);
     }
 
+pub fn configure_spad_targets(
+        &mut self,
+        prev: Option<AdjacentBook>,
+        next: Option<AdjacentBook>,
+        prev_layout_settings: Option<SpadTargetLayoutSettings>,
+        next_layout_settings: Option<SpadTargetLayoutSettings>,
+    ) {
+        self.cancel_spad("target_reset");
+        self.spad.generation = self.spad.generation.saturating_add(1);
+        self.spad.next_inflight = None;
+        self.spad.prev_inflight = None;
+        self.spad.no_dispatch_logged = false;
+        self.spad.prev = prev.map(|book| self.build_spad_target(book, prev_layout_settings));
+        self.spad.next = next.map(|book| self.build_spad_target(book, next_layout_settings));
+        spad_trace_debug!(
+            "[spad-target] session={} generation={} prev={} next={}",
+            self.spad.session,
+            self.spad.generation,
+            self.spad
+                .prev
+                .as_ref()
+                .map(|target| format!("{}@{}", target.path.display(), target.entry_page))
+                .unwrap_or_else(|| "-".to_owned()),
+            self.spad
+                .next
+                .as_ref()
+                .map(|target| format!("{}@{}", target.path.display(), target.entry_page))
+                .unwrap_or_else(|| "-".to_owned())
+        );
+    }
+
+    pub fn cancel_spad(&mut self, reason: &'static str) {
+        self.spad.no_dispatch_logged = false;
+        let mut cancelled_any = false;
+        for inflight in [
+            self.spad.next_inflight.take(),
+            self.spad.prev_inflight.take(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            cancelled_any = true;
+            spad_trace_debug!(
+                "[spad-cancel] session={} generation={} side={} target={} request_id={} reason={}",
+                inflight.session,
+                inflight.generation,
+                inflight.side.as_str(),
+                inflight.path.display(),
+                inflight.request_id,
+                reason
+            );
+        }
+        if !cancelled_any && (self.spad.prev.is_some() || self.spad.next.is_some())
+        {
+            spad_trace_debug!(
+                "[spad-cancel] session={} generation={} side=none target=- request_id=0 reason={}",
+                self.spad.session,
+                self.spad.generation,
+                reason
+            );
+        }
+    }
+
     fn record_reading_session_display_commit(
         &mut self,
         left_page: Option<u32>,
@@ -1335,7 +1543,8 @@ impl ViewerState {
     }
 
     /// 本の切り替え前に、未受信結果の Arc 参照を残さない。
-    pub fn flush_worker(&self) {
+    pub fn flush_worker(&mut self) {
+        self.cancel_spad("flush");
         self.request.loader.flush();
         self.request.worker_manager.flush_notifications();
     }
@@ -1380,6 +1589,7 @@ impl ViewerState {
         let ViewerStateInit {
             entry,
             start_page,
+            spad_session_id,
             cover_blank,
             quality_override,
             global_reading_direction,
@@ -1531,6 +1741,15 @@ impl ViewerState {
             },
             boundary_preview: BoundaryPreviewState::Hidden,
             full_equivalent_size_hint,
+            spad: ViewerSpadState {
+                session: spad_session_id,
+                generation: 0,
+                next_inflight: None,
+                prev_inflight: None,
+                prev: None,
+                next: None,
+                no_dispatch_logged: false,
+            },
             delete_range_selection: ViewerDeleteRangeSelection::default(),
             reading_session: ReadingSessionState::new(),
         })
@@ -2614,9 +2833,7 @@ impl ViewerState {
     pub fn reload_current_view(&mut self, ctx: &egui::Context) {
         let display_w = self.ui_runtime.last_stable_display_w.max(1);
         let display_h = self.ui_runtime.last_stable_display_h.max(1);
-        let max_tex_side = ctx
-            .input(|i| i.raw.max_texture_side)
-            .unwrap_or(img::DEFAULT_MAX_TEXTURE_SIDE as usize) as u32;
+        let max_tex_side = super::max_texture_side_from_context(ctx);
         let current = self.persistent.requested_page;
         let nav_id = self.begin_nav(current, current, "QualityChange");
         self.start_view_request(ViewRequestContext {
@@ -2691,6 +2908,14 @@ impl ViewerState {
         display_h: u32,
         max_tex_side: u32,
     ) {
+        let (_, page_right) = self.current_view_pages(self.persistent.displayed_page);
+        let effective_spread =
+            page_right.is_some() || self.is_leading_cover_blank_spread(self.persistent.displayed_page);
+        let page_decode_w = request_display_width_for_pair(
+            self.resolved_full_equivalent_area(display_w, display_h).0,
+            effective_spread,
+        );
+        let page_decode_h = self.resolved_full_equivalent_area(display_w, display_h).1;
         let full_equivalent = self.resolved_full_equivalent_area(display_w, display_h);
         let (visible_page_first, visible_page_second) =
             self.current_view_pages(self.persistent.displayed_page);
@@ -2715,7 +2940,12 @@ impl ViewerState {
             full_equivalent_area_w: full_equivalent.0,
             full_equivalent_area_h: full_equivalent.1,
             background_worker_count: self.request.background_worker_count,
-            rgba_cache_max_mb: self.request.rgba_cache_max_mb,
+            rgba_cache_max_mb: self.effective_l2_rgba_cache_max_mb(
+                full_equivalent.0,
+                full_equivalent.1,
+                page_decode_w,
+                page_decode_h,
+            ),
             active_animation_stream_view: self.request.active_animation_stream_view,
             animation_stream_request_id: self.request.animation_stream_request_id,
         };
@@ -2771,6 +3001,967 @@ impl ViewerState {
             page,
             render_signature,
         }
+    }
+
+    fn build_spad_target(
+        &self,
+        book: AdjacentBook,
+        layout_settings: Option<SpadTargetLayoutSettings>,
+    ) -> SpadTargetState {
+        let start_page = book.book_state.start_page.unwrap_or(0) as u32;
+        let mut entry_page = start_page;
+        let layout_hint = layout_settings.and_then(|settings| {
+            let page_map = try_load_existing_viewer_page_map_for_spad(&book.path)?;
+            let page_count = u32::try_from(page_map.page_count()).ok()?;
+            if entry_page >= page_count {
+                return None;
+            }
+            let effective_spread = match settings.spread_setting {
+                SpreadMode::Single => false,
+                SpreadMode::Spread => {
+                    !(settings.cover_blank && entry_page == 0)
+                        && entry_page.saturating_add(1) < page_count
+                }
+                SpreadMode::Auto => {
+                    let plan = build_auto_spread_plan(&page_map, settings.cover_blank)?;
+                    let (anchor_page, page_right) = plan.pages_for_logical_page(entry_page)?;
+                    if anchor_page != entry_page {
+                        tracing::debug!(
+                            path = %book.path.display(),
+                            start_page = entry_page,
+                            anchor_page,
+                            "spad.target_layout.auto_anchor"
+                        );
+                        entry_page = anchor_page;
+                    }
+                    page_right.is_some()
+                }
+            };
+            Some(SpadTargetLayoutHint {
+                source: SpadDecodeLayoutSource::TargetPageMap,
+                page_count,
+                resolved_entry_page: entry_page,
+                effective_spread,
+            })
+        });
+        match layout_hint {
+            Some(hint) => tracing::debug!(
+                path = %book.path.display(),
+                page_count = hint.page_count,
+                entry_page = hint.resolved_entry_page,
+                effective_spread = hint.effective_spread,
+                "spad.target_layout.cache_hit"
+            ),
+            None => tracing::debug!(path = %book.path.display(), "spad.target_layout.cache_miss"),
+        }
+        let page_count = book
+            .page_count
+            .or_else(|| layout_hint.map(|hint| hint.page_count));
+        SpadTargetState {
+            path: book.path,
+            _book_state: book.book_state,
+            page_count,
+            entry_page,
+            layout_hint,
+            scheduled_pages: Vec::new(),
+            next_dispatch_index: 0,
+            ready_pages: BTreeMap::new(),
+            failed_pages: HashSet::new(),
+            current_bytes: 0,
+            max_bytes: 0,
+            guaranteed_bytes: 0,
+            extra_budget_bytes: 0,
+            exhausted: false,
+        }
+    }
+
+    fn total_l2_rgba_budget_bytes(&self) -> usize {
+        (self.request.rgba_cache_max_mb as usize)
+            .saturating_mul(1024)
+            .saturating_mul(1024)
+    }
+
+    fn resolve_spad_decode_target(
+        &self,
+        layout_hint: Option<SpadTargetLayoutHint>,
+        full_equivalent_w: u32,
+        full_equivalent_h: u32,
+        current_decode_w: u32,
+        current_decode_h: u32,
+        current_effective_spread: bool,
+    ) -> SpadResolvedDecodeTarget {
+        let source = layout_hint
+            .map(|hint| hint.source)
+            .unwrap_or(SpadDecodeLayoutSource::CurrentLayout);
+        let effective_spread = layout_hint
+            .map(|hint| hint.effective_spread)
+            .unwrap_or(current_effective_spread);
+        let decode_w = layout_hint
+            .map(|hint| request_display_width_for_pair(full_equivalent_w, hint.effective_spread))
+            .unwrap_or(current_decode_w);
+        let decode_h = layout_hint.map(|_| full_equivalent_h).unwrap_or(current_decode_h);
+        SpadResolvedDecodeTarget {
+            source,
+            effective_spread,
+            decode_w,
+            decode_h,
+            two_page_rgba_bytes: static_rgba_bytes_for_decode(decode_w, decode_h, 2),
+        }
+    }
+
+    fn build_spad_budget_plan(
+        &self,
+        full_equivalent_w: u32,
+        full_equivalent_h: u32,
+        current_decode_w: u32,
+        current_decode_h: u32,
+    ) -> SpadBudgetPlan {
+        let total_bytes = self.total_l2_rgba_budget_bytes();
+        let current_effective_spread = current_decode_w != full_equivalent_w;
+        let prev_decode_target = self.resolve_spad_decode_target(
+            self.spad.prev.as_ref().and_then(|target| target.layout_hint),
+            full_equivalent_w,
+            full_equivalent_h,
+            current_decode_w,
+            current_decode_h,
+            current_effective_spread,
+        );
+        let next_decode_target = self.resolve_spad_decode_target(
+            self.spad.next.as_ref().and_then(|target| target.layout_hint),
+            full_equivalent_w,
+            full_equivalent_h,
+            current_decode_w,
+            current_decode_h,
+            current_effective_spread,
+        );
+        let prev_guaranteed_bytes = self
+            .spad
+            .prev
+            .as_ref()
+            .map_or(0, |_| prev_decode_target.two_page_rgba_bytes);
+        let next_guaranteed_bytes = self
+            .spad
+            .next
+            .as_ref()
+            .map_or(0, |_| next_decode_target.two_page_rgba_bytes);
+        let extra_5_percent_bytes = total_bytes / 20;
+        let prev_extra_budget_bytes = if self.spad.prev.is_some() { extra_5_percent_bytes } else { 0 };
+        let next_extra_budget_bytes = if self.spad.next.is_some() { extra_5_percent_bytes } else { 0 };
+        let prev_total_budget_bytes =
+            prev_guaranteed_bytes.saturating_add(prev_extra_budget_bytes);
+        let next_total_budget_bytes =
+            next_guaranteed_bytes.saturating_add(next_extra_budget_bytes);
+        let reserved = prev_total_budget_bytes.saturating_add(next_total_budget_bytes);
+        let minimum_l2_bytes = 1024 * 1024;
+        let l2_effective_bytes = total_bytes
+            .saturating_sub(reserved)
+            .max(minimum_l2_bytes)
+            .min(total_bytes.max(minimum_l2_bytes));
+        SpadBudgetPlan {
+            prev_guaranteed_bytes,
+            next_guaranteed_bytes,
+            prev_extra_budget_bytes,
+            next_extra_budget_bytes,
+            prev_total_budget_bytes,
+            next_total_budget_bytes,
+            l2_effective_bytes,
+        }
+    }
+
+    fn refresh_spad_budget_plan(
+        &mut self,
+        full_equivalent_w: u32,
+        full_equivalent_h: u32,
+        current_decode_w: u32,
+        current_decode_h: u32,
+    ) {
+        let plan = self.build_spad_budget_plan(
+            full_equivalent_w,
+            full_equivalent_h,
+            current_decode_w,
+            current_decode_h,
+        );
+        if let Some(prev) = self.spad.prev.as_mut() {
+            prev.guaranteed_bytes = plan.prev_guaranteed_bytes;
+            prev.extra_budget_bytes = plan.prev_extra_budget_bytes;
+            prev.max_bytes = plan.prev_total_budget_bytes;
+        }
+        if let Some(next) = self.spad.next.as_mut() {
+            next.guaranteed_bytes = plan.next_guaranteed_bytes;
+            next.extra_budget_bytes = plan.next_extra_budget_bytes;
+            next.max_bytes = plan.next_total_budget_bytes;
+        }
+    }
+
+    fn effective_l2_rgba_cache_max_mb(
+        &self,
+        full_equivalent_w: u32,
+        full_equivalent_h: u32,
+        current_decode_w: u32,
+        current_decode_h: u32,
+    ) -> u16 {
+        let bytes = self
+            .build_spad_budget_plan(
+                full_equivalent_w,
+                full_equivalent_h,
+                current_decode_w,
+                current_decode_h,
+            )
+            .l2_effective_bytes;
+        ((bytes.saturating_add((1024 * 1024) - 1)) / (1024 * 1024)) as u16
+    }
+
+    fn l2_settled_status(&self) -> L2StreamingStatus {
+        self.request.worker_manager.l2_status()
+    }
+
+    fn spad_target_mut(&mut self, side: SpadSide) -> Option<&mut SpadTargetState> {
+        match side {
+            SpadSide::Prev => self.spad.prev.as_mut(),
+            SpadSide::Next => self.spad.next.as_mut(),
+        }
+    }
+
+    fn spad_inflight(&self, side: SpadSide) -> Option<&SpadInflightRequest> {
+        match side {
+            SpadSide::Next => self.spad.next_inflight.as_ref(),
+            SpadSide::Prev => self.spad.prev_inflight.as_ref(),
+        }
+    }
+
+    fn take_spad_inflight(&mut self, side: SpadSide) -> Option<SpadInflightRequest> {
+        match side {
+            SpadSide::Next => self.spad.next_inflight.take(),
+            SpadSide::Prev => self.spad.prev_inflight.take(),
+        }
+    }
+
+    fn set_spad_inflight(&mut self, side: SpadSide, inflight: SpadInflightRequest) {
+        match side {
+            SpadSide::Next => self.spad.next_inflight = Some(inflight),
+            SpadSide::Prev => self.spad.prev_inflight = Some(inflight),
+        }
+    }
+
+    fn ensure_spad_scheduled_pages(target: &mut SpadTargetState) {
+        if !target.scheduled_pages.is_empty() {
+            return;
+        }
+        let Some(page_count) = target.page_count.filter(|page_count| *page_count > 0) else {
+            target.scheduled_pages.push(target.entry_page);
+            target.scheduled_pages.push(target.entry_page.saturating_add(1));
+            return;
+        };
+        let entry = if target.entry_page < page_count {
+            target.entry_page
+        } else {
+            0
+        };
+        target.entry_page = entry;
+        target.scheduled_pages.push(entry);
+        for page in entry.saturating_add(1)..page_count {
+            target.scheduled_pages.push(page);
+        }
+        if target.scheduled_pages.len() < 2 && entry > 0 {
+            target.scheduled_pages.push(entry - 1);
+        }
+    }
+
+    fn mark_spad_page_failed(target: &mut SpadTargetState, page: u32) {
+        target.failed_pages.insert(page);
+        let should_advance = target
+            .scheduled_pages
+            .get(target.next_dispatch_index)
+            .copied()
+            == Some(page);
+        if should_advance {
+            target.next_dispatch_index = target.next_dispatch_index.saturating_add(1);
+        }
+    }
+
+    fn trace_spad_exhausted(
+        session: u64,
+        generation: u64,
+        side: SpadSide,
+        target: &SpadTargetState,
+        reason: &'static str,
+    ) {
+        spad_trace_debug!(
+            "[spad-exhausted] session={} generation={} side={} target={} current_bytes={} max_bytes={} reason={}",
+            session,
+            generation,
+            side.as_str(),
+            target.path.display(),
+            target.current_bytes,
+            target.max_bytes,
+            reason
+        );
+    }
+
+    fn mark_spad_target_exhausted(
+        session: u64,
+        generation: u64,
+        side: SpadSide,
+        target: &mut SpadTargetState,
+        reason: &'static str,
+    ) {
+        if target.exhausted {
+            return;
+        }
+        target.exhausted = true;
+        Self::trace_spad_exhausted(session, generation, side, target, reason);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_spad_request(
+        &mut self,
+        side: SpadSide,
+        full_equivalent_w: u32,
+        full_equivalent_h: u32,
+        current_decode_w: u32,
+        current_decode_h: u32,
+        current_effective_spread: bool,
+        max_tex_side: u32,
+    ) -> bool {
+        if self.spad_inflight(side).is_some() {
+            return false;
+        }
+        let session = self.spad.session;
+        let generation = self.spad.generation;
+        let quality = self.request.quality;
+        let frame_cache_cap = self.frame_cache_cap();
+        let nav_id = self.request.active_nav_id.unwrap_or(0);
+        let (path, page, layout_hint, target_budget_bytes) = {
+            let Some(target) = self.spad_target_mut(side) else {
+                return false;
+            };
+            if target.exhausted {
+                return false;
+            }
+            if target.current_bytes >= target.max_bytes {
+                Self::mark_spad_target_exhausted(
+                    session,
+                    generation,
+                    side,
+                    target,
+                    "budget_full_before_dispatch",
+                );
+                return false;
+            }
+            Self::ensure_spad_scheduled_pages(target);
+            loop {
+                let Some(page) = target.scheduled_pages.get(target.next_dispatch_index).copied() else {
+                    return false;
+                };
+                if target.ready_pages.contains_key(&page) || target.failed_pages.contains(&page) {
+                    target.next_dispatch_index = target.next_dispatch_index.saturating_add(1);
+                    continue;
+                }
+                break (
+                    target.path.clone(),
+                    page,
+                    target.layout_hint,
+                    target.max_bytes,
+                );
+            }
+        };
+        let decode_target = self.resolve_spad_decode_target(
+            layout_hint,
+            full_equivalent_w,
+            full_equivalent_h,
+            current_decode_w,
+            current_decode_h,
+            current_effective_spread,
+        );
+        tracing::trace!(
+            source = decode_target.source.as_str(),
+            effective_spread = decode_target.effective_spread,
+            decode_w = decode_target.decode_w,
+            decode_h = decode_target.decode_h,
+            expected_two_page_rgba_bytes = decode_target.two_page_rgba_bytes,
+            target_budget_bytes,
+            "spad.dispatch.decode_size"
+        );
+        let render_signature =
+            RenderSignature::from_decode_request(
+                quality,
+                decode_target.decode_w,
+                decode_target.decode_h,
+                max_tex_side,
+            );
+        let request = ViewerLoadRequest {
+            path: Arc::from(path.as_path()),
+            view_idx: page,
+            page_left: Some(page),
+            page_right: None,
+            display_w: decode_target.decode_w,
+            display_h: decode_target.decode_h,
+            quality,
+            max_tex_side,
+            frame_cache_cap,
+            nav_id,
+            interactive: false,
+        };
+        let request_id = match side {
+            SpadSide::Next => self.request.loader.send_spad_next_request(request),
+            SpadSide::Prev => self.request.loader.send_spad_prev_request(request),
+        };
+        self.set_spad_inflight(side, SpadInflightRequest {
+            request_id,
+            session,
+            generation,
+            side,
+            path: path.clone(),
+            page,
+            render_signature,
+        });
+        spad_trace_debug!(
+            "[spad-dispatch] session={} generation={} side={} page={} path={} request_id={}",
+            session,
+            generation,
+            side.as_str(),
+            page,
+            path.display(),
+            request_id
+        );
+        true
+    }
+
+    pub(super) fn poll_spad(
+        &mut self,
+        ctx: &egui::Context,
+        display_w: u32,
+        display_h: u32,
+        max_tex_side: u32,
+    ) -> bool {
+        let mut handled = false;
+        let current_generation = self.worker_manager_generation(display_w, display_h, max_tex_side);
+        let current_book_id = self.persistent.entry.id.clone();
+        let layout = self.view_layout_for_with_caller(
+            self.persistent.displayed_page,
+            display_w,
+            display_h,
+            false,
+        );
+        self.refresh_spad_budget_plan(
+            layout.full_equivalent_area_w,
+            layout.full_equivalent_area_h,
+            layout.page_decode_w,
+            layout.page_decode_h,
+        );
+        while let Some(result) = self.request.loader.try_recv_spad_next() {
+            handled = true;
+            self.handle_spad_result(SpadSide::Next, result);
+        }
+        while let Some(result) = self.request.loader.try_recv_spad_prev() {
+            handled = true;
+            self.handle_spad_result(SpadSide::Prev, result);
+        }
+        {
+            let l2_status = self.l2_settled_status();
+            let skip_reason = if !l2_status.settled {
+                Some("not_settled")
+            } else if l2_status.book_id.as_ref() != Some(&current_book_id) {
+                Some("book_mismatch")
+            } else if l2_status.generation != current_generation {
+                Some("generation_mismatch")
+            } else {
+                None
+            };
+            if let Some(reason) = skip_reason {
+                spad_trace_debug!(
+                    "[spad-skip-not-settled] reason={} generation={} settled={} inflight={}",
+                    reason,
+                    l2_status.generation,
+                    l2_status.settled,
+                    self.spad.next_inflight.is_some() || self.spad.prev_inflight.is_some()
+                );
+                return handled;
+            }
+            for side in [SpadSide::Next, SpadSide::Prev] {
+                let session = self.spad.session;
+                let generation = self.spad.generation;
+                if let Some(target) = self.spad_target_mut(side) {
+                    Self::ensure_spad_scheduled_pages(target);
+                    if !target.exhausted && target.current_bytes >= target.max_bytes {
+                        Self::mark_spad_target_exhausted(
+                            session,
+                            generation,
+                            side,
+                            target,
+                            "budget_full_before_dispatch",
+                        );
+                    }
+                }
+            }
+            let next_dispatchable = Self::spad_target_dispatchable(self.spad.next.as_ref());
+            let prev_dispatchable = Self::spad_target_dispatchable(self.spad.prev.as_ref());
+            if !next_dispatchable && !prev_dispatchable {
+                let has_any_target = Self::spad_target_exists(self.spad.next.as_ref())
+                    || Self::spad_target_exists(self.spad.prev.as_ref());
+                let all_existing_targets_exhausted =
+                    (!Self::spad_target_exists(self.spad.next.as_ref())
+                        || Self::spad_target_exhausted(self.spad.next.as_ref()))
+                        && (!Self::spad_target_exists(self.spad.prev.as_ref())
+                            || Self::spad_target_exhausted(self.spad.prev.as_ref()));
+                let both_targets_exist = Self::spad_target_exists(self.spad.next.as_ref())
+                    && Self::spad_target_exists(self.spad.prev.as_ref());
+                if !self.spad.no_dispatch_logged {
+                    if both_targets_exist && all_existing_targets_exhausted {
+                        spad_trace_debug!(
+                            "[spad-exhausted] session={} generation={} side=both target=- current_bytes=0 max_bytes=0 reason=both_sides_exhausted",
+                            self.spad.session,
+                            self.spad.generation
+                        );
+                    } else if has_any_target && all_existing_targets_exhausted {
+                        spad_trace_debug!(
+                            "[spad-exhausted] session={} generation={} side=both target=- current_bytes=0 max_bytes=0 reason=all_existing_targets_exhausted",
+                            self.spad.session,
+                            self.spad.generation
+                        );
+                    } else {
+                        spad_trace_debug!(
+                            "[spad-skip] session={} generation={} side=both target=- current_bytes=0 max_bytes=0 reason=no_dispatchable_targets",
+                            self.spad.session,
+                            self.spad.generation
+                        );
+                    }
+                    self.spad.no_dispatch_logged = true;
+                }
+                return handled;
+            }
+            self.spad.no_dispatch_logged = false;
+            if self.dispatch_spad_requests(
+                layout.full_equivalent_area_w,
+                layout.full_equivalent_area_h,
+                layout.page_decode_w,
+                layout.page_decode_h,
+                layout.effective_spread,
+                max_tex_side,
+            ) {
+                ctx.request_repaint();
+            }
+        }
+        handled
+    }
+
+    fn spad_target_dispatchable(target: Option<&SpadTargetState>) -> bool {
+        let Some(target) = target else {
+            return false;
+        };
+        !target.exhausted
+            && target.current_bytes < target.max_bytes
+            && Self::spad_target_has_pending_page(target)
+    }
+
+    fn spad_target_has_pending_page(target: &SpadTargetState) -> bool {
+        if target.scheduled_pages.is_empty() {
+            return true;
+        }
+        target.scheduled_pages[target.next_dispatch_index.min(target.scheduled_pages.len())..]
+            .iter()
+            .copied()
+            .any(|page| {
+                !target.ready_pages.contains_key(&page) && !target.failed_pages.contains(&page)
+            })
+    }
+
+    fn spad_target_exists(target: Option<&SpadTargetState>) -> bool {
+        target.is_some()
+    }
+
+    fn spad_target_exhausted(target: Option<&SpadTargetState>) -> bool {
+        target.is_some_and(|target| target.exhausted)
+    }
+
+    fn dispatch_spad_requests(
+        &mut self,
+        full_equivalent_w: u32,
+        full_equivalent_h: u32,
+        current_decode_w: u32,
+        current_decode_h: u32,
+        current_effective_spread: bool,
+        max_tex_side: u32,
+    ) -> bool {
+        let next_dispatched = self.dispatch_spad_request(
+            SpadSide::Next,
+            full_equivalent_w,
+            full_equivalent_h,
+            current_decode_w,
+            current_decode_h,
+            current_effective_spread,
+            max_tex_side,
+        );
+        let prev_dispatched = self.dispatch_spad_request(
+            SpadSide::Prev,
+            full_equivalent_w,
+            full_equivalent_h,
+            current_decode_w,
+            current_decode_h,
+            current_effective_spread,
+            max_tex_side,
+        );
+        next_dispatched || prev_dispatched
+    }
+
+    fn handle_spad_result(&mut self, expected_side: SpadSide, result: ViewerResult) {
+        let Some(inflight) = self.spad_inflight(expected_side) else {
+            spad_trace_debug!("[spad-drop] reason=no_inflight side={} request_id={}", expected_side.as_str(), result.request_id);
+            return;
+        };
+        if inflight.side != expected_side {
+            spad_trace_debug!("[spad-drop] reason=side expected_side={} inflight_side={} request_id={}", expected_side.as_str(), inflight.side.as_str(), result.request_id);
+            return;
+        }
+        if inflight.request_id != result.request_id {
+            spad_trace_debug!(
+                "[spad-drop] reason=request_id side={} request_id={} expected={}",
+                expected_side.as_str(),
+                result.request_id,
+                inflight.request_id
+            );
+            return;
+        }
+        if inflight.session != self.spad.session {
+            spad_trace_debug!(
+                "[spad-drop] reason=session side={} request_id={} result_session={} current_session={}",
+                expected_side.as_str(),
+                result.request_id,
+                inflight.session,
+                self.spad.session
+            );
+            return;
+        }
+        if inflight.generation != self.spad.generation {
+            spad_trace_debug!(
+                "[spad-drop] reason=generation side={} request_id={} result_generation={} current_generation={}",
+                expected_side.as_str(),
+                result.request_id,
+                inflight.generation,
+                self.spad.generation
+            );
+            return;
+        }
+        let Some(inflight) = self.take_spad_inflight(expected_side) else {
+            spad_trace_debug!("[spad-drop] reason=no_inflight_after_match side={} request_id={}", expected_side.as_str(), result.request_id);
+            return;
+        };
+        let Some(target) = self.spad_target_mut(inflight.side) else {
+            spad_trace_debug!("[spad-drop] reason=target_missing side={} request_id={}", expected_side.as_str(), result.request_id);
+            return;
+        };
+        if target.path != inflight.path {
+            spad_trace_debug!("[spad-drop] reason=target_mismatch side={} request_id={}", expected_side.as_str(), result.request_id);
+            return;
+        }
+        if result.page_count > 0 && target.page_count != Some(result.page_count) {
+            target.page_count = Some(result.page_count);
+            target.scheduled_pages.clear();
+            target.next_dispatch_index = 0;
+            Self::ensure_spad_scheduled_pages(target);
+        }
+        if let Some(page_count) = target.page_count {
+            if inflight.page >= page_count {
+                Self::mark_spad_page_failed(target, inflight.page);
+                spad_trace_debug!(
+                    "[spad-drop] reason=out_of_range request_id={} page={} page_count={}",
+                    result.request_id,
+                    inflight.page,
+                    page_count
+                );
+                return;
+            }
+        }
+        if target.failed_pages.contains(&inflight.page) {
+            spad_trace_debug!(
+                "[spad-drop] reason=already_failed request_id={} page={}",
+                result.request_id,
+                inflight.page
+            );
+            return;
+        }
+        if target.ready_pages.contains_key(&inflight.page) {
+            spad_trace_debug!(
+                "[spad-drop] reason=already_ready request_id={} page={}",
+                result.request_id,
+                inflight.page
+            );
+            return;
+        }
+        let Some(frames) = result.left.filter(|_| !result.left_is_animation_stream) else {
+            Self::mark_spad_page_failed(target, inflight.page);
+            spad_trace_debug!("[spad-drop] reason=decode_missing request_id={}", result.request_id);
+            return;
+        };
+        let Some(bytes) = RgbaPageCache::static_rgba_bytes(frames.as_ref()) else {
+            Self::mark_spad_page_failed(target, inflight.page);
+            spad_trace_debug!("[spad-drop] reason=non_static request_id={}", result.request_id);
+            return;
+        };
+        if target.current_bytes.saturating_add(bytes) > target.max_bytes {
+            Self::mark_spad_page_failed(target, inflight.page);
+            Self::mark_spad_target_exhausted(
+                inflight.session,
+                inflight.generation,
+                inflight.side,
+                target,
+                "budget_drop_after_decode",
+            );
+            spad_trace_debug!(
+                "[spad-drop] reason=budget side={} page={} bytes={} current={} max={}",
+                inflight.side.as_str(),
+                inflight.page,
+                bytes,
+                target.current_bytes,
+                target.max_bytes
+            );
+            return;
+        }
+        target.current_bytes = target.current_bytes.saturating_add(bytes);
+        target.ready_pages.insert(
+            inflight.page,
+            SpadReadyPage {
+                frames,
+                render_signature: inflight.render_signature,
+            },
+        );
+        target.failed_pages.remove(&inflight.page);
+        target.next_dispatch_index = target.next_dispatch_index.saturating_add(1);
+        spad_trace_debug!(
+            "[spad-complete] session={} generation={} side={} page={} ready={} bytes={}",
+            inflight.session,
+            inflight.generation,
+            inflight.side.as_str(),
+            inflight.page,
+            target.ready_pages.len(),
+            target.current_bytes
+        );
+    }
+
+    pub fn take_spad_ready_pages_for_target(
+        &mut self,
+        target_path: &Path,
+    ) -> Vec<SpadPromotionPage> {
+        let mut out = Vec::new();
+        let session = self.spad.session;
+        let generation = self.spad.generation;
+        for side in [SpadSide::Prev, SpadSide::Next] {
+            let Some(target) = self.spad_target_mut(side) else {
+                continue;
+            };
+            if !paths_equivalent_for_selection(&target.path, target_path) {
+                continue;
+            }
+            for (page, ready) in &target.ready_pages {
+                out.push(SpadPromotionPage {
+                    page: *page,
+                    frames: Arc::clone(&ready.frames),
+                    render_signature: ready.render_signature,
+                    target_path: target.path.clone(),
+                    session,
+                    generation,
+                    target_page_count: target.page_count,
+                });
+            }
+        }
+        if out.is_empty() {
+            let prev_summary = self
+                .spad
+                .prev
+                .as_ref()
+                .map(|target| {
+                    format!(
+                        "path={} ready={} range={} page_count={:?}",
+                        target.path.display(),
+                        target.ready_pages.len(),
+                        Self::spad_ready_range_label(target),
+                        target.page_count
+                    )
+                })
+                .unwrap_or_else(|| "none".to_owned());
+            let next_summary = self
+                .spad
+                .next
+                .as_ref()
+                .map(|target| {
+                    format!(
+                        "path={} ready={} range={} page_count={:?}",
+                        target.path.display(),
+                        target.ready_pages.len(),
+                        Self::spad_ready_range_label(target),
+                        target.page_count
+                    )
+                })
+                .unwrap_or_else(|| "none".to_owned());
+            tracing::info!(
+                target_path = %target_path.display(),
+                prev = %prev_summary,
+                next = %next_summary,
+                session = self.spad.session,
+                generation = self.spad.generation,
+                "spad.take_ready.empty"
+            );
+        } else {
+            tracing::info!(
+                target_path = %target_path.display(),
+                ready_count = out.len(),
+                session = self.spad.session,
+                generation = self.spad.generation,
+                "spad.take_ready.hit"
+            );
+        }
+        out
+    }
+
+    pub fn promote_spad_ready_pages_to_l1_future(
+        &mut self,
+        ctx: &egui::Context,
+        spad_ready_pages: Vec<SpadPromotionPage>,
+        current_display_w: u32,
+        current_display_h: u32,
+        current_max_tex_side: u32,
+    ) {
+        tracing::info!(
+            ready_count = spad_ready_pages.len(),
+            target_path = %self.persistent.entry.path.display(),
+            persistent_page_count = self.persistent.page_count,
+            current_display_w,
+            current_display_h,
+            current_max_tex_side,
+            "spad.promote.begin"
+        );
+        // These values validate consistency within the old SPAD-ready batch.
+        // They intentionally do not compare against the newly created ViewerState.
+        let ready_batch_session = spad_ready_pages.first().map(|ready| ready.session);
+        let ready_batch_generation = spad_ready_pages.first().map(|ready| ready.generation);
+        if let Some(page_count) = spad_ready_pages
+            .iter()
+            .filter(|ready| paths_equivalent_for_selection(&ready.target_path, &self.persistent.entry.path))
+            .filter(|ready| Some(ready.session) == ready_batch_session)
+            .filter(|ready| Some(ready.generation) == ready_batch_generation)
+            .filter_map(|ready| ready.target_page_count)
+            .find(|page_count| *page_count > 0)
+        {
+            if self.adopt_page_count_if_empty(page_count, "spad-promote") {
+                tracing::info!(page_count, source = "spad-promote", "spad.promote.page_count_adopt");
+            }
+        }
+        let layout = self.view_layout_for_with_caller(
+            self.persistent.displayed_page,
+            current_display_w,
+            current_display_h,
+            false,
+        );
+        let requirement = self.display_requirement_for_request(
+            layout.page_decode_w,
+            layout.page_decode_h,
+            current_max_tex_side,
+        );
+        for ready in spad_ready_pages {
+            if !paths_equivalent_for_selection(&ready.target_path, &self.persistent.entry.path) {
+                tracing::info!(page = ready.page, reason = "target_mismatch", "spad.promote.drop");
+                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=target_mismatch", ready.page);
+                continue;
+            }
+            if Some(ready.session) != ready_batch_session {
+                tracing::info!(page = ready.page, reason = "session_mismatch", "spad.promote.drop");
+                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=session_mismatch", ready.page);
+                continue;
+            }
+            if Some(ready.generation) != ready_batch_generation {
+                tracing::info!(page = ready.page, reason = "generation_mismatch", "spad.promote.drop");
+                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=generation_mismatch", ready.page);
+                continue;
+            }
+            if let Some(page_count) = ready.target_page_count {
+                if ready.page >= page_count {
+                    tracing::info!(page = ready.page, reason = "page_out_of_range", page_count, "spad.promote.drop");
+                    spad_trace_debug!("[spad-promote-l1-failed] page={} reason=page_out_of_range", ready.page);
+                    continue;
+                }
+            } else if self.persistent.page_count > 0 && ready.page >= self.persistent.page_count {
+                tracing::info!(
+                    page = ready.page,
+                    reason = "page_out_of_range",
+                    page_count = self.persistent.page_count,
+                    "spad.promote.drop"
+                );
+                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=page_out_of_range", ready.page);
+                continue;
+            }
+            if !ready.render_signature.is_suitable_for(requirement) {
+                tracing::info!(
+                    page = ready.page,
+                    reason = "render_signature_mismatch",
+                    mismatch_reason = ready.render_signature.mismatch_reason(requirement),
+                    "spad.promote.drop"
+                );
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=render_signature_mismatch",
+                    ready.page
+                );
+                continue;
+            }
+            let content =
+                PageContent::from_frames(ready.frames, "viewer_spad_promote", ctx);
+            let PageContent::Static(texture) = content else {
+                tracing::info!(page = ready.page, reason = "non_static", "spad.promote.drop");
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=non_static",
+                    ready.page
+                );
+                continue;
+            };
+            let key = PageRenderSignatureKey {
+                page: ready.page,
+                render_signature: ready.render_signature,
+            };
+            let estimated_bytes = Self::static_texture_bytes(&texture);
+            if self
+                .display_assets
+                .gpu_warmup_cache
+                .insert(key, texture, estimated_bytes)
+            {
+                tracing::info!(page = ready.page, estimated_bytes, "spad.promote.success");
+                spad_trace_debug!("[spad-promote-l1] page={}", ready.page);
+            } else {
+                tracing::info!(page = ready.page, reason = "warmup_rejected", "spad.promote.drop");
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=warmup_rejected",
+                    ready.page
+                );
+            }
+        }
+    }
+
+    pub(super) fn spad_overlay_lines(&self) -> [String; 3] {
+        [
+            "SPAD".to_owned(),
+            format!(
+                "  P: {}",
+                self.spad
+                    .prev
+                    .as_ref()
+                    .map(Self::spad_ready_range_label)
+                    .unwrap_or_else(|| "none".to_owned())
+            ),
+            format!(
+                "  N: {}",
+                self.spad
+                    .next
+                    .as_ref()
+                    .map(Self::spad_ready_range_label)
+                    .unwrap_or_else(|| "none".to_owned())
+            ),
+        ]
+    }
+
+    fn spad_ready_range_label(target: &SpadTargetState) -> String {
+        let Some(first) = target.ready_pages.keys().next().copied() else {
+            return "-".to_owned();
+        };
+        let last = target.ready_pages.keys().next_back().copied().unwrap_or(first);
+        format!("{}p {}..{}", target.ready_pages.len(), first, last)
     }
 
     fn resolve_display_page_state(
@@ -3202,18 +4393,6 @@ impl ViewerState {
                         .map(|(_, second)| second.is_some())
                 })
                 .unwrap_or(false);
-        }
-    }
-
-    pub(super) fn request_display_width_for_pair(
-        &self,
-        display_w: u32,
-        has_right_page: bool,
-    ) -> u32 {
-        if has_right_page {
-            display_w.div_ceil(2).max(1)
-        } else {
-            display_w
         }
     }
 
@@ -4430,6 +5609,38 @@ impl ViewerState {
         self.persistent.spread_snapshot.valid = false;
     }
 
+    fn adopt_page_count_if_empty(&mut self, page_count: u32, source: &'static str) -> bool {
+        if self.persistent.page_count != 0 || page_count == 0 {
+            return false;
+        }
+
+        self.persistent.page_count = page_count;
+        let last_page = page_count.saturating_sub(1);
+        let requested_page = self.persistent.requested_page.min(last_page);
+        let displayed_page = self.persistent.displayed_page.min(last_page);
+        let target_page = self.persistent.target_page.min(last_page);
+        let prefetch_anchor_view = self.request.prefetch_anchor_view.min(last_page);
+        let clamped = requested_page != self.persistent.requested_page
+            || displayed_page != self.persistent.displayed_page
+            || target_page != self.persistent.target_page
+            || prefetch_anchor_view != self.request.prefetch_anchor_view;
+        self.persistent.requested_page = requested_page;
+        self.persistent.displayed_page = displayed_page;
+        self.persistent.target_page = target_page;
+        self.request.prefetch_anchor_view = prefetch_anchor_view;
+        self.invalidate_spread_snapshot();
+        tracing::info!(
+            page_count,
+            source,
+            clamped,
+            requested_page,
+            displayed_page,
+            target_page,
+            "viewer.page_count_adopt"
+        );
+        true
+    }
+
     fn auto_plan(&self) -> Option<&AutoSpreadPlan> {
         self.persistent.auto_spread_plan.as_deref()
     }
@@ -4518,11 +5729,11 @@ impl ViewerState {
             current_page_right,
             allow_snapshot_update,
         );
-        let page_display_w = self.request_display_width_for_pair(image_area_w, effective_spread);
+        let page_display_w = request_display_width_for_pair(image_area_w, effective_spread);
         let (full_equivalent_area_w, full_equivalent_area_h, hint_source) =
             self.resolved_full_equivalent_area(image_area_w, image_area_h);
         let page_decode_w =
-            self.request_display_width_for_pair(full_equivalent_area_w, effective_spread);
+            request_display_width_for_pair(full_equivalent_area_w, effective_spread);
         ViewerViewLayout {
             physical_page,
             page_left,
@@ -4673,10 +5884,7 @@ impl ViewerState {
                 "viewer_ui: decode result apply begin"
             );
         }
-        if self.persistent.page_count == 0 && result.page_count > 0 {
-            self.persistent.page_count = result.page_count;
-            self.invalidate_spread_snapshot();
-        }
+        self.adopt_page_count_if_empty(result.page_count, "display-result");
 
         if let Some(msg) = result.error {
             self.ui_runtime.error = Some(msg);

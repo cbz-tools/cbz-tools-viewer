@@ -161,9 +161,13 @@ pub struct ViewerLoader {
     interactive_even_shared: Arc<SharedQueue>,
     interactive_odd_shared: Arc<SharedQueue>,
     background_shards: Vec<Arc<SharedQueue>>,
+    spad_next_shared: Arc<SharedQueue>,
+    spad_prev_shared: Arc<SharedQueue>,
     background_worker_count: usize,
     interactive_result_rx: Mutex<mpsc::Receiver<ViewerResult>>,
     background_result_rx: Mutex<mpsc::Receiver<ViewerResult>>,
+    spad_next_result_rx: Mutex<mpsc::Receiver<ViewerResult>>,
+    spad_prev_result_rx: Mutex<mpsc::Receiver<ViewerResult>>,
     next_id: AtomicU64,
 }
 
@@ -194,6 +198,8 @@ impl Drop for ViewerLoader {
         for shared in &self.background_shards {
             shared.shutdown();
         }
+        self.spad_next_shared.shutdown();
+        self.spad_prev_shared.shutdown();
     }
 }
 
@@ -223,8 +229,20 @@ impl ViewerLoader {
                 })
             })
             .collect();
+        let spad_next_shared = Arc::new(SharedQueue {
+            pending: Mutex::new(None),
+            condvar: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        });
+        let spad_prev_shared = Arc::new(SharedQueue {
+            pending: Mutex::new(None),
+            condvar: Condvar::new(),
+            shutdown: AtomicBool::new(false),
+        });
         let (interactive_result_tx, interactive_result_rx) = mpsc::channel();
         let (background_result_tx, background_result_rx) = mpsc::channel();
+        let (spad_next_result_tx, spad_next_result_rx) = mpsc::channel();
+        let (spad_prev_result_tx, spad_prev_result_rx) = mpsc::channel();
         let mut started_queues: Vec<Arc<SharedQueue>> = Vec::new();
 
         let interactive_even_shared2 = Arc::clone(&interactive_even_shared);
@@ -298,13 +316,61 @@ impl ViewerLoader {
             started_queues.push(Arc::clone(&background_shared));
         }
 
+        let spad_next_shared2 = Arc::clone(&spad_next_shared);
+        let ctx_spad_next = ctx.clone();
+        if let Err(e) = thread::Builder::new()
+            .name("viewer-loader-spad-next".into())
+            .spawn(move || {
+                worker_loop(
+                    spad_next_shared2,
+                    spad_next_result_tx,
+                    ctx_spad_next,
+                    "spad-next".to_string(),
+                    false,
+                )
+            })
+        {
+            shutdown_started_queues(&started_queues);
+            return Err(ViewerLoaderInitError::ThreadSpawn {
+                worker: "spad-next".to_owned(),
+                source: e,
+            });
+        }
+        started_queues.push(Arc::clone(&spad_next_shared));
+
+        let spad_prev_shared2 = Arc::clone(&spad_prev_shared);
+        let ctx_spad_prev = ctx.clone();
+        if let Err(e) = thread::Builder::new()
+            .name("viewer-loader-spad-prev".into())
+            .spawn(move || {
+                worker_loop(
+                    spad_prev_shared2,
+                    spad_prev_result_tx,
+                    ctx_spad_prev,
+                    "spad-prev".to_string(),
+                    false,
+                )
+            })
+        {
+            shutdown_started_queues(&started_queues);
+            return Err(ViewerLoaderInitError::ThreadSpawn {
+                worker: "spad-prev".to_owned(),
+                source: e,
+            });
+        }
+        started_queues.push(Arc::clone(&spad_prev_shared));
+
         Ok(Self {
             interactive_even_shared,
             interactive_odd_shared,
             background_shards,
+            spad_next_shared,
+            spad_prev_shared,
             background_worker_count,
             interactive_result_rx: Mutex::new(interactive_result_rx),
             background_result_rx: Mutex::new(background_result_rx),
+            spad_next_result_rx: Mutex::new(spad_next_result_rx),
+            spad_prev_result_rx: Mutex::new(spad_prev_result_rx),
             next_id: AtomicU64::new(1),
         })
     }
@@ -335,6 +401,24 @@ impl ViewerLoader {
         ))
     }
 
+    pub fn send_spad_next_request(&self, request: ViewerLoadRequest) -> u64 {
+        let req = Self::build_request(
+            request,
+            ViewerRequestKind::Display,
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+        );
+        self.enqueue_to_shared(req, &self.spad_next_shared)
+    }
+
+    pub fn send_spad_prev_request(&self, request: ViewerLoadRequest) -> u64 {
+        let req = Self::build_request(
+            request,
+            ViewerRequestKind::Display,
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+        );
+        self.enqueue_to_shared(req, &self.spad_prev_shared)
+    }
+
     fn build_request(
         request: ViewerLoadRequest,
         kind: ViewerRequestKind,
@@ -359,7 +443,6 @@ impl ViewerLoader {
     }
 
     fn enqueue(&self, req: ViewerRequest) -> u64 {
-        let id = req.id;
         let page = req.page_left.or(req.page_right).unwrap_or(0);
         let shared = if req.interactive {
             if page % 2 == 0 {
@@ -370,6 +453,11 @@ impl ViewerLoader {
         } else {
             &self.background_shards[page as usize % self.background_worker_count]
         };
+        self.enqueue_to_shared(req, shared)
+    }
+
+    fn enqueue_to_shared(&self, req: ViewerRequest, shared: &Arc<SharedQueue>) -> u64 {
+        let id = req.id;
         {
             let mut guard = match shared.pending.lock() {
                 Ok(g) => g,
@@ -405,11 +493,33 @@ impl ViewerLoader {
         }
     }
 
+    pub fn try_recv_spad_next(&self) -> Option<ViewerResult> {
+        match self.spad_next_result_rx.lock() {
+            Ok(rx) => rx.try_recv().ok(),
+            Err(_) => {
+                tracing::error!("viewer_loader spad_next_result_rx mutex poisoned");
+                None
+            }
+        }
+    }
+
+    pub fn try_recv_spad_prev(&self) -> Option<ViewerResult> {
+        match self.spad_prev_result_rx.lock() {
+            Ok(rx) => rx.try_recv().ok(),
+            Err(_) => {
+                tracing::error!("viewer_loader spad_prev_result_rx mutex poisoned");
+                None
+            }
+        }
+    }
+
     /// チャネル内の未受信結果を全て破棄する。
     /// ViewerState を drop する前に呼ぶことで Arc<Vec<FrameData>> を確実に解放する。
     pub fn flush(&self) {
         while self.try_recv_interactive().is_some() {}
         while self.try_recv_background().is_some() {}
+        while self.try_recv_spad_next().is_some() {}
+        while self.try_recv_spad_prev().is_some() {}
     }
 
     pub fn peek_next_request_id(&self) -> u64 {

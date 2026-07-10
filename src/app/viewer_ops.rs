@@ -13,7 +13,7 @@ use crate::domain::archive_settings::{book_settings_path, ReadingState, Settings
 use crate::infra::archive::folder::FolderImageReader;
 use crate::infra::favorite_store::FavoriteStore;
 use crate::infra::ipc::{
-    ImageOrderSnapshot, IpcErrorCode, IpcServer, LibraryToViewer, ViewerBookState,
+    AdjacentBook, ImageOrderSnapshot, IpcErrorCode, IpcServer, LibraryToViewer, ViewerBookState,
     ViewerFavoriteState, ViewerToLibrary,
 };
 use crate::util::archive_path::{is_supported_archive_path, is_supported_image_path};
@@ -734,7 +734,7 @@ fn process_viewer_ipc_request(
                         ));
                     }
                 };
-            let (prev, next) = if resolved.current_present {
+            let (prev_path, next_path) = if resolved.current_present {
                 book_nav::adjacent_paths(&resolved.books, current_path.as_path())
             } else {
                 (
@@ -752,18 +752,38 @@ fn process_viewer_ipc_request(
                 current = %current_path.display(),
                 current_kind = %navigation_book_kind_label(current_path.as_path()),
                 current_present = resolved.current_present,
-                prev = prev.as_deref().map(|p| p.display().to_string()).as_deref().unwrap_or("-"),
-                prev_kind = prev
+                prev = prev_path.as_deref().map(|p| p.display().to_string()).as_deref().unwrap_or("-"),
+                prev_kind = prev_path
                     .as_deref()
                     .map(navigation_book_kind_label)
                     .unwrap_or("-"),
-                next = next.as_deref().map(|p| p.display().to_string()).as_deref().unwrap_or("-"),
-                next_kind = next
+                next = next_path.as_deref().map(|p| p.display().to_string()).as_deref().unwrap_or("-"),
+                next_kind = next_path
                     .as_deref()
                     .map(navigation_book_kind_label)
                     .unwrap_or("-"),
                 "viewer.ipc.request_adjacent_books.result"
             );
+            let prev = prev_path.map(|path| AdjacentBook {
+                book_state: viewer_book_state_for_path(
+                    favorite_store,
+                    path.as_path(),
+                    resume_from_last_reading_position,
+                    None,
+                ),
+                page_count: stored_page_count_for_path(path.as_path()),
+                path,
+            });
+            let next = next_path.map(|path| AdjacentBook {
+                book_state: viewer_book_state_for_path(
+                    favorite_store,
+                    path.as_path(),
+                    resume_from_last_reading_position,
+                    None,
+                ),
+                page_count: stored_page_count_for_path(path.as_path()),
+                path,
+            });
             (
                 LibraryToViewer::AdjacentBooks {
                     request_id,
@@ -999,6 +1019,14 @@ fn viewer_book_state_for_path(
         reading_state: file_settings.reading_state,
         start_page,
     }
+}
+
+fn stored_page_count_for_path(path: &Path) -> Option<u32> {
+    let settings_path = book_settings_path(path);
+    let file_settings = SettingsStore::load().get(settings_path.as_path());
+    file_settings
+        .reading_page_count
+        .and_then(|count| u32::try_from(count).ok())
 }
 
 fn resolved_navigation_books(

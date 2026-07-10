@@ -672,8 +672,9 @@ fn draw_debug_cache_overlay(
         ),
         format!("  State   : {}", bg_state_label),
     ];
+    let spad_section = state.spad_overlay_lines().to_vec();
 
-    let sections = [page_section, l1_section, l2_section, bg_section];
+    let sections = [page_section, l1_section, l2_section, spad_section, bg_section];
     let debug_text = sections
         .iter()
         .map(|section| section.join("\n"))

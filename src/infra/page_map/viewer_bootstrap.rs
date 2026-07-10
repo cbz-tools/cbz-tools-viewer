@@ -19,6 +19,20 @@ pub enum ViewerPageMapMode {
     Unavailable,
 }
 
+/// SPAD target用のcache-only Page Map参照。生成・保存・cache修復は行わない。
+pub fn try_load_existing_viewer_page_map_for_spad(path: &Path) -> Option<Arc<BookPageMap>> {
+    if matches!(book_source_kind(path), BookSourceKind::Unsupported) {
+        return None;
+    }
+    let metadata = std::fs::metadata(path).ok()?;
+    let revision = SourceRevision::from_file_state(metadata.len(), metadata.modified().ok());
+    let id = crate::domain::archive::BookId::from_path(path);
+    let cache = open_existing_page_map_cache()?;
+    cache
+        .get_existing_page_map_for_revision(&id, &revision)
+        .map(Arc::new)
+}
+
 /// Viewer 起動時に Page Map を cache / FAST で確定する。
 /// ここで unavailable なら後から Complete へ切り替えない。
 pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> ViewerPageMapMode {
@@ -349,6 +363,18 @@ fn open_page_map_cache() -> Option<PageMapDiskCache> {
             )
         })
         .ok()
+}
+
+fn open_existing_page_map_cache() -> Option<PageMapDiskCache> {
+    let default_root = PageMapDiskCache::default_root();
+    PageMapDiskCache::open_existing(default_root).ok().or_else(|| {
+        PageMapDiskCache::open_existing(
+            std::env::temp_dir()
+                .join(crate::app_identity::app_data_dir())
+                .join("page_maps"),
+        )
+        .ok()
+    })
 }
 
 fn source_revision_for_entry(entry: &BookMeta) -> SourceRevision {
