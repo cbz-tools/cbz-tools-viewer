@@ -347,16 +347,15 @@ impl SettingsStore {
         if !self.dirty {
             return;
         }
-        if let Some(dir) = self.file_path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         let envelope = BookStateEnvelope {
             schema_version: BOOK_STATE_SCHEMA_VERSION,
             books: self.data.clone(),
         };
         if let Ok(content) = serde_json::to_string_pretty(&envelope) {
-            if std::fs::write(&self.file_path, content).is_ok() {
+            if crate::infra::config_io::atomic_write(&self.file_path, content.as_bytes()).is_ok() {
                 self.dirty = false;
+            } else {
+                tracing::warn!(path = %self.file_path.display(), "failed to save book settings json");
             }
         } else {
             tracing::warn!(path = %self.file_path.display(), "failed to serialize book settings json");
@@ -490,14 +489,13 @@ fn sanitize_book_settings(
 }
 
 fn write_book_state(path: &Path, data: HashMap<PathBuf, FileSettings>) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
     let envelope = BookStateEnvelope {
         schema_version: BOOK_STATE_SCHEMA_VERSION,
         books: data,
     };
     if let Ok(content) = serde_json::to_string_pretty(&envelope) {
-        let _ = std::fs::write(path, content);
+        if let Err(error) = crate::infra::config_io::atomic_write(path, content.as_bytes()) {
+            tracing::warn!(path = %path.display(), %error, "failed to save book settings json");
+        }
     }
 }

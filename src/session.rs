@@ -119,10 +119,9 @@ impl SessionState {
             return;
         };
         let path = Self::file_path();
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+        if let Err(error) = crate::infra::config_io::atomic_write(&path, json.as_bytes()) {
+            tracing::warn!(path = %path.display(), %error, "failed to save session state");
         }
-        let _ = std::fs::write(path, json);
     }
 
     fn file_path() -> PathBuf {

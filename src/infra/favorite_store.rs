@@ -57,11 +57,8 @@ impl FavoriteStore {
             entries: self.entries.clone(),
         };
 
-        if let Some(parent) = self.file_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(json) = serde_json::to_string_pretty(&file) {
-            if std::fs::write(&self.file_path, json).is_ok() {
+            if crate::infra::config_io::atomic_write(&self.file_path, json.as_bytes()).is_ok() {
                 return true;
             }
             tracing::warn!(path = %self.file_path.display(), "failed to write favorites json");

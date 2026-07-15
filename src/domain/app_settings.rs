@@ -943,11 +943,10 @@ impl AppSettings {
             schema_version: APP_SETTINGS_SCHEMA_VERSION,
             settings: normalized,
         };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
         if let Ok(json) = serde_json::to_string_pretty(&envelope) {
-            let _ = std::fs::write(&path, json);
+            if let Err(error) = crate::infra::config_io::atomic_write(&path, json.as_bytes()) {
+                tracing::warn!(path = %path.display(), %error, "failed to save app settings");
+            }
         }
     }
 

@@ -144,16 +144,13 @@ fn load_raw() -> Result<TomlConfig, String> {
 
 fn save_raw(config: &TomlConfig) -> Result<(), String> {
     let path = kind_groups_path();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
     let content = toml::to_string(config).map_err(|e| e.to_string())?;
-    std::fs::write(&path, content).map_err(|e| e.to_string())
+    crate::infra::config_io::atomic_write(&path, content.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn write_template(path: &std::path::Path) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, include_str!("kind_groups_template.toml"))
+    crate::infra::config_io::atomic_write(
+        path,
+        include_str!("kind_groups_template.toml").as_bytes(),
+    )
 }
