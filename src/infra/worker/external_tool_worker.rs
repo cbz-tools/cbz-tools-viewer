@@ -223,6 +223,9 @@ fn run_foreground(req: ExternalToolRunRequest, mut cmd: Command) -> ExternalTool
 }
 
 fn run_background(req: ExternalToolRunRequest, mut cmd: Command) -> ExternalToolRunResult {
+    // background ツールは終了コードと JSON 結果で成否を判定するため、現状は stdout/stderr を
+    // 終了まで全量取得する。大量ログを出すツールではメモリを多く使い得る。上限を導入する場合は、
+    // JSON 結果の判定とエラー表示に必要な末尾出力を保ちながら、ストリーム読取りへ移行すること。
     let output = match cmd.output() {
         Ok(output) => output,
         Err(err) => {

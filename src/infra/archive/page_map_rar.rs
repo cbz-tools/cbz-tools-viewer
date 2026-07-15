@@ -175,6 +175,7 @@ fn build_rar_archive_plan(path: &Path) -> Result<RarArchivePlan, RarPageMapSlowF
     loop {
         let mut header = unrar_sys::HeaderDataEx::default();
         let read_started = Instant::now();
+        // SAFETY: `archive` は有効な open handle、`header` はこの呼び出し中だけ使う出力先。
         let read_ret = unsafe { unrar_sys::RARReadHeaderEx(archive.handle, &mut header as *mut _) };
         let _ = read_started.elapsed();
         match read_ret {
@@ -324,6 +325,8 @@ fn run_rar_worker(
     let archive = open_rar_archive(&plan.archive_path)?;
     let mut callback_state = RarProcessCallbackState::default();
     let callback_user_data = (&mut callback_state as *mut RarProcessCallbackState) as isize;
+    // SAFETY: callback state はこの関数の終了まで生存し、UnRAR の callback は同期的な
+    // `RARProcessFileW` 呼び出し中にだけ実行される。
     unsafe {
         unrar_sys::RARSetCallback(
             archive.handle,
@@ -338,6 +341,7 @@ fn run_rar_worker(
 
     loop {
         let mut header = unrar_sys::HeaderDataEx::default();
+        // SAFETY: `archive` は有効な open handle、`header` はこの呼び出し中だけ使う出力先。
         let read_ret = unsafe { unrar_sys::RARReadHeaderEx(archive.handle, &mut header as *mut _) };
         match read_ret {
             unrar_sys::ERAR_SUCCESS => {
@@ -488,13 +492,19 @@ fn extract_rar_image_bytes(
     entry_index: usize,
 ) -> Result<Vec<u8>, RarPageMapSlowFailure> {
     callback_state.current_bytes.clear();
+    // Page Map の完成を優先し、ここでは展開サイズに固定上限を設けない。
+    // 巨大な RAR エントリでは一時メモリを多く使い得るが、上限で打ち切ると
+    // 正常な大判画像でも Page Map を作れなくなる。共有メモリ予算を導入する場合は、
+    // RAR の最大 4 並列 worker を含めて設計すること。
     if let Ok(capacity) = usize::try_from(unpacked_size) {
         callback_state.current_bytes.reserve(capacity);
     }
     let user_data = (callback_state as *mut RarProcessCallbackState) as isize;
+    // SAFETY: callback state は後続の同期的な `RARProcessFileW` 完了まで生存する。
     unsafe {
         unrar_sys::RARSetCallback(handle, Some(rar_process_data_callback), user_data);
     }
+    // SAFETY: `handle` は現在ヘッダを指す有効な archive handle。callback は上記 state を参照する。
     let process_ret = unsafe {
         unrar_sys::RARProcessFileW(
             handle,
@@ -514,6 +524,7 @@ fn extract_rar_image_bytes(
 }
 
 fn rar_skip_current_file(handle: *const unrar_sys::Handle) -> Result<(), RarPageMapSlowFailure> {
+    // SAFETY: `handle` は `RARReadHeaderEx` 後の有効な archive handle。
     let ret = unsafe {
         unrar_sys::RARProcessFileW(
             handle,
@@ -581,6 +592,11 @@ fn open_rar_archive(path: &Path) -> Result<RarArchiveHandle, RarPageMapSlowFailu
     // archive path バッファはこの呼び出し中生存し、`open_data` は unrar が要求するレイアウトで初期化済み。
     let handle = unsafe { unrar_sys::RAROpenArchiveEx(&mut open_data as *mut _) };
     if handle.is_null() || open_data.open_result != unrar_sys::ERAR_SUCCESS as u32 {
+        if !handle.is_null() {
+            // SAFETY: UnRAR は open_result が失敗でも非 null handle を返すことがあり、その場合も
+            // この呼び出し側が所有者なので `RARCloseArchive` で解放する。
+            let _ = unsafe { unrar_sys::RARCloseArchive(handle) };
+        }
         return Err(RarPageMapSlowFailure {
             page_index: None,
             entry_index: None,

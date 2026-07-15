@@ -146,8 +146,10 @@ impl WebpAnimFrameSource {
             return Ok(None);
         }
 
-        let bytes_per_frame =
-            self.info.canvas_width as usize * self.info.canvas_height as usize * 4;
+        let bytes_per_frame = (self.info.canvas_width as usize)
+            .checked_mul(self.info.canvas_height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .context("WebP animation frame size overflow")?;
         let mut buf: *mut u8 = std::ptr::null_mut();
         let mut timestamp: i32 = 0;
         // SAFETY: `decoder` は有効で、`buf` / `timestamp` は libwebp への出力先。
@@ -157,7 +159,8 @@ impl WebpAnimFrameSource {
         }
 
         // SAFETY:
-        // `buf` は libwebp が返した RGBA バッファ先頭で、サイズは canvas 幅高から計算した 4 bytes/pixel。
+        // `buf` は libwebp が返した RGBA バッファ先頭で、サイズは checked 計算した
+        // canvas 幅高 × 4 bytes/pixel。
         // ここでは即 `Vec` へコピーし、借用を持ち出さない。
         let pixels = unsafe { std::slice::from_raw_parts(buf, bytes_per_frame) }.to_vec();
         let raw_delay = if self.emitted_frames == 0 {
@@ -390,6 +393,10 @@ fn decode_gif_frames(data: &[u8]) -> Result<Vec<FrameData>> {
     use image::codecs::gif::GifDecoder;
     use image::AnimationDecoder as _;
 
+    // 現在の Viewer はフレーム列全体を保持して再生するため、GIF は全フレームを
+    // フルサイズで収集してから表示サイズへ縮小する。大判・長尺 GIF では一時メモリが
+    // 大きくなり得る。上限を設ける場合は、途中フレームを欠かさない逐次デコードと
+    // 再生キャッシュの設計を GIF/APNG 共通で導入すること。
     let decoder = GifDecoder::new(std::io::Cursor::new(data)).context("GIF decoder")?;
     let frames: Vec<_> = decoder
         .into_frames()
@@ -487,6 +494,9 @@ fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {
 
     // is_apng() は ImageResult<bool> を返す
     if decoder.is_apng().unwrap_or(false) {
+        // GIF と同様に、現在は APNG の全フレームをフルサイズで収集してから縮小する。
+        // メモリ上限を導入する場合は、正常なアニメーションを途中で切らないよう、
+        // GIF と共通の逐次デコード・再生キャッシュへ移行すること。
         let apng = decoder.apng().context("APNG")?;
         let frames: Vec<_> = apng
             .into_frames()

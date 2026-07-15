@@ -1,4 +1,4 @@
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::domain::archive::BookId;
 use crate::domain::archive_settings::ReadingState;
 
+/// JSON payload の最大サイズ。末尾の改行は含まない。
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_MESSAGE_WIRE_BYTES: usize = MAX_MESSAGE_BYTES + 1;
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_SERVER_DEFAULT_TIMEOUT_MS: u32 = 5_000;
 
@@ -386,18 +388,26 @@ impl IpcConnection {
 
     fn recv_line<T: for<'de> Deserialize<'de>>(&mut self) -> anyhow::Result<T> {
         let mut line = Vec::new();
+        // `read_until` 単体では改行が来るまで無制限に確保するため、wire 上の改行を含めて
+        // 1 MiB + 1 byte までに制限する。上限に達しても改行がなければ接続は不正として扱う。
         let read = self
             .reader
+            .by_ref()
+            .take(MAX_MESSAGE_WIRE_BYTES as u64)
             .read_until(b'\n', &mut line)
             .context("read ipc message from pipe")?;
         if read == 0 {
             anyhow::bail!("ipc disconnected");
         }
-        if line.len() > MAX_MESSAGE_BYTES {
+        let has_newline = matches!(line.last(), Some(b'\n'));
+        if !has_newline && line.len() == MAX_MESSAGE_WIRE_BYTES {
             anyhow::bail!("ipc message too large: {} bytes", line.len());
         }
-        if matches!(line.last(), Some(b'\n')) {
+        if has_newline {
             let _ = line.pop();
+        }
+        if line.len() > MAX_MESSAGE_BYTES {
+            anyhow::bail!("ipc message too large: {} bytes", line.len());
         }
         serde_json::from_slice::<T>(&line).context("decode ipc json")
     }

@@ -769,6 +769,10 @@ fn decompress(raw: &[u8], entry: &ZipEntry) -> Result<Bytes> {
     match entry.compression {
         Compression::Stored => Ok(Bytes::copy_from_slice(raw)),
         Compression::Deflate => {
+            // ページ表示・Page Map 作成では展開済みエントリ全体が必要なため、ここでは
+            // `uncompressed_size` に固定上限を設けない。壊れた ZIP の過大な申告値では
+            // 予約・蓄積メモリが大きくなり得る。上限を導入する場合は、通常表示・サムネイル・
+            // Page Map の各経路で共有するメモリ予算と、正常な大判画像の扱いを合わせて設計すること。
             let cap = entry.uncompressed_size as usize;
             let mut out = Vec::with_capacity(cap);
             DeflateDecoder::new(raw)

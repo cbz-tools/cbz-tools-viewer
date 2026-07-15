@@ -1554,6 +1554,7 @@ impl App {
                     sidebar::SidebarAction::OpenFavorite(path) => {
                         self.library.history_back.clear();
                         self.library.history_forward.clear();
+                        self.set_pending_after_load(None, Some(0.0));
                         self.load_library_dir(path);
                         self.sidebar_open = false;
                     }

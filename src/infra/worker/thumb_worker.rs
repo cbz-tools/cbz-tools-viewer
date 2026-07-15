@@ -551,6 +551,7 @@ fn worker_main(
                     match req {
                         WorkerReq::ClearPending => {
                             shared.clear_in_flight();
+                            shared.page_map_coordinator.clear_all();
                             continue;
                         }
                         WorkerReq::ClearCaches => {

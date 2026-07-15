@@ -16,7 +16,7 @@ mod imp {
         core::{implement, Error as WinError, BOOL, HRESULT},
         Win32::{
             Foundation::{
-                DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
+                DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, GlobalFree,
                 DRAGDROP_S_USEDEFAULTCURSORS, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL,
                 HWND, OLE_E_ADVISENOTSUPPORTED, RPC_E_CHANGED_MODE, S_OK,
             },
@@ -258,6 +258,8 @@ mod imp {
         // SAFETY: `hglobal` は直前の `GlobalAlloc` 成功値で、lock 成功時だけ書き込む。
         let ptr = unsafe { GlobalLock(hglobal) };
         if ptr.is_null() {
+            // SAFETY: `hglobal` の所有権はまだこの関数にあり、lock 失敗時も解放が必要。
+            let _ = unsafe { GlobalFree(Some(hglobal)) };
             return Err(WinError::from_thread());
         }
 

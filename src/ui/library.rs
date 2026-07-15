@@ -1831,6 +1831,11 @@ impl LibraryState {
 
     // ── サムネイル一括要求 ────────────────────────────────────────────────────
 
+    // 現在は表示範囲に限定せず、ライブラリ全件のサムネイルを先読みする。
+    // そのため大規模ライブラリでは worker の無制限キューに待機要求が蓄積し得るが、
+    // スクロール後も待たずに表示できる UX を優先している。キューを上限付きにする場合は、
+    // 可視範囲優先・先読み範囲・残タスクの再投入を一体で設計し、この性質を維持すること。
+
     fn request_all_thumbs(&mut self) {
         let target_width = crate::domain::app_settings::AppSettings::storage_width();
         let mut tasks = Vec::new();
