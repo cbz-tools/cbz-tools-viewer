@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `Alt+Enter` in the Library to open Properties for the selected item.
 - Added adjacent-book scratchpad preloading for smoother next/previous book navigation.
 - Improved adjacent-book preloading by decoding next and previous books in parallel.
 - Improved adjacent-book layout matching by using the existing Page Map cache when available to reduce spread/single-page promotion misses.

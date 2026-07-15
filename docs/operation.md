@@ -64,6 +64,7 @@ Changes are applied immediately.
 | --- | --- |
 | Double-click | Open book |
 | Enter | Open book |
+| Alt+Enter | Show properties for the selected item |
 | Delete | Delete selected book |
 | F2 | Rename |
 | Ctrl+A | Select all |
@@ -101,6 +102,7 @@ See [Book group settings](book-groups.md) for details.
 | Rename | Rename |
 | Copy | Copy path |
 | Delete | Delete |
+| Properties | Show details for the selected item |
 | External Tools | Run external tools |
 
 When a FolderBook is selected, `Move to folder` is also shown.

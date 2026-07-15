@@ -1,6 +1,6 @@
 [package]
 name = "cbz-viewer"
-version = "0.1.0"
+version = "0.2.1"
 edition = "2021"
 authors = []
 description = "High-performance CBZ/ZIP/RAR manga viewer"

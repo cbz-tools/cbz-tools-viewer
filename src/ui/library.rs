@@ -93,10 +93,11 @@ pub fn poll_shortcuts(
         return None;
     }
 
-    let (f2, del, ctrl_c_pressed, ctrl_a_pressed) = ctx.input_mut(|i| {
+    let (f2, del, alt_enter, ctrl_c_pressed, ctrl_a_pressed) = ctx.input_mut(|i| {
         (
             i.consume_key(egui::Modifiers::NONE, egui::Key::F2),
             i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+            i.consume_key(egui::Modifiers::ALT, egui::Key::Enter),
             i.consume_key(egui::Modifiers::CTRL, egui::Key::C),
             i.consume_key(egui::Modifiers::CTRL, egui::Key::A),
         )
@@ -119,6 +120,11 @@ pub fn poll_shortcuts(
     }
     if del && state.selected_idx.is_some() {
         return Some(LibraryAction::Delete(state.effective_selection()));
+    }
+    if alt_enter {
+        if let Some(idx) = state.selected_idx {
+            return Some(LibraryAction::Properties(idx));
+        }
     }
     if ctrl_c
         && state

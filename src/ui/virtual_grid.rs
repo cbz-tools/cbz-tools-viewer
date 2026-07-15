@@ -1253,7 +1253,7 @@ fn render_context_menu_rename_copy_delete_section(
         ui,
         icons::ICON_INFO,
         tr(language, TextKey::Properties),
-        None,
+        Some("Alt+Enter"),
         !is_multi_selection,
         false,
     ) {
