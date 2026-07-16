@@ -205,24 +205,30 @@ fn draw_delete_range_overlay(
     let Some(start) = selection.start else {
         return;
     };
-    let edge_color = egui::Color32::from_rgba_unmultiplied(
-        theme::DELETE_RED.r(),
-        theme::DELETE_RED.g(),
-        theme::DELETE_RED.b(),
-        DELETE_RANGE_OVERLAY_EDGE_ALPHA,
-    );
     match selection.end {
         None => {
+            let start_color = egui::Color32::from_rgba_unmultiplied(
+                37,
+                99,
+                235,
+                DELETE_RANGE_OVERLAY_EDGE_ALPHA,
+            );
             let x = progress_x_for_physical_page(track_rect, start, max_page, reading_direction);
             painter.line_segment(
                 [
                     egui::pos2(x, track_rect.min.y),
                     egui::pos2(x, track_rect.max.y),
                 ],
-                egui::Stroke::new(1.5, edge_color),
+                egui::Stroke::new(1.5, start_color),
             );
         }
         Some(end) => {
+            let edge_color = egui::Color32::from_rgba_unmultiplied(
+                theme::DELETE_RED.r(),
+                theme::DELETE_RED.g(),
+                theme::DELETE_RED.b(),
+                DELETE_RANGE_OVERLAY_EDGE_ALPHA,
+            );
             let start_visual = visual_page_from_physical(start, max_page, reading_direction);
             let end_visual = visual_page_from_physical(end, max_page, reading_direction);
             let left_x =

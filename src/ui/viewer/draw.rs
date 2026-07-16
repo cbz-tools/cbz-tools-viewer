@@ -840,7 +840,7 @@ fn draw_delete_range_image_overlay(
             image_rect,
             DELETE_RANGE_OVERLAY_BAND_H,
             &text,
-            delete_range_selecting_fill(),
+            delete_range_start_fill(),
             DELETE_RANGE_TEXT,
         ),
         DeleteRangeImageOverlayKind::Selecting => draw_top_band_overlay(
@@ -929,6 +929,10 @@ fn format_delete_range_page_number(page: u32) -> String {
 
 fn delete_range_selecting_fill() -> Color32 {
     Color32::from_rgba_unmultiplied(217, 119, 6, DELETE_RANGE_SELECTING_FILL_ALPHA)
+}
+
+fn delete_range_start_fill() -> Color32 {
+    Color32::from_rgba_unmultiplied(37, 99, 235, DELETE_RANGE_SELECTING_FILL_ALPHA)
 }
 
 fn delete_range_complete_fill() -> Color32 {
