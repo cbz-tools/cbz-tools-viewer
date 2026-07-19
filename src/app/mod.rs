@@ -9,26 +9,32 @@ use std::process::Child;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use chrono::{Local, TimeZone};
 use eframe::egui::{self, Key, PointerButton};
 use parking_lot::RwLock;
 
 use self::external_tool::{ExternalToolRunning, ExternalToolUiState};
 use self::library_ops::PendingAfterLoad;
 use self::platform::{normalize_dir_path, sanitize_favorite_dirs};
-use self::ui_helpers::{calc_cache_size_mb, dialog_button_row, setup_style, DialogButtonSpec};
+use self::ui_helpers::{DialogButtonSpec, calc_cache_size_mb, dialog_button_row, setup_style};
 use self::viewer_ops::{
     FavoriteToggleResult, LibraryNavSnapshot, RebuildSelectedImagesAsCbzAndNextResult,
     ViewerSyncEvent,
 };
+use crate::LaunchOptions;
 use crate::domain::app_settings::AppSettings;
 use crate::domain::archive::{BookId, BookMeta, CbzRebuildPlanOptions, LibraryEntry};
+use crate::domain::ipc_contract::{IpcErrorCode, ViewerFavoriteState};
+use crate::domain::page_map::SourceRevision;
 use crate::domain::performance::PerformanceResources;
-use crate::infra::cache::{disk::DiskCache, page_map::PageMapDiskCache};
+use crate::infra::app_settings_resolution::resolve_performance_settings;
+use crate::infra::archive::cbz_rebuild_transaction::CbzRebuildTransactionFailure;
+use crate::infra::cache::{
+    artifact_failure::ArtifactFailureDiskCache, disk::DiskCache, page_map::PageMapDiskCache,
+};
 use crate::infra::worker::external_tool_worker::ExternalToolWorker;
-use crate::session::{sort_key_to_str, sort_order_to_str, LeftPaneTab, SessionState};
+use crate::session::{LeftPaneTab, SessionState, sort_key_to_str, sort_order_to_str};
 use crate::ui::{
-    i18n::{tr, TextKey},
+    i18n::{TextKey, tr},
     icons,
     library::{self, LibraryAction, LibraryState},
     settings::{self, SettingsEvent},
@@ -36,8 +42,8 @@ use crate::ui::{
     viewer::ExternalToolTrigger,
 };
 use crate::util::path_eq::normalize_path_for_selection;
-use crate::LaunchOptions;
 
+mod entry_properties_dialog;
 mod external_tool;
 mod file_ops;
 mod library_ops;
@@ -71,32 +77,6 @@ struct EntryProperties {
     size_bytes: Option<u64>,
     modified: Option<SystemTime>,
     page_count: Option<u32>,
-}
-
-const ENTRY_PROPERTIES_DIALOG_W: f32 = 500.0;
-const ENTRY_PROPERTY_LABEL_W: f32 = 72.0;
-const ENTRY_PROPERTY_VALUE_W: f32 = 280.0;
-// Keep rendered Label lines safely narrower than the fixed value cell.
-// A natural-width egui Label can otherwise request a little more width than
-// the measured text width and push the following action cell.
-const ENTRY_PROPERTY_TEXT_SAFE_MARGIN: f32 = 36.0;
-const ENTRY_PROPERTY_ACTION_W: f32 = 74.0;
-const ENTRY_PROPERTY_CELL_GAP: f32 = 8.0;
-const ENTRY_PROPERTY_ROW_GAP: f32 = 2.0;
-const ENTRY_PROPERTY_MULTILINE_ROWS: usize = 3;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EntryPropertyRowHeight {
-    Single,
-    ThreeLines,
-}
-
-#[derive(Clone, Debug)]
-struct EntryPropertyRow {
-    label: String,
-    value: String,
-    copy_label: Option<String>,
-    height: EntryPropertyRowHeight,
 }
 
 pub struct App {
@@ -173,7 +153,7 @@ impl App {
         let performance_resources = crate::infra::system_resources::detect_pc_resources();
         let app_settings = AppSettings::load_with_resources(&performance_resources);
         let performance_settings =
-            app_settings.normalized_performance_settings(&performance_resources);
+            resolve_performance_settings(&app_settings, &performance_resources);
         tracing::debug!(
             "[app.settings.applied] source=app_settings viewer_quality={:?} viewer_l1_vram_cache_max_mb={} viewer_l2_ram_cache_max_mib={} viewer_background_worker_count={}",
             app_settings.viewer_quality,
@@ -281,7 +261,9 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    // eframe 0.35 では状態更新と描画が分離される。IPC の状態反映は logic が担い、
+    // ui はその時点の Library 状態を描画して navigation 順序を公開する。
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.ui_frame_counter = self.ui_frame_counter.saturating_add(1);
         if self.suppress_pointer_until_release {
             if ctx.input(|i| i.pointer.any_down()) {
@@ -334,6 +316,10 @@ impl eframe::App for App {
         self.drain_pending_viewer_sync_events(ctx);
         self.drain_pending_rebuilt_viewer_paths(ctx);
         self.library.wheel_scroll_multiplier = self.app_settings.library_wheel_multiplier();
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
 
         // ── 設定ウィンドウ ────────────────────────────────────────────────────
         if self.settings_open {
@@ -345,7 +331,7 @@ impl eframe::App for App {
             let prev_settings = self.app_settings.clone();
             let mut app_settings = self.app_settings.clone();
             let event = settings::show(
-                ctx,
+                &ctx,
                 &mut self.settings_open,
                 ui_language,
                 &mut app_settings,
@@ -404,36 +390,53 @@ impl eframe::App for App {
                                     .join("page_maps"),
                             )
                         });
+                        let artifact_failure_cache = ArtifactFailureDiskCache::open(
+                            ArtifactFailureDiskCache::default_root(),
+                        )
+                        .or_else(|_| {
+                            ArtifactFailureDiskCache::open(
+                                std::env::temp_dir()
+                                    .join(crate::app_identity::app_data_dir())
+                                    .join("artifact_failures"),
+                            )
+                        });
 
-                        match (thumb_cache, page_map_cache) {
-                            (Ok(thumb_cache), Ok(page_map_cache)) => {
+                        match (thumb_cache, page_map_cache, artifact_failure_cache) {
+                            (Ok(thumb_cache), Ok(page_map_cache), Ok(artifact_failure_cache)) => {
                                 let thumb_clear = thumb_cache.clear_all();
                                 let page_map_clear = page_map_cache.clear_all();
-                                match (thumb_clear, page_map_clear) {
-                                    (Ok(_), Ok(_)) => {
+                                let artifact_failure_clear = artifact_failure_cache.clear_all();
+                                match (thumb_clear, page_map_clear, artifact_failure_clear) {
+                                    (Ok(_), Ok(_), Ok(_)) => {
                                         self.cache_size_mb = 0.0;
                                         tracing::info!("cache cleared");
                                     }
-                                    (thumb_res, page_map_res) => {
+                                    (thumb_res, page_map_res, artifact_failure_res) => {
                                         if let Err(e) = thumb_res {
                                             tracing::error!("thumb cache clear: {e}");
                                         }
                                         if let Err(e) = page_map_res {
                                             tracing::error!("page map cache clear: {e}");
                                         }
+                                        if let Err(e) = artifact_failure_res {
+                                            tracing::error!("artifact failure cache clear: {e}");
+                                        }
                                     }
                                 }
                             }
-                            (thumb_res, page_map_res) => {
+                            (thumb_res, page_map_res, artifact_failure_res) => {
                                 if let Err(e) = thumb_res {
                                     tracing::error!("thumb cache open failed: {e}");
                                 }
                                 if let Err(e) = page_map_res {
                                     tracing::error!("page map cache open failed: {e}");
                                 }
+                                if let Err(e) = artifact_failure_res {
+                                    tracing::error!("artifact failure cache open failed: {e}");
+                                }
                                 clear_cache_failed = true;
                             }
-                        }
+                        };
                     }
                     if clear_cache_failed {
                         self.show_error_dialog(tr(ui_language, TextKey::CacheClearFailed));
@@ -453,20 +456,18 @@ impl eframe::App for App {
         }
 
         // ── ライブラリ（常時表示） ────────────────────────────────────────────
-        self.show_library(ctx, frame);
+        self.show_library(ui, frame);
         self.refresh_library_book_order();
 
-        self.drain_pending_external_tool_runs(ctx);
+        self.drain_pending_external_tool_runs(&ctx);
         self.drain_pending_history_paths();
         // ThumbWorker ポーリング（入力処理後に実行して応答性を優先）
-        self.library.poll_worker(ctx);
-        self.library.apply_pending_updates(ctx);
+        self.library.poll_worker(&ctx);
+        self.library.apply_pending_updates(&ctx);
         // ライブラリ画面のリアルタイム追従（3秒ポーリング）。
         // 既存サムネイルは保持し、追加/削除/同一パス入れ替えだけを差分反映する。
-        self.library.poll_current_dir_changes(ctx);
+        self.library.poll_current_dir_changes(&ctx);
     }
-
-    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.save_session();
@@ -574,11 +575,14 @@ impl App {
             tracing::debug!("app: disk thumb removal skipped because cache open failed");
             return;
         };
-        if let Err(e) = cache.remove_thumb(&key.0, key.1, key.2) {
-            tracing::debug!(error = %e, "app: disk thumb removal failed");
-        } else {
-            tracing::debug!("app: disk thumb removal done");
-        }
+        match cache.remove_thumb(&key.0, key.1, key.2) {
+            Err(e) => {
+                tracing::debug!(error = %e, "app: disk thumb removal failed");
+            }
+            Ok(_) => {
+                tracing::debug!("app: disk thumb removal done");
+            }
+        };
     }
 
     pub(super) fn remove_disk_thumbs_by_id(&self, id: &BookId) {
@@ -594,11 +598,14 @@ impl App {
             tracing::debug!("app: disk thumb removal skipped because cache open failed");
             return;
         };
-        if let Err(e) = cache.remove_thumbs_by_id(id) {
-            tracing::debug!(error = %e, "app: disk thumb removal by id failed");
-        } else {
-            tracing::debug!("app: disk thumb removal by id done");
-        }
+        match cache.remove_thumbs_by_id(id) {
+            Err(e) => {
+                tracing::debug!(error = %e, "app: disk thumb removal by id failed");
+            }
+            Ok(_) => {
+                tracing::debug!("app: disk thumb removal by id done");
+            }
+        };
     }
 
     pub(super) fn remove_disk_page_map_by_key(&self, key: &(BookId, u64, Option<SystemTime>)) {
@@ -619,11 +626,14 @@ impl App {
             tracing::debug!("app: page map removal skipped because cache open failed");
             return;
         };
-        if let Err(e) = cache.remove_page_map(&key.0, key.1, key.2) {
-            tracing::debug!(error = %e, "app: page map removal failed");
-        } else {
-            tracing::debug!("app: page map removal done");
-        }
+        match cache.remove_page_map(&key.0, key.1, key.2) {
+            Err(e) => {
+                tracing::debug!(error = %e, "app: page map removal failed");
+            }
+            Ok(()) => {
+                tracing::debug!("app: page map removal done");
+            }
+        };
     }
 
     pub(super) fn remove_disk_page_maps_by_id(&self, id: &BookId) {
@@ -639,10 +649,48 @@ impl App {
             tracing::debug!("app: page map removal skipped because cache open failed");
             return;
         };
-        if let Err(e) = cache.remove_page_maps_by_id(id) {
-            tracing::debug!(error = %e, "app: page map removal by id failed");
-        } else {
-            tracing::debug!("app: page map removal by id done");
+        match cache.remove_page_maps_by_id(id) {
+            Err(e) => {
+                tracing::debug!(error = %e, "app: page map removal by id failed");
+            }
+            Ok(_) => {
+                tracing::debug!("app: page map removal by id done");
+            }
+        };
+    }
+
+    pub(super) fn remove_artifact_failure_by_key(&self, key: &(BookId, u64, Option<SystemTime>)) {
+        let cache = ArtifactFailureDiskCache::open(ArtifactFailureDiskCache::default_root())
+            .or_else(|_| {
+                ArtifactFailureDiskCache::open(
+                    std::env::temp_dir()
+                        .join(crate::app_identity::app_data_dir())
+                        .join("artifact_failures"),
+                )
+            });
+        let Ok(cache) = cache else {
+            return;
+        };
+        let revision = SourceRevision::from_file_state(key.1, key.2);
+        if let Err(error) = cache.remove_for_revision(&key.0, &revision) {
+            tracing::debug!(error = %error, "artifact failure cache removal failed");
+        }
+    }
+
+    pub(super) fn remove_artifact_failures_by_id(&self, id: &BookId) {
+        let cache = ArtifactFailureDiskCache::open(ArtifactFailureDiskCache::default_root())
+            .or_else(|_| {
+                ArtifactFailureDiskCache::open(
+                    std::env::temp_dir()
+                        .join(crate::app_identity::app_data_dir())
+                        .join("artifact_failures"),
+                )
+            });
+        let Ok(cache) = cache else {
+            return;
+        };
+        if let Err(error) = cache.remove_by_id(id) {
+            tracing::debug!(error = %error, "artifact failure cache removal by id failed");
         }
     }
 
@@ -807,7 +855,7 @@ impl App {
             Ok(true) => tracing::debug!("app: disk thumb rename done"),
             Ok(false) => tracing::debug!("app: disk thumb rename miss"),
             Err(e) => tracing::debug!(error = %e, "app: disk thumb rename failed"),
-        }
+        };
     }
 
     pub(super) fn rename_disk_page_map_artifact(
@@ -839,6 +887,30 @@ impl App {
             Ok(true) => tracing::debug!("app: page map rename done"),
             Ok(false) => tracing::debug!("app: page map rename miss"),
             Err(e) => tracing::debug!(error = %e, "app: page map rename failed"),
+        };
+    }
+
+    pub(super) fn rename_artifact_failure(
+        &self,
+        old_id: &BookId,
+        new_id: &BookId,
+        file_size: u64,
+        modified: Option<SystemTime>,
+    ) {
+        let cache = ArtifactFailureDiskCache::open(ArtifactFailureDiskCache::default_root())
+            .or_else(|_| {
+                ArtifactFailureDiskCache::open(
+                    std::env::temp_dir()
+                        .join(crate::app_identity::app_data_dir())
+                        .join("artifact_failures"),
+                )
+            });
+        let Ok(cache) = cache else {
+            return;
+        };
+        let revision = SourceRevision::from_file_state(file_size, modified);
+        if let Err(error) = cache.rename_artifact_for_revision(old_id, new_id, &revision) {
+            tracing::debug!(error = %error, "artifact failure cache rename failed");
         }
     }
 
@@ -869,6 +941,15 @@ impl App {
                 book_meta.size,
                 Some(book_meta.modified),
             );
+            self.rename_artifact_failure(
+                &book_meta.id,
+                &new_book_id,
+                book_meta.size,
+                Some(book_meta.modified),
+            );
+            self.remove_disk_thumbs_by_id(&book_meta.id);
+            self.remove_disk_page_maps_by_id(&book_meta.id);
+            self.remove_artifact_failures_by_id(&book_meta.id);
         }
 
         self.update_path_dependent_state(old_path, Some(new_path));
@@ -974,14 +1055,14 @@ impl App {
                             path = %current_path.display(),
                             "viewer.ipc.favorite_toggle.file_not_found"
                         );
-                        FavoriteToggleResult::Error(crate::infra::ipc::IpcErrorCode::FileNotFound)
+                        FavoriteToggleResult::Error(IpcErrorCode::FileNotFound)
                     } else if let Some(state) = self.toggle_favorite(current_path.as_path()) {
                         let favorite_state = match state {
                             crate::infra::favorite_store::FavoriteState::Favorite => {
-                                crate::infra::ipc::ViewerFavoriteState::On
+                                ViewerFavoriteState::On
                             }
                             crate::infra::favorite_store::FavoriteState::NotFavorite => {
-                                crate::infra::ipc::ViewerFavoriteState::Off
+                                ViewerFavoriteState::Off
                             }
                         };
                         FavoriteToggleResult::Success(favorite_state)
@@ -991,7 +1072,7 @@ impl App {
                             path = %current_path.display(),
                             "viewer.ipc.favorite_toggle.failed"
                         );
-                        FavoriteToggleResult::Error(crate::infra::ipc::IpcErrorCode::Unknown)
+                        FavoriteToggleResult::Error(IpcErrorCode::Unknown)
                     };
                     if response_tx.send(result).is_err() {
                         tracing::warn!(
@@ -1044,7 +1125,7 @@ impl App {
                                         "viewer.ipc.rebuild_selected_images_as_cbz_and_next.failed"
                                     );
                                     RebuildSelectedImagesAsCbzAndNextResult::Error(
-                                        crate::infra::ipc::IpcErrorCode::Unknown,
+                                        IpcErrorCode::Unknown,
                                     )
                                 }
                             }
@@ -1056,7 +1137,7 @@ impl App {
                                 "viewer.ipc.rebuild_selected_images_as_cbz_and_next.file_not_found"
                             );
                             RebuildSelectedImagesAsCbzAndNextResult::Error(
-                                crate::infra::ipc::IpcErrorCode::FileNotFound,
+                                IpcErrorCode::FileNotFound,
                             )
                         }
                     };
@@ -1093,11 +1174,13 @@ impl App {
                 );
                 self.remove_disk_thumb_by_key(&key);
                 self.remove_disk_page_map_by_key(&key);
+                self.remove_artifact_failure_by_key(&key);
             } else if let Some(thumb_id) =
                 deleted_cleanup.as_ref().and_then(|c| c.thumb_id.as_ref())
             {
                 self.remove_disk_thumbs_by_id(thumb_id);
                 self.remove_disk_page_maps_by_id(thumb_id);
+                self.remove_artifact_failures_by_id(thumb_id);
             }
         }
         let _ = self.library.remove_deleted_path(deleted_path);
@@ -1129,25 +1212,140 @@ impl App {
         entry: &LibraryEntry,
         options: CbzRebuildPlanOptions,
     ) -> anyhow::Result<RebuiltCbzLibrarySyncResult> {
-        let completed = crate::domain::archive::rebuild_cbz_for_library_entry(entry, options)?;
-        let rebuilt_path = completed.plan.output_path.clone();
-        let rebuilt_entry = crate::infra::fs::scanner::scan_path(rebuilt_path.as_path())?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "cbz rebuild output is not a supported library entry: {}",
-                    rebuilt_path.display()
-                )
-            })?;
-        if !matches!(rebuilt_entry, LibraryEntry::Archive(_)) {
-            anyhow::bail!(
-                "cbz rebuild output is not an archive library entry: {}",
-                rebuilt_path.display()
+        let plan = crate::domain::archive::plan_cbz_rebuild_for_library_entry(entry, options)?;
+        let prepared = crate::infra::archive::cbz_rebuild::prepare_cbz_rebuild_tmp(plan)?;
+        let committed =
+            match crate::infra::archive::cbz_rebuild::finalize_cbz_rebuild_prepared_tmp(prepared) {
+                Ok(committed) => committed,
+                Err(failure) => {
+                    Self::log_cbz_rebuild_transaction_failure(&failure);
+                    return Err(anyhow::Error::from(failure));
+                }
+            };
+        for warning in &committed.cleanup_warnings {
+            tracing::warn!(
+                cleanup_operation = ?warning.operation,
+                cleanup_path = %warning.path.display(),
+                input_path = %committed.paths.input.display(),
+                output_path = %committed.paths.output.display(),
+                error = %warning,
+                "library.cbz_rebuild.committed_cleanup_warning"
             );
         }
+        let completed = committed.completed;
+        let rebuilt_path = completed.plan.output_path.clone();
+        let rebuilt_entry = match crate::infra::fs::scanner::scan_path(rebuilt_path.as_path()) {
+            Ok(Some(rebuilt_entry)) if matches!(rebuilt_entry, LibraryEntry::Archive(_)) => {
+                rebuilt_entry
+            }
+            Ok(Some(_)) => {
+                let error = anyhow::anyhow!(
+                    "cbz rebuild output is not an archive library entry: {}",
+                    rebuilt_path.display()
+                );
+                return Err(Self::committed_cbz_rebuild_sync_error(
+                    rebuilt_path.as_path(),
+                    error,
+                ));
+            }
+            Ok(None) => {
+                let error = anyhow::anyhow!(
+                    "cbz rebuild output is not a supported library entry: {}",
+                    rebuilt_path.display()
+                );
+                return Err(Self::committed_cbz_rebuild_sync_error(
+                    rebuilt_path.as_path(),
+                    error,
+                ));
+            }
+            Err(error) => {
+                return Err(Self::committed_cbz_rebuild_sync_error(
+                    rebuilt_path.as_path(),
+                    error,
+                ));
+            }
+        };
         self.apply_deleted_path_diff(completed.plan.input_path.as_path(), None);
         self.library
             .register_rebuilt_cbz_entry(completed.plan.input_path.as_path(), rebuilt_entry);
         Ok(RebuiltCbzLibrarySyncResult { rebuilt_path })
+    }
+
+    fn log_cbz_rebuild_transaction_failure(failure: &CbzRebuildTransactionFailure) {
+        match failure {
+            CbzRebuildTransactionFailure::NotCommitted {
+                stage,
+                primary_error,
+                context,
+            } => tracing::warn!(
+                transaction_outcome = "not_committed",
+                transaction_stage = ?stage,
+                primary_stage = ?primary_error.stage,
+                primary_error = %primary_error,
+                input_path = %context.paths.input.display(),
+                output_path = %context.paths.output.display(),
+                temp_path = %context.paths.temp.display(),
+                backup_path = %context.paths.backup.display(),
+                input_presence = ?context.artifacts.input,
+                output_presence = ?context.artifacts.output,
+                temp_presence = ?context.artifacts.temp,
+                backup_presence = ?context.artifacts.backup,
+                "library.cbz_rebuild.transaction_failed"
+            ),
+            CbzRebuildTransactionFailure::RolledBack {
+                primary_error,
+                context,
+            } => tracing::warn!(
+                transaction_outcome = "rolled_back",
+                transaction_stage = ?primary_error.stage,
+                primary_error = %primary_error,
+                original_restored = true,
+                temp_may_remain = true,
+                input_path = %context.paths.input.display(),
+                output_path = %context.paths.output.display(),
+                temp_path = %context.paths.temp.display(),
+                backup_path = %context.paths.backup.display(),
+                input_presence = ?context.artifacts.input,
+                output_presence = ?context.artifacts.output,
+                temp_presence = ?context.artifacts.temp,
+                backup_presence = ?context.artifacts.backup,
+                "library.cbz_rebuild.transaction_failed"
+            ),
+            CbzRebuildTransactionFailure::RecoveryRequired {
+                commit_state,
+                primary_error,
+                recovery_error,
+                context,
+            } => tracing::warn!(
+                transaction_outcome = "recovery_required",
+                commit_state = ?commit_state,
+                transaction_stage = ?primary_error.stage,
+                primary_error = %primary_error,
+                recovery_error = ?recovery_error,
+                manual_confirmation_required = true,
+                input_path = %context.paths.input.display(),
+                output_path = %context.paths.output.display(),
+                temp_path = %context.paths.temp.display(),
+                backup_path = %context.paths.backup.display(),
+                input_presence = ?context.artifacts.input,
+                output_presence = ?context.artifacts.output,
+                temp_presence = ?context.artifacts.temp,
+                backup_presence = ?context.artifacts.backup,
+                "library.cbz_rebuild.transaction_failed"
+            ),
+        }
+    }
+
+    fn committed_cbz_rebuild_sync_error(output_path: &Path, error: anyhow::Error) -> anyhow::Error {
+        tracing::warn!(
+            output_path = %output_path.display(),
+            error = %error,
+            "library.cbz_rebuild.committed_library_sync_failed"
+        );
+        error.context(format!(
+            "cbz rebuild filesystem committed; Library reconciliation required for {}",
+            output_path.display()
+        ))
     }
 
     fn save_session(&mut self) {
@@ -1194,11 +1392,9 @@ impl App {
 
     // ── Library 画面 ──────────────────────────────────────────────────────────
 
-    // egui の deprecated API をまだ使うため、show_library だけ allow を残す。
-    // 置換後はこの許可を外せる。
-    #[allow(deprecated)]
-    fn show_library(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+    fn show_library(&mut self, ui: &mut egui::Ui, frame: &eframe::Frame) {
         const TOPBAR_H: f32 = 40.0;
+        let ctx = ui.ctx().clone();
         let ui_language = self.app_settings.ui_language;
 
         if self.sidebar_open && ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -1207,7 +1403,7 @@ impl App {
         }
 
         let sidebar_toggled_this_frame =
-            self.render_topbar_and_apply_result(ctx, ui_language, TOPBAR_H);
+            self.render_topbar_and_apply_result(ui, &ctx, ui_language, TOPBAR_H);
 
         let modal_open = self.renaming.is_some()
             || self.properties_dialog.is_some()
@@ -1219,10 +1415,10 @@ impl App {
             || self.library.path_input_focused
             || self.library.filter_input_focused;
 
-        self.process_library_shortcuts(ctx, interaction_blocked, keyboard_blocked);
+        self.process_library_shortcuts(&ctx, interaction_blocked, keyboard_blocked);
         if !self.settings_open && !keyboard_blocked {
             if let Some(action) =
-                library::poll_shortcuts(ctx, &mut self.library, interaction_blocked)
+                library::poll_shortcuts(&ctx, &mut self.library, interaction_blocked)
             {
                 self.dispatch_library_shortcut_action(action, frame);
             }
@@ -1232,32 +1428,33 @@ impl App {
         let library_external_busy = self.is_external_tool_busy();
 
         self.render_library_panel_and_dispatch_action(
-            ctx,
+            ui,
+            &ctx,
             frame,
             ui_language,
             &library_external_tools,
             library_external_busy,
         );
         self.render_sidebar_overlay_and_dispatch_action(
-            ctx,
+            &ctx,
             ui_language,
             TOPBAR_H,
             sidebar_toggled_this_frame,
         );
-        self.render_library_feedback_overlays(ctx, ui_language, TOPBAR_H);
-        self.render_library_modals(ctx, ui_language);
+        self.render_library_feedback_overlays(&ctx, ui_language, TOPBAR_H);
+        self.render_library_modals(&ctx, ui_language);
     }
 
-    #[allow(deprecated)]
     fn render_topbar_and_apply_result(
         &mut self,
+        ui: &mut egui::Ui,
         ctx: &egui::Context,
         ui_language: crate::domain::app_settings::UiLanguage,
         topbar_height: f32,
     ) -> bool {
         let topbar_result = egui::Panel::top("topbar")
             .exact_size(topbar_height)
-            .show(ctx, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(4.0);
                 topbar::show(
                     ui,
@@ -1439,16 +1636,16 @@ impl App {
         true
     }
 
-    #[allow(deprecated)]
     fn render_library_panel_and_dispatch_action(
         &mut self,
+        root_ui: &mut egui::Ui,
         ctx: &egui::Context,
         frame: &eframe::Frame,
         ui_language: crate::domain::app_settings::UiLanguage,
         library_external_tools: &[crate::ui::virtual_grid::ExternalToolMenuItem],
         library_external_busy: bool,
     ) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(root_ui, |ui| {
             let modal_open = self.renaming.is_some()
                 || self.properties_dialog.is_some()
                 || self.deleting.is_some()
@@ -1515,7 +1712,7 @@ impl App {
             .show(ctx, |ui| {
                 let frame = egui::Frame::new()
                     .fill(theme::SURFACE_BG)
-                    .stroke(egui::Stroke::new(1.0, theme::SEPARATOR_WEAK))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
                     .shadow(egui::epaint::Shadow {
                         offset: [2, 0],
                         blur: 10,
@@ -1597,7 +1794,7 @@ impl App {
                     .show(ctx, |ui| {
                         egui::Frame::new()
                             .fill(egui::Color32::from_rgba_unmultiplied(20, 20, 20, 220))
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(120)))
+                            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_gray(120)))
                             .corner_radius(egui::CornerRadius::same(6))
                             .inner_margin(egui::Margin::symmetric(10, 6))
                             .show(ui, |ui| {
@@ -1650,107 +1847,18 @@ impl App {
         ctx: &egui::Context,
         ui_language: crate::domain::app_settings::UiLanguage,
     ) {
-        if let Some(props) = self.properties_dialog.clone() {
-            let mut open = true;
-            let mut close_requested = false;
-
-            egui::Window::new(tr(ui_language, TextKey::PropertiesTitle))
-                .open(&mut open)
-                .resizable(false)
-                .collapsible(false)
-                .min_width(ENTRY_PROPERTIES_DIALOG_W)
-                .max_width(ENTRY_PROPERTIES_DIALOG_W)
-                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-                .show(ctx, |ui| {
-                    ui.set_min_width(ENTRY_PROPERTIES_DIALOG_W);
-                    ui.set_max_width(ENTRY_PROPERTIES_DIALOG_W);
-                    egui::Frame::new()
-                        .fill(theme::SURFACE_BG)
-                        .inner_margin(egui::Margin::symmetric(22, 20))
-                        .corner_radius(egui::CornerRadius::same(7))
-                        .show(ui, |ui| {
-                            ui.set_min_width(entry_property_grid_width());
-                            ui.set_max_width(entry_property_grid_width());
-
-                            let mut rows = vec![
-                                EntryPropertyRow {
-                                    label: tr(ui_language, TextKey::NameLabel).to_owned(),
-                                    value: props.name.clone(),
-                                    copy_label: Some(tr(ui_language, TextKey::Copy).to_owned()),
-                                    height: EntryPropertyRowHeight::ThreeLines,
-                                },
-                                EntryPropertyRow {
-                                    label: tr(ui_language, TextKey::PathLabel).to_owned(),
-                                    value: props.path.clone(),
-                                    copy_label: Some(tr(ui_language, TextKey::Copy).to_owned()),
-                                    height: EntryPropertyRowHeight::ThreeLines,
-                                },
-                                EntryPropertyRow {
-                                    label: tr(ui_language, TextKey::TypeLabel).to_owned(),
-                                    value: props.kind.clone(),
-                                    copy_label: None,
-                                    height: EntryPropertyRowHeight::Single,
-                                },
-                            ];
-
-                            if let Some(size_bytes) = props.size_bytes {
-                                rows.push(EntryPropertyRow {
-                                    label: tr(ui_language, TextKey::SizeLabel).to_owned(),
-                                    value: format_entry_info_file_size(size_bytes),
-                                    copy_label: None,
-                                    height: EntryPropertyRowHeight::Single,
-                                });
-                            }
-                            if let Some(modified) = props.modified {
-                                rows.push(EntryPropertyRow {
-                                    label: tr(ui_language, TextKey::ModifiedAt).to_owned(),
-                                    value: format_entry_info_modified(modified),
-                                    copy_label: None,
-                                    height: EntryPropertyRowHeight::Single,
-                                });
-                            }
-                            if let Some(page_count) = props.page_count {
-                                rows.push(EntryPropertyRow {
-                                    label: tr(ui_language, TextKey::PageCountLabel).to_owned(),
-                                    value: page_count.to_string(),
-                                    copy_label: None,
-                                    height: EntryPropertyRowHeight::Single,
-                                });
-                            }
-
-                            render_entry_property_grid(ui, &rows);
-
-                            ui.add_space(12.0);
-                            let close_button_w = 132.0;
-                            let mut close_clicked = false;
-                            ui.horizontal(|ui| {
-                                ui.add_space(
-                                    ((entry_property_grid_width() - close_button_w) / 2.0).max(0.0),
-                                );
-                                let buttons = dialog_button_row(
-                                    ui,
-                                    31.0,
-                                    &[DialogButtonSpec {
-                                        id: ui.id().with(("properties_dialog", "close")),
-                                        label: tr(ui_language, TextKey::Close),
-                                        width: close_button_w,
-                                        is_default: true,
-                                    }],
-                                );
-                                close_clicked = buttons[0].clicked;
-                            });
-                            if close_clicked
-                                || ui.input(|i| {
-                                    i.key_pressed(Key::Escape) || i.key_pressed(Key::Enter)
-                                })
-                            {
-                                close_requested = true;
-                            }
-                        });
-                });
-
-            if close_requested || !open {
-                self.properties_dialog = None;
+        let Some(props) = self.properties_dialog.as_ref() else {
+            return;
+        };
+        let actions = entry_properties_dialog::render(ctx, ui_language, props);
+        for action in actions {
+            match action {
+                entry_properties_dialog::EntryPropertiesAction::CopyText(text) => {
+                    ctx.copy_text(text);
+                }
+                entry_properties_dialog::EntryPropertiesAction::Close => {
+                    self.properties_dialog = None;
+                }
             }
         }
     }
@@ -1789,11 +1897,11 @@ impl App {
                                     ui.visuals_mut().selection.bg_fill =
                                         theme::ACCENT.linear_multiply(0.3);
                                     ui.visuals_mut().selection.stroke =
-                                        egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
+                                        egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
                                     ui.visuals_mut().widgets.active.bg_stroke =
-                                        egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
+                                        egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
                                     ui.visuals_mut().widgets.hovered.bg_stroke =
-                                        egui::Stroke::new(1.0, theme::ACCENT_HOVER);
+                                        egui::Stroke::new(1.0_f32, theme::ACCENT_HOVER);
                                     ui.add_sized(
                                         [ui.available_width(), 32.0],
                                         egui::TextEdit::singleline(&mut buf)
@@ -2294,283 +2402,6 @@ impl App {
     // ── ビューアウィンドウ管理 ────────────────────────────────────────────────
 }
 
-fn entry_property_grid_width() -> f32 {
-    ENTRY_PROPERTY_LABEL_W
-        + ENTRY_PROPERTY_CELL_GAP
-        + ENTRY_PROPERTY_VALUE_W
-        + ENTRY_PROPERTY_CELL_GAP
-        + ENTRY_PROPERTY_ACTION_W
-}
-
-fn entry_property_text_max_width() -> f32 {
-    (ENTRY_PROPERTY_VALUE_W - ENTRY_PROPERTY_TEXT_SAFE_MARGIN).max(1.0)
-}
-
-fn render_entry_property_grid(ui: &mut egui::Ui, rows: &[EntryPropertyRow]) {
-    ui.set_min_width(entry_property_grid_width());
-    ui.set_max_width(entry_property_grid_width());
-
-    let line_h = ui.spacing().interact_size.y;
-    let font = egui::FontId::proportional(theme::FONT_SIZE_BODY);
-
-    ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-        ui.spacing_mut().item_spacing.y = ENTRY_PROPERTY_ROW_GAP;
-        for row in rows {
-            render_entry_property_row(ui, row, line_h, &font);
-        }
-    });
-}
-
-fn render_entry_property_row(
-    ui: &mut egui::Ui,
-    row: &EntryPropertyRow,
-    line_h: f32,
-    font: &egui::FontId,
-) {
-    let row_h = entry_property_row_height(row.height, line_h);
-    ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-        ui.spacing_mut().item_spacing.x = ENTRY_PROPERTY_CELL_GAP;
-        ui.spacing_mut().item_spacing.y = 0.0;
-        render_entry_property_label_cell(ui, &row.label, row.height, line_h);
-        render_entry_property_value_cell(ui, row, line_h, font);
-        render_entry_property_action_cell(ui, row, line_h);
-        ui.allocate_space(egui::vec2(0.0, row_h));
-    });
-}
-
-fn entry_property_row_height(row_height: EntryPropertyRowHeight, line_h: f32) -> f32 {
-    match row_height {
-        EntryPropertyRowHeight::Single => line_h,
-        EntryPropertyRowHeight::ThreeLines => line_h * ENTRY_PROPERTY_MULTILINE_ROWS as f32,
-    }
-}
-
-fn render_entry_property_label_cell(
-    ui: &mut egui::Ui,
-    label: &str,
-    row_height: EntryPropertyRowHeight,
-    line_h: f32,
-) {
-    let row_h = entry_property_row_height(row_height, line_h);
-    ui.allocate_ui_with_layout(
-        egui::vec2(ENTRY_PROPERTY_LABEL_W, row_h),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.set_min_width(ENTRY_PROPERTY_LABEL_W);
-            ui.set_max_width(ENTRY_PROPERTY_LABEL_W);
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ui.label(egui::RichText::new(label).color(theme::TEXT_MAIN));
-            let remaining_h = (line_h - ui.min_rect().height()).max(0.0);
-            if remaining_h > 0.0 {
-                ui.add_space(remaining_h);
-            }
-        },
-    );
-}
-
-fn render_entry_property_value_cell(
-    ui: &mut egui::Ui,
-    row: &EntryPropertyRow,
-    line_h: f32,
-    font: &egui::FontId,
-) {
-    let row_h = entry_property_row_height(row.height, line_h);
-    ui.allocate_ui_with_layout(
-        egui::vec2(ENTRY_PROPERTY_VALUE_W, row_h),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            match row.height {
-                EntryPropertyRowHeight::Single => {
-                    let text = truncate_entry_property_line(
-                        ui.painter(),
-                        &row.value,
-                        entry_property_text_max_width(),
-                        font,
-                    );
-                    render_entry_property_text_line(ui, &text, line_h);
-                }
-                EntryPropertyRowHeight::ThreeLines => {
-                    let lines = split_entry_property_lines(
-                        ui.painter(),
-                        &row.value,
-                        entry_property_text_max_width(),
-                        ENTRY_PROPERTY_MULTILINE_ROWS,
-                        font,
-                    );
-                    for line_idx in 0..ENTRY_PROPERTY_MULTILINE_ROWS {
-                        let line = lines.get(line_idx).map(String::as_str).unwrap_or("");
-                        render_entry_property_text_line(ui, line, line_h);
-                    }
-                }
-            }
-        },
-    );
-}
-
-fn render_entry_property_text_line(ui: &mut egui::Ui, text: &str, line_h: f32) {
-    ui.allocate_ui_with_layout(
-        egui::vec2(ENTRY_PROPERTY_VALUE_W, line_h),
-        egui::Layout::left_to_right(egui::Align::Min),
-        |ui| {
-            ui.set_min_width(ENTRY_PROPERTY_VALUE_W);
-            ui.set_max_width(ENTRY_PROPERTY_VALUE_W);
-            ui.spacing_mut().item_spacing.x = 0.0;
-            ui.add(egui::Label::new(
-                egui::RichText::new(text).color(theme::TEXT_MAIN),
-            ));
-        },
-    );
-}
-
-fn render_entry_property_action_cell(ui: &mut egui::Ui, row: &EntryPropertyRow, line_h: f32) {
-    let row_h = entry_property_row_height(row.height, line_h);
-    ui.allocate_ui_with_layout(
-        egui::vec2(ENTRY_PROPERTY_ACTION_W, row_h),
-        egui::Layout::top_down(egui::Align::Min),
-        |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            if let Some(copy_label) = &row.copy_label {
-                if ui
-                    .add_sized(
-                        [ENTRY_PROPERTY_ACTION_W, line_h],
-                        egui::Button::new(copy_label),
-                    )
-                    .clicked()
-                {
-                    ui.ctx().copy_text(row.value.clone());
-                }
-            } else {
-                ui.add_space(line_h);
-            }
-        },
-    );
-}
-
-fn split_entry_property_lines(
-    painter: &egui::Painter,
-    value: &str,
-    max_width: f32,
-    max_lines: usize,
-    font: &egui::FontId,
-) -> Vec<String> {
-    if max_lines == 0 {
-        return Vec::new();
-    }
-    if value.is_empty() {
-        return vec![String::new()];
-    }
-
-    let chars: Vec<char> = value.chars().collect();
-    let mut lines = Vec::new();
-    let mut start = 0;
-
-    while start < chars.len() && lines.len() < max_lines {
-        let is_last_line = lines.len() + 1 == max_lines;
-        let mut end =
-            best_fit_entry_property_end(painter, &chars, start, chars.len(), max_width, font);
-        if end <= start {
-            end = (start + 1).min(chars.len());
-        }
-
-        if is_last_line && end < chars.len() {
-            lines.push(fit_entry_property_line_with_ellipsis(
-                painter,
-                &chars[start..],
-                max_width,
-                font,
-            ));
-            break;
-        }
-
-        lines.push(chars[start..end].iter().collect());
-        start = end;
-    }
-
-    lines
-}
-
-fn truncate_entry_property_line(
-    painter: &egui::Painter,
-    value: &str,
-    max_width: f32,
-    font: &egui::FontId,
-) -> String {
-    if measured_entry_property_text_width(painter, value, font) <= max_width {
-        return value.to_owned();
-    }
-    let chars: Vec<char> = value.chars().collect();
-    fit_entry_property_line_with_ellipsis(painter, &chars, max_width, font)
-}
-
-fn best_fit_entry_property_end(
-    painter: &egui::Painter,
-    chars: &[char],
-    start: usize,
-    limit: usize,
-    max_width: f32,
-    font: &egui::FontId,
-) -> usize {
-    let mut lo = start + 1;
-    let mut hi = limit;
-    let mut best = start;
-
-    while lo <= hi {
-        let mid = (lo + hi) / 2;
-        let text: String = chars[start..mid].iter().collect();
-        if measured_entry_property_text_width(painter, &text, font) <= max_width {
-            best = mid;
-            lo = mid + 1;
-        } else {
-            hi = mid.saturating_sub(1);
-        }
-    }
-
-    best
-}
-
-fn fit_entry_property_line_with_ellipsis(
-    painter: &egui::Painter,
-    chars: &[char],
-    max_width: f32,
-    font: &egui::FontId,
-) -> String {
-    let ellipsis = "…";
-    if measured_entry_property_text_width(painter, ellipsis, font) > max_width {
-        return String::new();
-    }
-
-    let mut lo = 0;
-    let mut hi = chars.len();
-    let mut best = 0;
-    while lo <= hi {
-        let mid = (lo + hi) / 2;
-        let mut text: String = chars[..mid].iter().collect();
-        text.push_str(ellipsis);
-        if measured_entry_property_text_width(painter, &text, font) <= max_width {
-            best = mid;
-            lo = mid + 1;
-        } else {
-            hi = mid.saturating_sub(1);
-        }
-    }
-
-    let mut text: String = chars[..best].iter().collect();
-    text.push_str(ellipsis);
-    text
-}
-
-fn measured_entry_property_text_width(
-    painter: &egui::Painter,
-    text: &str,
-    font: &egui::FontId,
-) -> f32 {
-    painter
-        .layout_no_wrap(text.to_owned(), font.clone(), theme::TEXT_MAIN)
-        .size()
-        .x
-}
-
 fn entry_properties_for(entry: &LibraryEntry) -> EntryProperties {
     let path = entry.path();
     let name = path
@@ -2616,35 +2447,5 @@ fn format_entry_kind(path: &Path) -> String {
         Some("GIF") => String::from("GIF"),
         Some(other) => other.to_string(),
         None => String::from("FILE"),
-    }
-}
-
-fn format_entry_info_file_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    if bytes == 0 {
-        return String::from("0 B");
-    }
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{:.0} KB", b / KB)
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-fn format_entry_info_modified(modified: SystemTime) -> String {
-    match modified.duration_since(UNIX_EPOCH) {
-        Ok(duration) => Local
-            .timestamp_opt(duration.as_secs() as i64, duration.subsec_nanos())
-            .single()
-            .map(|dt| dt.format("%Y/%m/%d %H:%M").to_string())
-            .unwrap_or_else(|| String::from("-")),
-        Err(_) => String::from("-"),
     }
 }

@@ -171,6 +171,47 @@ impl PageMapDiskCache {
         Ok(removed)
     }
 
+    /// current revision 以外の同一 BookId の Page Map を削除する。
+    pub fn prune_page_maps_except_revision(
+        &self,
+        id: &BookId,
+        revision: &SourceRevision,
+    ) -> Result<usize> {
+        if !revision.is_persistable() {
+            return Ok(0);
+        }
+        let hex = id.0.to_hex();
+        let dir = self.root.join(&hex[..2]);
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let current_name = self
+            .page_map_path(id, revision)
+            .file_name()
+            .map(|name| name.to_owned());
+
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            if current_name.as_deref() != Some(name)
+                && name
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(hex.as_str()) && name.ends_with(".pmap"))
+                && std::fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     pub fn rename_page_map_artifact(
         &self,
         old_id: &BookId,

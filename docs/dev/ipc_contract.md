@@ -197,6 +197,10 @@ SnapshotPathMismatch
 
 Viewer は再要求可能。
 
+`SnapshotUnavailable` と `SnapshotPathMismatch` は、
+retry可能な型契約を維持するための予約codeである。
+現行navigation resolutionで通常送出されるerrorであるとは限らない。
+
 ---
 
 ### Retry不可
@@ -275,6 +279,16 @@ Viewer は直接参照しない。
 
 Snapshot が空・未同期・不一致の場合も、
 Archive と FolderBook を本移動候補として扱う。
+
+現行navigation resolutionでは、snapshotが空、未同期、またはcurrent pathと不一致の場合、
+Library process内でfallback book orderを解決する。
+fallbackが成立する限り、Viewerへ`SnapshotUnavailable`または
+`SnapshotPathMismatch`を返さない。
+
+fallback後もLibraryがSource of Truthであり、navigation resolverである。
+Viewerがfilesystem順序を決めることはない。
+両error codeは予約済み・互換維持用のcontractとして残し、
+将来のfallback不能経路やtransport contractで利用される可能性を排除しない。
 
 ---
 

@@ -7,23 +7,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::egui::{self, pos2, vec2, Color32, Key, Rect};
+use eframe::egui::{self, Color32, Key, Rect, pos2, vec2};
 
 use crate::domain::app_settings::{ReadingDirection, UiLanguage, ViewerQuality};
 use crate::domain::archive_settings::SpreadMode;
+use crate::domain::ipc_contract::ViewerFavoriteState;
 use crate::infra::image::decode as img;
-use crate::infra::ipc::ViewerFavoriteState;
-use crate::ui::i18n::{tr, TextKey};
+use crate::ui::i18n::{TextKey, tr};
 
 use self::draw::{
+    BoundaryPreviewCardAction, FullscreenOverlayContext, ViewerOverlayContext,
     compute_spread_rects, draw_boundary_preview_card, draw_follow_placeholder_panel,
     draw_fullscreen_overlay, draw_key_feedback, draw_pages, draw_status_message,
-    draw_viewer_overlays, fullscreen_overlay_near, BoundaryPreviewCardAction,
-    FullscreenOverlayContext, ViewerOverlayContext,
+    draw_viewer_overlays, fullscreen_overlay_near,
 };
 use self::progress::render_page_progress_bar;
-use self::state::{now_ms, OverlayRenderResult};
-use self::toolbar::{is_reserved_viewer_key, render_viewer_toolbar, ViewerToolbarContext};
+use self::state::{OverlayRenderResult, now_ms};
+use self::toolbar::{ViewerToolbarContext, is_reserved_viewer_key, render_viewer_toolbar};
 use super::{icons, theme};
 
 mod auto_spread_plan;

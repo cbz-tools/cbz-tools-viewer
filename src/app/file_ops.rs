@@ -14,9 +14,9 @@ use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::{ffi::OsStr, iter::once, os::windows::ffi::OsStrExt};
 #[cfg(windows)]
 use windows::{
-    core::PCWSTR,
     Win32::Foundation::HWND,
     Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    core::PCWSTR,
 };
 
 use super::platform::{is_supported_archive_path, normalize_drop_select_path};
@@ -388,7 +388,7 @@ fn utf16z_select_path(path: &Path) -> Vec<u16> {
 fn copy_files_to_clipboard(paths: &[PathBuf]) {
     // Windows の CF_HDROP ファイル一覧コピーには clipboard-win を使う。
     // egui の clipboard はこの用途では文字列専用なので、ここは置き換えない。
-    use clipboard_win::{formats, Clipboard, Setter};
+    use clipboard_win::{Clipboard, Setter, formats};
     let strings: Vec<String> = paths
         .iter()
         .map(|p| p.to_string_lossy().into_owned())

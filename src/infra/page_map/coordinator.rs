@@ -10,21 +10,22 @@ use tokio::sync::Semaphore;
 use crate::domain::archive::BookId;
 use crate::domain::page_map::{BookPageMap, PageDescriptor, SourceRevision};
 use crate::infra::archive::page_map::{
-    build_book_page_map_slow_from_folder_path, FolderPageMapSlowOutcome,
+    FolderPageMapSlowOutcome, build_book_page_map_slow_from_folder_path,
 };
 #[cfg(feature = "rar")]
 use crate::infra::archive::page_map::{
-    build_book_page_map_slow_from_rar_path, RarPageMapSlowOutcome,
+    RarPageMapSlowOutcome, build_book_page_map_slow_from_rar_path,
 };
 use crate::infra::archive::page_map::{
-    build_book_page_map_slow_from_zip_reader, ZipPageMapFastStatus, ZipPageMapSlowFailureReason,
-    ZipPageMapSlowOutcome, ZipPageMapSlowReason,
+    ZipPageMapFastStatus, ZipPageMapSlowFailureReason, ZipPageMapSlowOutcome, ZipPageMapSlowReason,
+    build_book_page_map_slow_from_zip_reader,
 };
 use crate::infra::archive::{
-    book_source_kind, epub::build_book_page_map_slow_from_epub_path, BookSourceKind,
+    BookSourceKind, book_source_kind, epub::build_book_page_map_slow_from_epub_path,
 };
+use crate::infra::cache::artifact_failure::{ArtifactFailureDiskCache, ArtifactKind};
 use crate::infra::cache::page_map::PageMapDiskCache;
-use crate::infra::page_map::build::{assemble_zip_fast_page_map, PageMapBuildStatus};
+use crate::infra::page_map::build::{PageMapBuildStatus, assemble_zip_fast_page_map};
 
 /// Page Map の生成結果を cache に反映し、stale と重複 complete を抑止する。
 #[derive(Clone, Debug)]
@@ -32,6 +33,7 @@ pub struct PageMapCoordinator {
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
     artifact_gate: Arc<RwLock<()>>,
+    artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
     page_map_slow_states: Arc<Mutex<HashMap<PageMapTaskKey, PageMapSlowState>>>,
     page_map_complete_permit: Arc<Semaphore>,
 }
@@ -41,11 +43,13 @@ impl PageMapCoordinator {
         generation: Arc<AtomicU64>,
         artifact_generation: Arc<AtomicU64>,
         artifact_gate: Arc<RwLock<()>>,
+        artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
     ) -> Self {
         Self {
             generation,
             artifact_generation,
             artifact_gate,
+            artifact_failure_cache,
             page_map_slow_states: Arc::new(Mutex::new(HashMap::new())),
             page_map_complete_permit: Arc::new(Semaphore::new(1)),
         }
@@ -92,6 +96,10 @@ impl PageMapCoordinator {
         if let Ok(mut guard) = self.page_map_slow_states.lock() {
             guard.retain(|key, _| &key.book_id != id);
         }
+    }
+
+    pub fn record_page_map_terminal_failure(&self, id: &BookId, revision: &SourceRevision) {
+        self.mark_page_map_failure(id, revision);
     }
 
     /// FAST 結果を保存する。Complete が必要なら 1 回だけ slow 側へ引き渡す。
@@ -248,6 +256,15 @@ impl PageMapCoordinator {
             );
             return PageMapFastPersistOutcome::Failed;
         }
+        if let Some(stale_reason) = self.page_map_stale_reason(
+            task_generation,
+            task_artifact_generation,
+            &source_path,
+            &source_revision,
+        ) {
+            self.log_page_map_stale(&book_id, &source_path, stale_reason);
+            return PageMapFastPersistOutcome::Failed;
+        }
 
         let started = Instant::now();
         let assembled = assemble_zip_fast_page_map(
@@ -289,8 +306,9 @@ impl PageMapCoordinator {
                 }
 
                 let page_map_page_count = page_map.page_count();
+                self.clear_page_map_failure(&book_id, &source_revision);
                 let page_map_bytes = page_map.encode_cache_bytes();
-                match page_map_cache.put_page_map_bytes_for_revision(
+                let persist_outcome = match page_map_cache.put_page_map_bytes_for_revision(
                     &book_id,
                     &source_revision,
                     &page_map_bytes,
@@ -316,7 +334,8 @@ impl PageMapCoordinator {
                         );
                         PageMapFastPersistOutcome::Failed
                     }
-                }
+                };
+                persist_outcome
             }
             PageMapBuildStatus::RequiresComplete(reason) => {
                 tracing::debug!(
@@ -343,6 +362,7 @@ impl PageMapCoordinator {
                     reason = ?reason,
                     "page-map fast failed"
                 );
+                self.mark_page_map_failure(&book_id, &source_revision);
                 PageMapFastPersistOutcome::Failed
             }
         }
@@ -390,6 +410,7 @@ impl PageMapCoordinator {
         }
 
         let page_map_page_count = page_map.page_count();
+        self.clear_page_map_failure(&book_id, &source_revision);
         let page_map_bytes = page_map.encode_cache_bytes();
         match page_map_cache.put_page_map_bytes_for_revision(
             &book_id,
@@ -414,7 +435,7 @@ impl PageMapCoordinator {
                     "page-map cache save failed"
                 );
             }
-        }
+        };
     }
 
     fn complete_blocking(
@@ -503,7 +524,7 @@ impl PageMapCoordinator {
                                 let _ =
                                     self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
                             }
-                        }
+                        };
                     }
                     FolderPageMapSlowOutcome::Failure(failure) => {
                         if let Some(stale_reason) =
@@ -521,7 +542,7 @@ impl PageMapCoordinator {
                             elapsed_ms = started.elapsed().as_millis(),
                             "page-map slow failed"
                         );
-                        let _ = self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
+                        self.finish_page_map_terminal_failure(&request, &key);
                     }
                 }
                 return;
@@ -578,7 +599,7 @@ impl PageMapCoordinator {
                                 let _ =
                                     self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
                             }
-                        }
+                        };
                     }
                     RarPageMapSlowOutcome::Failure(failure) => {
                         if let Some(stale_reason) =
@@ -596,7 +617,7 @@ impl PageMapCoordinator {
                             elapsed_ms = started.elapsed().as_millis(),
                             "page-map slow failed"
                         );
-                        let _ = self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
+                        self.finish_page_map_terminal_failure(&request, &key);
                     }
                 }
                 return;
@@ -655,7 +676,7 @@ impl PageMapCoordinator {
                                 let _ =
                                     self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
                             }
-                        }
+                        };
                     }
                     Err(failure) => {
                         if let Some(stale_reason) =
@@ -672,7 +693,7 @@ impl PageMapCoordinator {
                             elapsed_ms = started.elapsed().as_millis(),
                             "page-map slow failed"
                         );
-                        let _ = self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
+                        self.finish_page_map_terminal_failure(&request, &key);
                     }
                 }
                 return;
@@ -689,7 +710,7 @@ impl PageMapCoordinator {
                     reason = ?ZipPageMapSlowFailureReason::ZipOpenError,
                     "page-map slow failed"
                 );
-                let _ = self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
+                self.finish_page_map_terminal_failure(&request, &key);
                 return;
             }
         };
@@ -737,7 +758,7 @@ impl PageMapCoordinator {
                         );
                         let _ = self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
                     }
-                }
+                };
             }
             ZipPageMapSlowOutcome::Failure(failure) => {
                 if let Some(stale_reason) = self.page_map_stale_reason_from_slow_request(&request) {
@@ -753,7 +774,62 @@ impl PageMapCoordinator {
                     elapsed_ms = started.elapsed().as_millis(),
                     "page-map slow failed"
                 );
-                let _ = self.finish_page_map_slow_state(&key, PageMapSlowState::Failed);
+                self.finish_page_map_terminal_failure(&request, &key);
+            }
+        }
+    }
+
+    fn finish_page_map_terminal_failure(
+        &self,
+        request: &PageMapCompleteRequest,
+        key: &PageMapTaskKey,
+    ) {
+        self.mark_page_map_failure(&request.book_id, &request.source_revision);
+        let _ = self.finish_page_map_slow_state(key, PageMapSlowState::Failed);
+    }
+
+    fn mark_page_map_failure(&self, id: &BookId, revision: &SourceRevision) {
+        if let Some(cache) = self.artifact_failure_cache.as_ref() {
+            match cache.mark_failure_for_revision(id, revision, ArtifactKind::PageMap) {
+                Ok(true) => {
+                    tracing::debug!(
+                        id = %id.0.to_hex(),
+                        source_revision = ?revision,
+                        "page-map terminal failure cached"
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        id = %id.0.to_hex(),
+                        source_revision = ?revision,
+                        error = %error,
+                        "page-map failure cache save failed"
+                    );
+                }
+            }
+        }
+    }
+
+    fn clear_page_map_failure(&self, id: &BookId, revision: &SourceRevision) {
+        if let Some(cache) = self.artifact_failure_cache.as_ref() {
+            match cache.clear_failure_for_revision(id, revision, ArtifactKind::PageMap) {
+                Ok(true) => {
+                    tracing::debug!(
+                        id = %id.0.to_hex(),
+                        source_revision = ?revision,
+                        "page-map failure cache cleared after success"
+                    );
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        id = %id.0.to_hex(),
+                        source_revision = ?revision,
+                        error = %error,
+                        "page-map failure cache clear failed"
+                    );
+                }
             }
         }
     }
@@ -775,6 +851,9 @@ impl PageMapCoordinator {
         };
         if *state != PageMapSlowState::QueuedOrRunning {
             return false;
+        }
+        if next_state == PageMapSlowState::Succeeded {
+            self.clear_page_map_failure(&key.book_id, &key.source_revision);
         }
         *state = next_state;
         true

@@ -8,10 +8,10 @@ use std::time::Instant;
 
 use anyhow::{Context, Result};
 use libwebp_sys::{
-    WebPAnimDecoder, WebPAnimDecoderDelete, WebPAnimDecoderGetInfo, WebPAnimDecoderGetNext,
-    WebPAnimDecoderHasMoreFrames, WebPAnimDecoderNewInternal, WebPAnimDecoderOptions,
-    WebPAnimDecoderOptionsInitInternal, WebPAnimInfo, WebPData, WebPGetDemuxABIVersion,
-    WEBP_CSP_MODE,
+    WEBP_CSP_MODE, WebPAnimDecoder, WebPAnimDecoderDelete, WebPAnimDecoderGetInfo,
+    WebPAnimDecoderGetNext, WebPAnimDecoderHasMoreFrames, WebPAnimDecoderNewInternal,
+    WebPAnimDecoderOptions, WebPAnimDecoderOptionsInitInternal, WebPAnimInfo, WebPData,
+    WebPGetDemuxABIVersion,
 };
 
 use crate::domain::app_settings::ViewerQuality;
@@ -211,14 +211,17 @@ pub fn decode(data: &[u8], hint: ImageFormatHint) -> Result<DecodedImage> {
         ImageFormatHint::Jpeg => decode_jpeg(data),
         ImageFormatHint::Png => decode_png_static(data),
         ImageFormatHint::WebP => {
-            if let Ok(decoded) = decode_webp(data) {
-                // 静止画 WebP: webp crate（高速）
-                Ok(decoded)
-            } else {
-                // アニメーション WebP または静止画フォールバック:
-                // decode_webp_frames は全フレームをデコードするためサムネイル・単フレーム用途には不適。
-                // image::load_from_memory は先頭フレームのみデコードするため高速・省メモリ。
-                decode_generic(data)
+            match decode_webp(data) {
+                Ok(decoded) => {
+                    // 静止画 WebP: webp crate（高速）
+                    Ok(decoded)
+                }
+                Err(_) => {
+                    // アニメーション WebP または静止画フォールバック:
+                    // decode_webp_frames は全フレームをデコードするためサムネイル・単フレーム用途には不適。
+                    // image::load_from_memory は先頭フレームのみデコードするため高速・省メモリ。
+                    decode_generic(data)
+                }
             }
         }
         ImageFormatHint::Avif => decode_avif_static(data),
@@ -250,13 +253,10 @@ pub fn decode_for_thumb(
     match fmt {
         ImageFormatHint::Jpeg => decode_jpeg(data),
         ImageFormatHint::Avif => decode_avif_static(data),
-        ImageFormatHint::WebP => {
-            if let Ok(decoded) = decode_webp(data) {
-                Ok(decoded)
-            } else {
-                decode_generic(data)
-            }
-        }
+        ImageFormatHint::WebP => match decode_webp(data) {
+            Ok(decoded) => Ok(decoded),
+            Err(_) => decode_generic(data),
+        },
         _ => decode_generic(data),
     }
 }
@@ -323,7 +323,10 @@ fn decode_jpeg(data: &[u8]) -> Result<DecodedImage> {
     if rgb.len() != w * h * 3 {
         tracing::warn!(
             "zune-jpeg buffer mismatch: got {} bytes, expected {}×{}×3={} — fallback to image crate",
-            rgb.len(), w, h, w * h * 3
+            rgb.len(),
+            w,
+            h,
+            w * h * 3
         );
         return decode_generic(data);
     }
@@ -390,8 +393,8 @@ fn decode_avif_static(data: &[u8]) -> Result<DecodedImage> {
 // ── フレームデコード実装 ──────────────────────────────────────────────────────
 
 fn decode_gif_frames(data: &[u8]) -> Result<Vec<FrameData>> {
-    use image::codecs::gif::GifDecoder;
     use image::AnimationDecoder as _;
+    use image::codecs::gif::GifDecoder;
 
     // 現在の Viewer はフレーム列全体を保持して再生するため、GIF は全フレームを
     // フルサイズで収集してから表示サイズへ縮小する。大判・長尺 GIF では一時メモリが
@@ -487,8 +490,8 @@ pub fn is_animated_webp_fast(data: &[u8]) -> bool {
 }
 
 fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {
-    use image::codecs::png::PngDecoder;
     use image::AnimationDecoder as _;
+    use image::codecs::png::PngDecoder;
 
     let decoder = PngDecoder::new(std::io::Cursor::new(data)).context("PNG decoder")?;
 

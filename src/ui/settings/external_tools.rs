@@ -2,14 +2,14 @@ use eframe::egui;
 
 use crate::domain::app_settings::UiLanguage;
 use crate::domain::app_settings::{
-    AppSettings, ExternalTool, ExternalToolShortcut, EXTERNAL_TOOLS_MAX,
+    AppSettings, EXTERNAL_TOOLS_MAX, ExternalTool, ExternalToolShortcut,
 };
 
-use super::super::i18n::{tr, TextKey};
+use super::super::i18n::{TextKey, tr};
 use super::super::theme;
 use super::widgets::{
-    section_header, setting_block, subtle_text, SETTINGS_SMALL_BUTTON_SIZE,
-    SETTINGS_TOOL_DELETE_BUTTON_SIZE,
+    SETTINGS_SMALL_BUTTON_SIZE, SETTINGS_TOOL_DELETE_BUTTON_SIZE, section_header, setting_block,
+    subtle_text,
 };
 
 pub(super) fn show_external_tools_tab(

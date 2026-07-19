@@ -9,8 +9,9 @@ use std::{
     num::NonZeroUsize,
     path::{Path, PathBuf},
     sync::{
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Condvar, Mutex,
+        mpsc,
     },
     thread,
     time::Instant,
@@ -18,13 +19,13 @@ use std::{
 
 use anyhow::Context;
 use bytes::Bytes;
-use eframe::egui;
 use lru::LruCache;
 
 use crate::{
     domain::app_settings::ViewerQuality,
     domain::page::ImageFormatHint,
     infra::{archive::folder::FolderImageReader, archive::open_book_reader, image::decode as img},
+    repaint::RepaintNotifier,
 };
 
 /// frame_cache は worker 数に連動させず 2 件固定。
@@ -206,7 +207,7 @@ impl Drop for ViewerLoader {
 impl ViewerLoader {
     /// ローダースレッドを起動して `ViewerLoader` を返す。
     pub fn spawn(
-        ctx: egui::Context,
+        repaint: RepaintNotifier,
         background_worker_count: usize,
     ) -> Result<Self, ViewerLoaderInitError> {
         let background_worker_count = background_worker_count.max(1);
@@ -247,14 +248,14 @@ impl ViewerLoader {
 
         let interactive_even_shared2 = Arc::clone(&interactive_even_shared);
         let result_tx_interactive_even = interactive_result_tx.clone();
-        let ctx_interactive_even = ctx.clone();
+        let repaint_interactive_even = repaint.clone();
         if let Err(e) = thread::Builder::new()
             .name("viewer-loader-interactive-even".into())
             .spawn(move || {
                 worker_loop(
                     interactive_even_shared2,
                     result_tx_interactive_even,
-                    ctx_interactive_even,
+                    repaint_interactive_even,
                     "interactive-even".to_string(),
                     true,
                 )
@@ -270,14 +271,14 @@ impl ViewerLoader {
 
         let interactive_odd_shared2 = Arc::clone(&interactive_odd_shared);
         let result_tx_interactive_odd = interactive_result_tx.clone();
-        let ctx_interactive_odd = ctx.clone();
+        let repaint_interactive_odd = repaint.clone();
         if let Err(e) = thread::Builder::new()
             .name("viewer-loader-interactive-odd".into())
             .spawn(move || {
                 worker_loop(
                     interactive_odd_shared2,
                     result_tx_interactive_odd,
-                    ctx_interactive_odd,
+                    repaint_interactive_odd,
                     "interactive-odd".to_string(),
                     true,
                 )
@@ -295,14 +296,14 @@ impl ViewerLoader {
             let background_shared = Arc::clone(background_shared);
             let background_shared_for_thread = Arc::clone(&background_shared);
             let result_tx_bg = background_result_tx.clone();
-            let ctx_bg = ctx.clone();
+            let repaint_bg = repaint.clone();
             let worker_name = format!("background-{}", shard_idx);
             let thread_name = format!("viewer-loader-{worker_name}");
             if let Err(e) = thread::Builder::new().name(thread_name).spawn(move || {
                 worker_loop(
                     background_shared_for_thread,
                     result_tx_bg,
-                    ctx_bg,
+                    repaint_bg,
                     worker_name,
                     false,
                 )
@@ -317,14 +318,14 @@ impl ViewerLoader {
         }
 
         let spad_next_shared2 = Arc::clone(&spad_next_shared);
-        let ctx_spad_next = ctx.clone();
+        let repaint_spad_next = repaint.clone();
         if let Err(e) = thread::Builder::new()
             .name("viewer-loader-spad-next".into())
             .spawn(move || {
                 worker_loop(
                     spad_next_shared2,
                     spad_next_result_tx,
-                    ctx_spad_next,
+                    repaint_spad_next,
                     "spad-next".to_string(),
                     false,
                 )
@@ -339,14 +340,14 @@ impl ViewerLoader {
         started_queues.push(Arc::clone(&spad_next_shared));
 
         let spad_prev_shared2 = Arc::clone(&spad_prev_shared);
-        let ctx_spad_prev = ctx.clone();
+        let repaint_spad_prev = repaint.clone();
         if let Err(e) = thread::Builder::new()
             .name("viewer-loader-spad-prev".into())
             .spawn(move || {
                 worker_loop(
                     spad_prev_shared2,
                     spad_prev_result_tx,
-                    ctx_spad_prev,
+                    repaint_spad_prev,
                     "spad-prev".to_string(),
                     false,
                 )
@@ -596,7 +597,7 @@ struct PageLoadOutcome {
 fn worker_loop(
     shared: Arc<SharedQueue>,
     result_tx: mpsc::Sender<ViewerResult>,
-    ctx: egui::Context,
+    repaint: RepaintNotifier,
     worker_name: String,
     check_superseded: bool,
 ) {
@@ -630,7 +631,8 @@ fn worker_loop(
         };
         if check_superseded {
             let superseded = {
-                match shared.pending.lock() {
+                let pending_lock = shared.pending.lock();
+                match pending_lock {
                     Ok(guard) => guard
                         .as_ref()
                         .map(|pending| (pending.id, pending.nav_id, pending.view_idx)),
@@ -651,7 +653,11 @@ fn worker_loop(
                         latest_view,
                         latest_req,
                         req.kind,
-                        if req.interactive { "interactive" } else { "background" },
+                        if req.interactive {
+                            "interactive"
+                        } else {
+                            "background"
+                        },
                         queue_wait_ms,
                         worker_name
                     );
@@ -687,7 +693,7 @@ fn worker_loop(
             break;
         }
         tracing::trace!("viewer_loader: request_repaint sent");
-        ctx.request_repaint();
+        repaint.request_repaint();
     }
 }
 
@@ -960,7 +966,11 @@ fn process_request(
             req.view_idx,
             result.decode_ms,
             result_pages,
-            if req.interactive { "interactive" } else { "background" },
+            if req.interactive {
+                "interactive"
+            } else {
+                "background"
+            },
             worker_name
         );
         result.kind = ViewerResultKind::Display;

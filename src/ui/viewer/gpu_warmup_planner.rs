@@ -7,8 +7,8 @@ use std::collections::HashMap;
 
 use super::state::RgbaCacheKey;
 use super::working_set::{
-    page_render_signature_rank, DisplayRequirement, GpuTextureEntrySnapshot,
-    PageRenderSignatureKey, RenderSignature,
+    DisplayRequirement, GpuTextureEntrySnapshot, PageRenderSignatureKey, RenderSignature,
+    page_render_signature_rank,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,11 +1,16 @@
 use eframe::egui;
 
+use crate::infra::cache::artifact_failure::ArtifactFailureDiskCache;
 use crate::infra::cache::disk::DiskCache;
 use crate::infra::cache::page_map::PageMapDiskCache;
 use crate::ui::{icons, theme};
 
 pub(super) fn calc_cache_size_mb() -> f32 {
-    let roots = [DiskCache::default_root(), PageMapDiskCache::default_root()];
+    let roots = [
+        DiskCache::default_root(),
+        PageMapDiskCache::default_root(),
+        ArtifactFailureDiskCache::default_root(),
+    ];
     let total: u64 = roots
         .iter()
         .filter(|root| root.exists())
@@ -64,7 +69,7 @@ fn paint_dialog_button(
         painter.rect_stroke(
             rect,
             corner,
-            egui::Stroke::new(1.0, theme::ACCENT_ACTIVE),
+            egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE),
             egui::StrokeKind::Inside,
         );
     }
@@ -126,23 +131,23 @@ pub(super) fn setup_style(ctx: &egui::Context) {
     style.visuals.override_text_color = Some(theme::TEXT_MAIN);
     style.visuals.hyperlink_color = theme::ACCENT;
     style.visuals.selection.bg_fill = theme::ACCENT.linear_multiply(0.35);
-    style.visuals.selection.stroke = egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
-    style.visuals.window_stroke = egui::Stroke::new(1.0, theme::BORDER);
+    style.visuals.selection.stroke = egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
+    style.visuals.window_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
     style.visuals.widgets.noninteractive.bg_fill = theme::SURFACE_BG;
-    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_SUBTLE);
-    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
+    style.visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT_SUBTLE);
+    style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
     style.visuals.widgets.inactive.bg_fill = theme::TOOLBAR_BG;
-    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_MAIN);
-    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
+    style.visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT_MAIN);
+    style.visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
     style.visuals.widgets.hovered.bg_fill = theme::BUTTON_HOVER;
-    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_MAIN);
-    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, theme::HOVER_BORDER);
+    style.visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT_MAIN);
+    style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, theme::HOVER_BORDER);
     style.visuals.widgets.active.bg_fill = theme::BUTTON_ACTIVE;
-    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_MAIN);
-    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT_MAIN);
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
     style.visuals.widgets.open.bg_fill = theme::SURFACE_BG;
-    style.visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, theme::TEXT_MAIN);
-    style.visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
+    style.visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, theme::TEXT_MAIN);
+    style.visuals.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
     style.visuals.faint_bg_color = theme::SEPARATOR_WEAK;
     style.visuals.extreme_bg_color = theme::WINDOW_BG;
     style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(4);

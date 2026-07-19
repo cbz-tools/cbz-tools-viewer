@@ -7,7 +7,7 @@ use crate::domain::app_settings::AppSettings;
 use crate::domain::app_settings::UiLanguage;
 use crate::domain::performance::PerformanceResources;
 
-use super::i18n::{tr, TextKey};
+use super::i18n::{TextKey, tr};
 use super::theme;
 
 mod cache;
@@ -89,13 +89,13 @@ pub fn show(
         .show(ctx, |ui| {
             ui.set_min_width(680.0);
             ui.visuals_mut().widgets.inactive.bg_fill = theme::SEPARATOR_WEAK;
-            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0, theme::BORDER);
+            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
             ui.visuals_mut().widgets.hovered.bg_fill = theme::BUTTON_HOVER;
             ui.visuals_mut().widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.0, theme::HOVER_BORDER);
+                egui::Stroke::new(1.0_f32, theme::HOVER_BORDER);
             ui.visuals_mut().widgets.active.bg_fill = theme::BUTTON_ACTIVE;
             ui.visuals_mut().widgets.active.bg_stroke =
-                egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
+                egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
             let mut selected_tab = ctx.memory_mut(|mem| {
                 mem.data
                     .get_temp::<SettingsTab>(egui::Id::new("settings_selected_tab"))

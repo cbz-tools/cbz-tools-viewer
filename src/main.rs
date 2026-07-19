@@ -1,10 +1,15 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::let_and_return)]
+#![allow(clippy::manual_checked_ops)]
+#![allow(clippy::manual_is_multiple_of)]
 
 mod app;
 mod app_identity;
 mod domain;
 mod infra;
 mod platform;
+mod repaint;
 mod session;
 mod ui;
 mod util;
@@ -658,17 +663,20 @@ fn main() -> anyhow::Result<()> {
         cleanup_old_viewer_logs();
     }
 
-    if let Ok(log_file) = std::fs::File::create(&log_file_name) {
-        tracing_subscriber::fmt()
-            .with_writer(log_file)
-            .with_env_filter(env_filter)
-            .init();
-    } else {
-        tracing_subscriber::fmt()
-            .with_writer(std::io::stderr)
-            .with_env_filter(env_filter)
-            .init();
-        eprintln!("failed to create {log_file_name}; fallback to stderr logging");
+    match std::fs::File::create(&log_file_name) {
+        Ok(log_file) => {
+            tracing_subscriber::fmt()
+                .with_writer(log_file)
+                .with_env_filter(env_filter)
+                .init();
+        }
+        _ => {
+            tracing_subscriber::fmt()
+                .with_writer(std::io::stderr)
+                .with_env_filter(env_filter)
+                .init();
+            eprintln!("failed to create {log_file_name}; fallback to stderr logging");
+        }
     }
 
     tracing::info!(log_file = %log_file_name, "log output initialized");

@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{mpsc, Arc},
+    sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -28,12 +28,13 @@ use crate::{
     domain::{
         app_settings::{LibraryCardSelectionStyle, LibraryHudMode, LibraryHudStyle, UiLanguage},
         archive::{BookId, BookMeta, LibraryEntry},
-        archive_settings::{book_settings_path, FileSettings, ReadingState, SettingsStore},
+        archive_settings::{FileSettings, ReadingState, SettingsStore, book_settings_path},
         kind_group::KindGroupConfig,
         sort::{SortKey, SortOrder},
     },
     infra::favorite_store::{FavoriteState, FavoriteStore},
     infra::worker::thumb_worker::{ThumbTask, ThumbWorker, WorkerMsg},
+    repaint::RepaintNotifier,
     util::{
         natural_sort,
         path_eq::{normalize_path_for_selection, paths_equivalent_for_selection},
@@ -41,7 +42,7 @@ use crate::{
 };
 
 use super::{
-    i18n::{tr, TextKey},
+    i18n::{TextKey, tr},
     theme,
     virtual_grid::{self, ContextAction, ExternalToolMenuItem, KeyboardSelection},
 };
@@ -963,12 +964,16 @@ impl LibraryState {
             KindGroupConfig::default()
         });
         let artifact_gate = Arc::new(RwLock::new(()));
+        let repaint = {
+            let ctx = ctx.clone();
+            RepaintNotifier::new(move || ctx.request_repaint())
+        };
         Self {
             raw_entries: Vec::new(),
             entries: Vec::new(),
             book_states: HashMap::new(),
             artifact_gate: Arc::clone(&artifact_gate),
-            worker: ThumbWorker::spawn(ctx, artifact_gate),
+            worker: ThumbWorker::spawn(repaint, artifact_gate),
             current_dir: None,
             path_input: String::new(),
             is_path_editing: false,
@@ -1563,7 +1568,7 @@ impl LibraryState {
     /// raw_entries 全件の kind_group を即時確定
     /// フォルダ読み込み時・TOMLリロード時に呼ぶ
     fn prefill_kind_groups(&mut self) {
-        use crate::domain::filename_parser::{parse_filename, FilenamePartRole};
+        use crate::domain::filename_parser::{FilenamePartRole, parse_filename};
         use crate::util::path_eq::normalize_path_for_override;
 
         for entry in &self.raw_entries {
@@ -1764,8 +1769,9 @@ impl LibraryState {
                     if !self.is_registered(&id) {
                         continue;
                     }
+                    let id_hex = id.0.to_hex();
                     tracing::debug!(
-                        id = &id.0.to_hex()[..8],
+                        id = &id_hex[..8],
                         "poll_worker: thumbnail failed permanently"
                     );
                     // OK→NG の入れ替えでは古い成功サムネイルが残りうる。

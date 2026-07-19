@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
 
 use eframe::egui;
@@ -9,19 +9,20 @@ use parking_lot::RwLock;
 
 use crate::domain::app_settings::ViewerOpenMode;
 use crate::domain::archive::BookId;
-use crate::domain::archive_settings::{book_settings_path, ReadingState, SettingsStore};
+use crate::domain::archive_settings::{ReadingState, SettingsStore, book_settings_path};
+use crate::domain::ipc_contract::{
+    AdjacentBook, DeleteAndNextSpadTargets, ImageOrderSnapshot, IpcErrorCode, LibraryToViewer,
+    ViewerBookState, ViewerFavoriteState, ViewerToLibrary,
+};
 use crate::infra::archive::folder::FolderImageReader;
 use crate::infra::favorite_store::FavoriteStore;
-use crate::infra::ipc::{
-    AdjacentBook, ImageOrderSnapshot, IpcErrorCode, IpcServer, LibraryToViewer, ViewerBookState,
-    ViewerFavoriteState, ViewerToLibrary,
-};
+use crate::infra::ipc::IpcServer;
 use crate::util::archive_path::{is_supported_archive_path, is_supported_image_path};
 use crate::util::book_nav::{self, NavDirection};
 use crate::util::path_eq::normalize_path_for_selection;
 
-use super::platform::{monitor_rect_from_point, paths_equivalent_for_selection};
 use super::App;
+use super::platform::{monitor_rect_from_point, paths_equivalent_for_selection};
 
 /// Library で作った本の移動順を Viewer/IPC に渡すための共有スナップショット。
 ///
@@ -660,7 +661,7 @@ fn process_viewer_ipc_request(
             if delete_path(current_path.as_path()).is_err() {
                 return Some(ipc_error_response(request_id, IpcErrorCode::DeleteFailed));
             }
-            deleted_response(request_id, deleted_path, None, None)
+            deleted_response(request_id, deleted_path, None, None, None)
         }
         ViewerToLibrary::DeleteAndNext {
             request_id,
@@ -679,18 +680,16 @@ fn process_viewer_ipc_request(
             // 削除前に次本の候補を決める。先に消すと current_path 基準の前後判定が壊れる。
             let books =
                 resolved_navigation_books_for_delete(current_path.as_path(), library_book_order);
-            let select_after = book_nav::move_target_path(
+            let select_after = available_navigation_target_path(
                 &books,
                 current_path.as_path(),
                 NavDirection::Next,
-                false,
             )
             .or_else(|| {
-                book_nav::move_target_path(
+                available_navigation_target_path(
                     &books,
                     current_path.as_path(),
                     NavDirection::Previous,
-                    false,
                 )
             });
             if delete_path(current_path.as_path()).is_err() {
@@ -699,15 +698,49 @@ fn process_viewer_ipc_request(
             match select_after {
                 Some(path) => {
                     *current_path = path.clone();
-                    let next_book_state = Some(viewer_book_state_for_path(
+                    let next_book_state = viewer_book_state_for_path(
                         favorite_store,
                         path.as_path(),
                         resume_from_last_reading_position,
                         None,
-                    ));
-                    deleted_response(request_id, deleted_path, Some(path), next_book_state)
+                    );
+                    let post_delete_books: Vec<PathBuf> = books
+                        .into_iter()
+                        .filter(|candidate| {
+                            !paths_equivalent_for_selection(
+                                candidate.as_path(),
+                                deleted_path.as_path(),
+                            )
+                        })
+                        .collect();
+                    let (spad_prev_path, spad_next_path) =
+                        available_adjacent_paths(&post_delete_books, path.as_path(), true, 0);
+                    let spad_prev = spad_prev_path.map(|path| {
+                        adjacent_book_for_path(
+                            favorite_store,
+                            path,
+                            resume_from_last_reading_position,
+                        )
+                    });
+                    let spad_next = spad_next_path.map(|path| {
+                        adjacent_book_for_path(
+                            favorite_store,
+                            path,
+                            resume_from_last_reading_position,
+                        )
+                    });
+                    deleted_response(
+                        request_id,
+                        deleted_path,
+                        Some(path),
+                        Some(next_book_state),
+                        Some(Box::new(DeleteAndNextSpadTargets {
+                            prev: spad_prev,
+                            next: spad_next,
+                        })),
+                    )
                 }
-                None => deleted_response(request_id, deleted_path, None, None),
+                None => deleted_response(request_id, deleted_path, None, None, None),
             }
         }
         ViewerToLibrary::RebuildSelectedImagesAsCbzAndNext {
@@ -734,55 +767,37 @@ fn process_viewer_ipc_request(
                         ));
                     }
                 };
-            let (prev_path, next_path) = if resolved.current_present {
-                book_nav::adjacent_paths(&resolved.books, current_path.as_path())
-            } else {
-                (
-                    resolved
-                        .anchor_index
-                        .checked_sub(1)
-                        .and_then(|idx| resolved.books.get(idx))
-                        .cloned(),
-                    resolved.books.get(resolved.anchor_index).cloned(),
-                )
-            };
+            let (prev_path, next_path) = available_adjacent_paths(
+                &resolved.books,
+                current_path.as_path(),
+                resolved.current_present,
+                resolved.anchor_index,
+            );
+            let prev_display = prev_path.as_deref().map(|p| p.display().to_string());
+            let next_display = next_path.as_deref().map(|p| p.display().to_string());
             tracing::trace!(
                 request_id,
                 kind = ?kind,
                 current = %current_path.display(),
                 current_kind = %navigation_book_kind_label(current_path.as_path()),
                 current_present = resolved.current_present,
-                prev = prev_path.as_deref().map(|p| p.display().to_string()).as_deref().unwrap_or("-"),
+                prev = prev_display.as_deref().unwrap_or("-"),
                 prev_kind = prev_path
                     .as_deref()
                     .map(navigation_book_kind_label)
                     .unwrap_or("-"),
-                next = next_path.as_deref().map(|p| p.display().to_string()).as_deref().unwrap_or("-"),
+                next = next_display.as_deref().unwrap_or("-"),
                 next_kind = next_path
                     .as_deref()
                     .map(navigation_book_kind_label)
                     .unwrap_or("-"),
                 "viewer.ipc.request_adjacent_books.result"
             );
-            let prev = prev_path.map(|path| AdjacentBook {
-                book_state: viewer_book_state_for_path(
-                    favorite_store,
-                    path.as_path(),
-                    resume_from_last_reading_position,
-                    None,
-                ),
-                page_count: stored_page_count_for_path(path.as_path()),
-                path,
+            let prev = prev_path.map(|path| {
+                adjacent_book_for_path(favorite_store, path, resume_from_last_reading_position)
             });
-            let next = next_path.map(|path| AdjacentBook {
-                book_state: viewer_book_state_for_path(
-                    favorite_store,
-                    path.as_path(),
-                    resume_from_last_reading_position,
-                    None,
-                ),
-                page_count: stored_page_count_for_path(path.as_path()),
-                path,
+            let next = next_path.map(|path| {
+                adjacent_book_for_path(favorite_store, path, resume_from_last_reading_position)
             });
             (
                 LibraryToViewer::AdjacentBooks {
@@ -811,18 +826,16 @@ fn process_viewer_ipc_request(
                     }
                 };
             let target = if resolved.current_present {
-                book_nav::move_target_path(
+                available_navigation_target_path(
                     &resolved.books,
                     current_path.as_path(),
                     NavDirection::Next,
-                    false,
                 )
             } else {
-                book_nav::move_target_path_from_insertion_index(
+                available_navigation_target_from_insertion_index(
                     &resolved.books,
                     resolved.anchor_index,
                     NavDirection::Next,
-                    false,
                 )
             };
             match target {
@@ -863,18 +876,16 @@ fn process_viewer_ipc_request(
                     }
                 };
             let target = if resolved.current_present {
-                book_nav::move_target_path(
+                available_navigation_target_path(
                     &resolved.books,
                     current_path.as_path(),
                     NavDirection::Previous,
-                    false,
                 )
             } else {
-                book_nav::move_target_path_from_insertion_index(
+                available_navigation_target_from_insertion_index(
                     &resolved.books,
                     resolved.anchor_index,
                     NavDirection::Previous,
-                    false,
                 )
             };
             match target {
@@ -957,6 +968,7 @@ fn deleted_response(
     deleted_path: PathBuf,
     next_path: Option<PathBuf>,
     next_book_state: Option<ViewerBookState>,
+    spad_targets: Option<Box<DeleteAndNextSpadTargets>>,
 ) -> (LibraryToViewer, Option<ViewerSyncEvent>) {
     (
         LibraryToViewer::Deleted {
@@ -964,12 +976,32 @@ fn deleted_response(
             deleted_path: deleted_path.clone(),
             next_path: next_path.clone(),
             next_book_state,
+            spad_targets,
         },
         Some(ViewerSyncEvent::Deleted {
             deleted_path,
             next_path,
         }),
     )
+}
+
+fn adjacent_book_for_path(
+    favorite_store: &RwLock<FavoriteStore>,
+    path: PathBuf,
+    resume_from_last_reading_position: bool,
+) -> AdjacentBook {
+    let book_state = viewer_book_state_for_path(
+        favorite_store,
+        path.as_path(),
+        resume_from_last_reading_position,
+        None,
+    );
+    let page_count = stored_page_count_for_path(path.as_path());
+    AdjacentBook {
+        path,
+        book_state,
+        page_count,
+    }
 }
 
 fn favorite_state_for_path(
@@ -1078,6 +1110,82 @@ fn resolved_navigation_books_for_delete(
         return snapshot.books;
     }
     book_nav::list_supported_navigation_books_in_dir(current_path)
+}
+
+// Library UI の差分反映前に共有順序へ残る削除済みパスを、IPC の応答候補から除く。
+// 順序そのものは Library UI が所有し、ここでは読み取り時に実在性だけを検証する。
+fn available_adjacent_paths(
+    books: &[PathBuf],
+    current_path: &Path,
+    current_present: bool,
+    anchor_index: usize,
+) -> (Option<PathBuf>, Option<PathBuf>) {
+    let insertion_index = if current_present {
+        let Some(current_index) = books
+            .iter()
+            .position(|path| paths_equivalent_for_selection(path.as_path(), current_path))
+        else {
+            return (None, None);
+        };
+        current_index
+    } else {
+        anchor_index.min(books.len())
+    };
+    (
+        available_navigation_path_before(books, insertion_index),
+        available_navigation_path_after(
+            books,
+            if current_present {
+                insertion_index.saturating_add(1)
+            } else {
+                insertion_index
+            },
+        ),
+    )
+}
+
+fn available_navigation_target_path(
+    books: &[PathBuf],
+    current_path: &Path,
+    direction: NavDirection,
+) -> Option<PathBuf> {
+    let current_index = books
+        .iter()
+        .position(|path| paths_equivalent_for_selection(path.as_path(), current_path))?;
+    available_navigation_target_from_insertion_index(
+        books,
+        match direction {
+            NavDirection::Next => current_index.saturating_add(1),
+            NavDirection::Previous => current_index,
+        },
+        direction,
+    )
+}
+
+fn available_navigation_target_from_insertion_index(
+    books: &[PathBuf],
+    insertion_index: usize,
+    direction: NavDirection,
+) -> Option<PathBuf> {
+    match direction {
+        NavDirection::Next => available_navigation_path_after(books, insertion_index),
+        NavDirection::Previous => available_navigation_path_before(books, insertion_index),
+    }
+}
+
+fn available_navigation_path_before(books: &[PathBuf], end_index: usize) -> Option<PathBuf> {
+    books[..end_index.min(books.len())]
+        .iter()
+        .rev()
+        .find(|path| path.exists())
+        .cloned()
+}
+
+fn available_navigation_path_after(books: &[PathBuf], start_index: usize) -> Option<PathBuf> {
+    books[start_index.min(books.len())..]
+        .iter()
+        .find(|path| path.exists())
+        .cloned()
 }
 
 fn fallback_navigation_books(current_path: &Path) -> ResolvedNavigationBooks {

@@ -4,13 +4,14 @@ use std::sync::Arc;
 use crate::domain::archive::BookMeta;
 use crate::domain::page_map::{BookPageMap, SourceRevision};
 use crate::infra::archive::epub::{
-    build_book_page_map_fast_from_epub_reader, EpubImageReader, EpubPageMapFastOutcome,
+    EpubImageReader, EpubPageMapFastOutcome, build_book_page_map_fast_from_epub_reader,
 };
 use crate::infra::archive::page_map::{
-    build_book_page_map_fast_from_folder_path, build_book_page_map_slow_from_folder_path,
-    build_zip_page_map_fast, FolderPageMapFastStatus, FolderPageMapSlowOutcome,
+    FolderPageMapFastStatus, FolderPageMapSlowOutcome, build_book_page_map_fast_from_folder_path,
+    build_book_page_map_slow_from_folder_path, build_zip_page_map_fast,
 };
-use crate::infra::archive::{book_source_kind, BookSourceKind};
+use crate::infra::archive::{BookSourceKind, book_source_kind};
+use crate::infra::cache::artifact_failure::{ArtifactFailureDiskCache, ArtifactKind};
 use crate::infra::cache::page_map::PageMapDiskCache;
 
 #[derive(Clone, Debug)]
@@ -39,6 +40,7 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
     let revision = source_revision_for_entry(entry);
     let source_kind = book_source_kind(entry.path.as_ref());
     let cache = open_page_map_cache();
+    let failure_cache = open_artifact_failure_cache();
     if cache.is_none() {
         tracing::debug!(
             path = %entry.path.display(),
@@ -54,9 +56,21 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                     page_count = page_map.page_count(),
                     "viewer page map bootstrap cache hit"
                 );
+                clear_page_map_failure(failure_cache.as_ref(), entry, &revision);
                 return ViewerPageMapMode::Mapped(Arc::new(page_map));
             }
         }
+    }
+
+    if failure_cache.as_ref().is_some_and(|failure_cache| {
+        failure_cache.has_failure_for_revision(&entry.id, &revision, ArtifactKind::PageMap)
+    }) {
+        tracing::debug!(
+            path = %entry.path.display(),
+            source_revision = ?revision,
+            "viewer page map bootstrap skipped by failure cache"
+        );
+        return ViewerPageMapMode::Unavailable;
     }
 
     if map_make_skip && source_kind != BookSourceKind::Epub {
@@ -74,6 +88,12 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                 fast.status,
                 crate::infra::page_map::build::PageMapBuildStatus::Ready
             ) {
+                if matches!(
+                    fast.status,
+                    crate::infra::page_map::build::PageMapBuildStatus::Failed(_)
+                ) {
+                    mark_page_map_failure(failure_cache.as_ref(), entry, &revision);
+                }
                 tracing::debug!(
                     path = %entry.path.display(),
                     status = ?fast.status,
@@ -96,6 +116,8 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                 );
                 return ViewerPageMapMode::Unavailable;
             }
+
+            clear_page_map_failure(failure_cache.as_ref(), entry, &revision);
 
             if let Some(cache) = cache.as_ref() {
                 let page_map_bytes = page_map.encode_cache_bytes();
@@ -153,6 +175,8 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                         return ViewerPageMapMode::Unavailable;
                     }
 
+                    clear_page_map_failure(failure_cache.as_ref(), entry, &revision);
+
                     if let Some(cache) = cache.as_ref() {
                         let page_map_bytes = page_map.encode_cache_bytes();
                         if cache
@@ -186,7 +210,10 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                         path = %entry.path.display(),
                         "viewer page map bootstrap folder fast requires complete"
                     );
-                    match build_book_page_map_slow_from_folder_path(entry.path.as_ref(), revision) {
+                    match build_book_page_map_slow_from_folder_path(
+                        entry.path.as_ref(),
+                        revision.clone(),
+                    ) {
                         FolderPageMapSlowOutcome::Success(page_map) => {
                             if current_source_revision(entry.path.as_ref())
                                 != Some(source_revision_for_entry(entry))
@@ -197,6 +224,8 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                                 );
                                 return ViewerPageMapMode::Unavailable;
                             }
+
+                            clear_page_map_failure(failure_cache.as_ref(), entry, &revision);
 
                             if let Some(cache) = cache.as_ref() {
                                 let page_map_bytes = page_map.encode_cache_bytes();
@@ -240,6 +269,7 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                                 reason = ?failure.reason,
                                 "viewer page map bootstrap folder slow unavailable"
                             );
+                            mark_page_map_failure(failure_cache.as_ref(), entry, &revision);
                             ViewerPageMapMode::Unavailable
                         }
                     }
@@ -249,6 +279,7 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                         path = %entry.path.display(),
                         "viewer page map bootstrap folder fast unavailable"
                     );
+                    mark_page_map_failure(failure_cache.as_ref(), entry, &revision);
                     ViewerPageMapMode::Unavailable
                 }
             }
@@ -280,6 +311,7 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                             page_count = page_map.page_count(),
                             "viewer page map bootstrap epub cache hit"
                         );
+                        clear_page_map_failure(failure_cache.as_ref(), entry, &revision);
                         return ViewerPageMapMode::Mapped(Arc::new(page_map));
                     }
 
@@ -310,6 +342,8 @@ pub fn bootstrap_viewer_page_map(entry: &BookMeta, map_make_skip: bool) -> Viewe
                         );
                         return ViewerPageMapMode::Unavailable;
                     }
+
+                    clear_page_map_failure(failure_cache.as_ref(), entry, &revision);
 
                     if let Some(cache) = cache.as_ref() {
                         let page_map_bytes = page_map.encode_cache_bytes();
@@ -367,14 +401,83 @@ fn open_page_map_cache() -> Option<PageMapDiskCache> {
 
 fn open_existing_page_map_cache() -> Option<PageMapDiskCache> {
     let default_root = PageMapDiskCache::default_root();
-    PageMapDiskCache::open_existing(default_root).ok().or_else(|| {
-        PageMapDiskCache::open_existing(
-            std::env::temp_dir()
-                .join(crate::app_identity::app_data_dir())
-                .join("page_maps"),
-        )
+    PageMapDiskCache::open_existing(default_root)
         .ok()
-    })
+        .or_else(|| {
+            PageMapDiskCache::open_existing(
+                std::env::temp_dir()
+                    .join(crate::app_identity::app_data_dir())
+                    .join("page_maps"),
+            )
+            .ok()
+        })
+}
+
+fn open_artifact_failure_cache() -> Option<ArtifactFailureDiskCache> {
+    ArtifactFailureDiskCache::open(ArtifactFailureDiskCache::default_root())
+        .or_else(|_| {
+            ArtifactFailureDiskCache::open(
+                std::env::temp_dir()
+                    .join(crate::app_identity::app_data_dir())
+                    .join("artifact_failures"),
+            )
+        })
+        .ok()
+}
+
+fn mark_page_map_failure(
+    cache: Option<&ArtifactFailureDiskCache>,
+    entry: &BookMeta,
+    revision: &SourceRevision,
+) {
+    if current_source_revision(entry.path.as_ref()) != Some(revision.clone()) {
+        return;
+    }
+    if let Some(cache) = cache {
+        match cache.mark_failure_for_revision(&entry.id, revision, ArtifactKind::PageMap) {
+            Ok(true) => {
+                tracing::debug!(
+                    path = %entry.path.display(),
+                    source_revision = ?revision,
+                    "viewer page map terminal failure cached"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    path = %entry.path.display(),
+                    error = %error,
+                    "viewer page map failure cache save failed"
+                );
+            }
+        }
+    }
+}
+
+fn clear_page_map_failure(
+    cache: Option<&ArtifactFailureDiskCache>,
+    entry: &BookMeta,
+    revision: &SourceRevision,
+) {
+    if let Some(cache) = cache {
+        match cache.clear_failure_for_revision(&entry.id, revision, ArtifactKind::PageMap) {
+            Ok(true) => {
+                tracing::debug!(
+                    path = %entry.path.display(),
+                    source_revision = ?revision,
+                    "viewer page map failure cache cleared after success"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    path = %entry.path.display(),
+                    error = %error,
+                    "viewer page map failure cache clear failed"
+                );
+            }
+        }
+    }
 }
 
 fn source_revision_for_entry(entry: &BookMeta) -> SourceRevision {

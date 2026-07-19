@@ -10,7 +10,7 @@ pub const SIDEBAR_HOVER_BG: Color32 = Color32::from_rgb(232, 232, 232); // #E8E8
 pub const SIDEBAR_SELECTED_BG: Color32 = Color32::from_rgb(216, 216, 216); // #D8D8D8
 pub const HOVER_BORDER: Color32 = Color32::from_rgb(176, 176, 176); // hover 境界（標準）
 pub const HOVER_BORDER_WEAK: Color32 = Color32::from_rgb(198, 198, 198); // hover 境界（弱）
-                                                                         // hover 時の style / font metrics 差分を吸収し、レイアウト揺れを防ぐ横方向余白。
+// hover 時の style / font metrics 差分を吸収し、レイアウト揺れを防ぐ横方向余白。
 pub const ICON_BUTTON_HOVER_GUARD_X: f32 = 4.0;
 pub const ACCENT: Color32 = Color32::from_rgb(74, 144, 226); // #4A90E2
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(107, 170, 239); // #6BAAEF

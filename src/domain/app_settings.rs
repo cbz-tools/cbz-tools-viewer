@@ -3,15 +3,10 @@
 //! 保存先: `%LOCALAPPDATA%\cbz-viewer\settings.json`
 //! サムネイルは固定保存サイズと可変表示サイズを分け、サイズ変更時に再生成しない。
 
-use std::collections::HashSet;
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
-use crate::domain::performance::{
-    PerformanceResources, PerformanceSettingsResolved, PERFORMANCE_CACHE_MIN_MIB,
-    SPAD_RAM_RATIO_MAX_PERCENT, SPAD_RAM_RATIO_MIN_PERCENT,
-};
+use crate::domain::performance::{SPAD_RAM_RATIO_MAX_PERCENT, SPAD_RAM_RATIO_MIN_PERCENT};
 
 // ── 定数 ─────────────────────────────────────────────────────────────────────
 
@@ -48,7 +43,6 @@ impl Default for ViewerQuality {
         VIEWER_QUALITY_DEFAULT
     }
 }
-
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ViewerOpenMode {
     Windowed,
@@ -175,7 +169,7 @@ pub struct ExternalTool {
     pub name: String,
     pub executable: String,
     pub args: String,
-    #[serde(with = "external_tool_shortcut_serde")]
+    #[serde(with = "crate::domain::app_settings_codec::external_tool_shortcut_serde")]
     pub shortcut: ExternalToolShortcut,
     pub background: bool,
 }
@@ -207,394 +201,6 @@ impl UiLanguage {
 
     pub fn all() -> &'static [Self] {
         &Self::ALL
-    }
-}
-
-const APP_SETTINGS_SCHEMA_VERSION: u16 = 1;
-
-mod ui_language_serde {
-    use super::UiLanguage;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &UiLanguage, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(value.as_code())
-    }
-
-    #[allow(dead_code)]
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<UiLanguage, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let code = String::deserialize(deserializer)?;
-        UiLanguage::from_code(&code).ok_or_else(|| serde::de::Error::custom("invalid ui_language"))
-    }
-}
-
-#[allow(dead_code)]
-mod viewer_quality_serde {
-    use super::ViewerQuality;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Value {
-        Speed,
-        Balanced,
-        Quality,
-        Original,
-    }
-
-    impl From<ViewerQuality> for Value {
-        fn from(value: ViewerQuality) -> Self {
-            match value {
-                ViewerQuality::Speed => Self::Speed,
-                ViewerQuality::Balanced => Self::Balanced,
-                ViewerQuality::Quality => Self::Quality,
-                ViewerQuality::Original => Self::Original,
-            }
-        }
-    }
-
-    impl From<Value> for ViewerQuality {
-        fn from(value: Value) -> Self {
-            match value {
-                Value::Speed => Self::Speed,
-                Value::Balanced => Self::Balanced,
-                Value::Quality => Self::Quality,
-                Value::Original => Self::Original,
-            }
-        }
-    }
-
-    pub fn serialize<S>(value: &ViewerQuality, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Value::from(*value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ViewerQuality, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Value::deserialize(deserializer).map(Into::into)
-    }
-}
-
-#[allow(dead_code)]
-mod viewer_open_mode_serde {
-    use super::ViewerOpenMode;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Value {
-        Windowed,
-        Fullscreen,
-    }
-
-    impl From<ViewerOpenMode> for Value {
-        fn from(value: ViewerOpenMode) -> Self {
-            match value {
-                ViewerOpenMode::Windowed => Self::Windowed,
-                ViewerOpenMode::Fullscreen => Self::Fullscreen,
-            }
-        }
-    }
-
-    impl From<Value> for ViewerOpenMode {
-        fn from(value: Value) -> Self {
-            match value {
-                Value::Windowed => Self::Windowed,
-                Value::Fullscreen => Self::Fullscreen,
-            }
-        }
-    }
-
-    pub fn serialize<S>(value: &ViewerOpenMode, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Value::from(*value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ViewerOpenMode, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Value::deserialize(deserializer).map(Into::into)
-    }
-}
-
-#[allow(dead_code)]
-mod reading_direction_serde {
-    use super::ReadingDirection;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Value {
-        RightToLeft,
-        LeftToRight,
-    }
-
-    impl From<ReadingDirection> for Value {
-        fn from(value: ReadingDirection) -> Self {
-            match value {
-                ReadingDirection::RightToLeft => Self::RightToLeft,
-                ReadingDirection::LeftToRight => Self::LeftToRight,
-            }
-        }
-    }
-
-    impl From<Value> for ReadingDirection {
-        fn from(value: Value) -> Self {
-            match value {
-                Value::RightToLeft => Self::RightToLeft,
-                Value::LeftToRight => Self::LeftToRight,
-            }
-        }
-    }
-
-    pub fn serialize<S>(value: &ReadingDirection, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Value::from(*value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ReadingDirection, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Value::deserialize(deserializer).map(Into::into)
-    }
-}
-
-#[allow(dead_code)]
-mod library_hud_mode_serde {
-    use super::LibraryHudMode;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Value {
-        Off,
-        On,
-    }
-
-    impl From<LibraryHudMode> for Value {
-        fn from(value: LibraryHudMode) -> Self {
-            match value {
-                LibraryHudMode::Off => Self::Off,
-                LibraryHudMode::On => Self::On,
-            }
-        }
-    }
-
-    impl From<Value> for LibraryHudMode {
-        fn from(value: Value) -> Self {
-            match value {
-                Value::Off => Self::Off,
-                Value::On => Self::On,
-            }
-        }
-    }
-
-    pub fn serialize<S>(value: &LibraryHudMode, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Value::from(*value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<LibraryHudMode, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Value::deserialize(deserializer).map(Into::into)
-    }
-}
-
-#[allow(dead_code)]
-mod library_hud_style_serde {
-    use super::LibraryHudStyle;
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    pub fn serialize<S>(value: &LibraryHudStyle, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        serializer.serialize_str(match value {
-            LibraryHudStyle::Default => "default",
-            LibraryHudStyle::White => "white",
-            LibraryHudStyle::Blue => "blue",
-            LibraryHudStyle::HighContrast => "high_contrast",
-            LibraryHudStyle::Amber => "amber",
-            LibraryHudStyle::Rose => "rose",
-            LibraryHudStyle::Violet => "violet",
-        })
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<LibraryHudStyle, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        super::parse_library_hud_style_name(&value)
-            .ok_or_else(|| serde::de::Error::custom("invalid library_hud_style"))
-    }
-}
-
-#[allow(dead_code)]
-mod library_card_selection_style_serde {
-    use super::LibraryCardSelectionStyle;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Value {
-        Default,
-        Violet,
-        Amber,
-        Rose,
-        HighContrast,
-    }
-
-    impl From<LibraryCardSelectionStyle> for Value {
-        fn from(value: LibraryCardSelectionStyle) -> Self {
-            match value {
-                LibraryCardSelectionStyle::Default => Self::Default,
-                LibraryCardSelectionStyle::Violet => Self::Violet,
-                LibraryCardSelectionStyle::Amber => Self::Amber,
-                LibraryCardSelectionStyle::Rose => Self::Rose,
-                LibraryCardSelectionStyle::HighContrast => Self::HighContrast,
-            }
-        }
-    }
-
-    impl From<Value> for LibraryCardSelectionStyle {
-        fn from(value: Value) -> Self {
-            match value {
-                Value::Default => Self::Default,
-                Value::Violet => Self::Violet,
-                Value::Amber => Self::Amber,
-                Value::Rose => Self::Rose,
-                Value::HighContrast => Self::HighContrast,
-            }
-        }
-    }
-
-    pub fn serialize<S>(value: &LibraryCardSelectionStyle, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Value::from(*value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<LibraryCardSelectionStyle, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Value::deserialize(deserializer).map(Into::into)
-    }
-}
-
-mod external_tool_shortcut_serde {
-    use super::ExternalToolShortcut;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    #[derive(Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case")]
-    enum Value {
-        E,
-        F,
-        G,
-        H,
-        I,
-        J,
-        K,
-        L,
-        N,
-        O,
-        P,
-        Q,
-        R,
-        T,
-        U,
-        V,
-        X,
-        Y,
-        Z,
-    }
-
-    impl From<ExternalToolShortcut> for Value {
-        fn from(value: ExternalToolShortcut) -> Self {
-            match value {
-                ExternalToolShortcut::E => Self::E,
-                ExternalToolShortcut::F => Self::F,
-                ExternalToolShortcut::G => Self::G,
-                ExternalToolShortcut::H => Self::H,
-                ExternalToolShortcut::I => Self::I,
-                ExternalToolShortcut::J => Self::J,
-                ExternalToolShortcut::K => Self::K,
-                ExternalToolShortcut::L => Self::L,
-                ExternalToolShortcut::N => Self::N,
-                ExternalToolShortcut::O => Self::O,
-                ExternalToolShortcut::P => Self::P,
-                ExternalToolShortcut::Q => Self::Q,
-                ExternalToolShortcut::R => Self::R,
-                ExternalToolShortcut::T => Self::T,
-                ExternalToolShortcut::U => Self::U,
-                ExternalToolShortcut::V => Self::V,
-                ExternalToolShortcut::X => Self::X,
-                ExternalToolShortcut::Y => Self::Y,
-                ExternalToolShortcut::Z => Self::Z,
-            }
-        }
-    }
-
-    impl From<Value> for ExternalToolShortcut {
-        fn from(value: Value) -> Self {
-            match value {
-                Value::E => Self::E,
-                Value::F => Self::F,
-                Value::G => Self::G,
-                Value::H => Self::H,
-                Value::I => Self::I,
-                Value::J => Self::J,
-                Value::K => Self::K,
-                Value::L => Self::L,
-                Value::N => Self::N,
-                Value::O => Self::O,
-                Value::P => Self::P,
-                Value::Q => Self::Q,
-                Value::R => Self::R,
-                Value::T => Self::T,
-                Value::U => Self::U,
-                Value::V => Self::V,
-                Value::X => Self::X,
-                Value::Y => Self::Y,
-                Value::Z => Self::Z,
-            }
-        }
-    }
-
-    pub fn serialize<S>(value: &ExternalToolShortcut, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        Value::from(*value).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<ExternalToolShortcut, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Value::deserialize(deserializer).map(Into::into)
     }
 }
 
@@ -643,10 +249,16 @@ pub struct AppSettings {
     #[serde(default = "default_thumb_display_w")]
     pub thumb_display_w: u16,
     /// UI 表示言語
-    #[serde(default = "default_ui_language", with = "ui_language_serde")]
+    #[serde(
+        default = "default_ui_language",
+        with = "crate::domain::app_settings_codec::ui_language_serde"
+    )]
     pub ui_language: UiLanguage,
     /// ビューア画質プロファイル
-    #[serde(default = "default_viewer_quality", with = "viewer_quality_serde")]
+    #[serde(
+        default = "default_viewer_quality",
+        with = "crate::domain::app_settings_codec::viewer_quality_serde"
+    )]
     pub viewer_quality: ViewerQuality,
     /// L1 VRAM Cache 上限（MiB）
     #[serde(default = "default_viewer_l1_vram_cache_max_mb")]
@@ -654,13 +266,13 @@ pub struct AppSettings {
     /// L2 RAM Cache 上限（MiB）
     #[serde(
         default = "default_viewer_rgba_cache_max_mb",
-        deserialize_with = "deserialize_viewer_rgba_cache_max_mb"
+        deserialize_with = "crate::domain::app_settings_codec::deserialize_viewer_rgba_cache_max_mb"
     )]
     pub viewer_rgba_cache_max_mb: u16,
     /// ビューア先読みバックグラウンド処理数
     #[serde(
         default = "default_viewer_background_worker_count",
-        deserialize_with = "deserialize_viewer_background_worker_count"
+        deserialize_with = "crate::domain::app_settings_codec::deserialize_viewer_background_worker_count"
     )]
     pub viewer_background_worker_count: u16,
     /// Danger Zone を有効にする
@@ -669,43 +281,49 @@ pub struct AppSettings {
     /// Danger Zone時の隣接本1冊あたりSPAD RAM割合（%）
     #[serde(
         default = "default_viewer_spad_ram_ratio_percent",
-        deserialize_with = "deserialize_viewer_spad_ram_ratio_percent"
+        deserialize_with = "crate::domain::app_settings_codec::deserialize_viewer_spad_ram_ratio_percent"
     )]
     pub viewer_spad_ram_ratio_percent: u8,
     /// ライブラリから Viewer を開くときの起動モード
-    #[serde(default = "default_viewer_open_mode", with = "viewer_open_mode_serde")]
+    #[serde(
+        default = "default_viewer_open_mode",
+        with = "crate::domain::app_settings_codec::viewer_open_mode_serde"
+    )]
     pub viewer_open_mode: ViewerOpenMode,
     /// ページ開きのグローバル既定値
     #[serde(
         default = "default_reading_direction",
-        with = "reading_direction_serde"
+        with = "crate::domain::app_settings_codec::reading_direction_serde"
     )]
     pub reading_direction: ReadingDirection,
     /// ライブラリグリッドの HUD 表示モード
-    #[serde(default = "default_library_hud_mode", with = "library_hud_mode_serde")]
+    #[serde(
+        default = "default_library_hud_mode",
+        with = "crate::domain::app_settings_codec::library_hud_mode_serde"
+    )]
     pub library_hud_mode: LibraryHudMode,
     /// ライブラリカード HUD の配色プリセット
     #[serde(
         default = "default_library_hud_style",
-        with = "library_hud_style_serde"
+        with = "crate::domain::app_settings_codec::library_hud_style_serde"
     )]
     pub library_hud_style: LibraryHudStyle,
     /// ライブラリカード選択状態の配色プリセット
     #[serde(
         default = "default_library_card_selection_style",
-        with = "library_card_selection_style_serde"
+        with = "crate::domain::app_settings_codec::library_card_selection_style_serde"
     )]
     pub library_card_selection_style: LibraryCardSelectionStyle,
     /// ライブラリ画面のホイールスクロール速度レベル（1〜10）
     #[serde(
         default = "default_library_wheel_speed",
-        deserialize_with = "deserialize_u16_clamped_library_wheel_speed"
+        deserialize_with = "crate::domain::app_settings_codec::deserialize_u16_clamped_library_wheel_speed"
     )]
     pub library_wheel_speed: u16,
     /// ライブラリ HUD のフォントサイズレベル（1〜9、標準=5）
     #[serde(
         default = "default_library_hud_font_level",
-        deserialize_with = "deserialize_library_hud_font_level"
+        deserialize_with = "crate::domain::app_settings_codec::deserialize_library_hud_font_level"
     )]
     pub library_hud_font_level: u16,
     /// 画像フォルダを本として開く
@@ -720,13 +338,6 @@ pub struct AppSettings {
     /// 外部ツール設定（最大3件）
     #[serde(default = "default_external_tools")]
     pub external_tools: Vec<ExternalTool>,
-}
-
-#[derive(Serialize)]
-struct AppSettingsEnvelope {
-    schema_version: u16,
-    #[serde(flatten)]
-    settings: AppSettings,
 }
 
 #[allow(dead_code)]
@@ -806,52 +417,6 @@ fn default_external_tools() -> Vec<ExternalTool> {
     Vec::new()
 }
 
-#[allow(dead_code)]
-fn deserialize_u16_clamped_library_wheel_speed<'de, D>(deserializer: D) -> Result<u16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let level = u16::deserialize(deserializer)?;
-    Ok(level.clamp(LIBRARY_WHEEL_SPEED_MIN, LIBRARY_WHEEL_SPEED_MAX))
-}
-
-#[allow(dead_code)]
-fn deserialize_library_hud_font_level<'de, D>(deserializer: D) -> Result<u16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let level = u16::deserialize(deserializer)?;
-    Ok(level.clamp(LIBRARY_HUD_FONT_LEVEL_MIN, LIBRARY_HUD_FONT_LEVEL_MAX))
-}
-
-#[allow(dead_code)]
-fn deserialize_viewer_rgba_cache_max_mb<'de, D>(deserializer: D) -> Result<u16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = u16::deserialize(deserializer)?;
-    Ok(raw.max(PERFORMANCE_CACHE_MIN_MIB))
-}
-
-#[allow(dead_code)]
-fn deserialize_viewer_background_worker_count<'de, D>(deserializer: D) -> Result<u16, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = u16::deserialize(deserializer)?;
-    Ok(raw.max(1))
-}
-
-#[allow(dead_code)]
-fn deserialize_viewer_spad_ram_ratio_percent<'de, D>(deserializer: D) -> Result<u8, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let raw = u16::deserialize(deserializer)?;
-    Ok((raw.min(u8::MAX as u16) as u8)
-        .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT))
-}
-
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -879,112 +444,7 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
-    #[allow(dead_code)]
-    pub fn load() -> Self {
-        let resources = crate::infra::system_resources::detect_pc_resources();
-        Self::load_with_resources(&resources)
-    }
-
-    pub fn load_with_resources(resources: &PerformanceResources) -> Self {
-        let path = Self::settings_path();
-        let mut settings = match std::fs::read_to_string(&path) {
-            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(value) => match load_app_settings_from_value(value, resources) {
-                    Some(settings) => settings,
-                    None => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            setting = "app_settings",
-                            "invalid app settings schema or root shape; using default"
-                        );
-                        Self::default_for_resources(resources)
-                    }
-                },
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        path = %path.display(),
-                        setting = "app_settings",
-                        "failed to parse json settings; using default"
-                    );
-                    Self::default_for_resources(resources)
-                }
-            },
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                Self::default_for_resources(resources)
-            }
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    path = %path.display(),
-                    setting = "app_settings",
-                    "failed to read json settings; using default"
-                );
-                Self::default_for_resources(resources)
-            }
-        };
-        settings.normalize_for_resources(resources);
-        settings.sanitize_external_tools();
-        settings
-    }
-
-    #[allow(dead_code)]
-    pub fn save(&self) {
-        let resources = crate::infra::system_resources::detect_pc_resources();
-        self.save_with_resources(&resources);
-    }
-
-    pub fn save_with_resources(&self, resources: &PerformanceResources) {
-        let mut normalized = self.clone();
-        normalized.normalize_for_resources(resources);
-        normalized.sanitize_external_tools();
-        let path = Self::settings_path();
-        let envelope = AppSettingsEnvelope {
-            schema_version: APP_SETTINGS_SCHEMA_VERSION,
-            settings: normalized,
-        };
-        if let Ok(json) = serde_json::to_string_pretty(&envelope) {
-            if let Err(error) = crate::infra::config_io::atomic_write(&path, json.as_bytes()) {
-                tracing::warn!(path = %path.display(), %error, "failed to save app settings");
-            }
-        }
-    }
-
-    pub fn default_for_resources(resources: &PerformanceResources) -> Self {
-        let mut settings = Self::default();
-        let defaults = resources.default_performance_settings();
-        settings.viewer_l1_vram_cache_max_mb = defaults.l1_vram_cache_max_mib;
-        settings.viewer_rgba_cache_max_mb = defaults.l2_ram_cache_max_mib;
-        settings.viewer_background_worker_count = defaults.background_worker_count as u16;
-        settings
-    }
-
-    pub fn normalized_performance_settings(
-        &self,
-        resources: &PerformanceResources,
-    ) -> PerformanceSettingsResolved {
-        resources.resolved_performance_settings(
-            self.viewer_l1_vram_cache_max_mb,
-            self.viewer_rgba_cache_max_mb,
-            self.viewer_background_worker_count,
-            self.viewer_danger_zone_enabled,
-            self.viewer_spad_ram_ratio_percent,
-        )
-    }
-
-    pub fn normalize_for_resources(&mut self, resources: &PerformanceResources) {
-        self.viewer_l1_vram_cache_max_mb = resources.normalize_l1_mib(
-            self.viewer_l1_vram_cache_max_mb,
-            self.viewer_danger_zone_enabled,
-        );
-        self.viewer_rgba_cache_max_mb = resources.normalize_l2_mib(
-            self.viewer_rgba_cache_max_mb,
-            self.viewer_danger_zone_enabled,
-        );
-        self.viewer_background_worker_count = resources.normalize_bg_workers(
-            self.viewer_background_worker_count,
-            self.viewer_danger_zone_enabled,
-        );
+    pub(crate) fn normalize_persisted_values(&mut self) {
         self.viewer_spad_ram_ratio_percent = self
             .viewer_spad_ram_ratio_percent
             .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT);
@@ -1097,201 +557,4 @@ impl AppSettings {
     pub fn storage_width() -> u16 {
         THUMB_STORAGE_WIDTH
     }
-
-    pub fn settings_path() -> PathBuf {
-        let local = std::env::var("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir());
-        local
-            .join(crate::app_identity::app_data_dir())
-            .join("settings.json")
-    }
-}
-
-fn load_app_settings_from_value(
-    value: serde_json::Value,
-    resources: &PerformanceResources,
-) -> Option<AppSettings> {
-    let obj = value.as_object()?;
-    let schema_version = obj.get("schema_version")?.as_u64()?;
-    if schema_version != APP_SETTINGS_SCHEMA_VERSION as u64 {
-        return None;
-    }
-
-    let mut settings = AppSettings::default_for_resources(resources);
-
-    if let Some(value) = obj.get("thumb_display_w").and_then(parse_u16) {
-        settings.thumb_display_w = value;
-    }
-    if let Some(value) = obj.get("ui_language").and_then(parse_ui_language) {
-        settings.ui_language = value;
-    }
-    if let Some(value) = obj.get("viewer_quality").and_then(parse_viewer_quality) {
-        settings.viewer_quality = value;
-    }
-    if let Some(value) = obj.get("viewer_l1_vram_cache_max_mb").and_then(parse_u16) {
-        settings.viewer_l1_vram_cache_max_mb = value;
-    }
-    if let Some(value) = obj.get("viewer_rgba_cache_max_mb").and_then(parse_u16) {
-        settings.viewer_rgba_cache_max_mb = value;
-    }
-    if let Some(value) = obj
-        .get("viewer_background_worker_count")
-        .and_then(parse_u16)
-    {
-        settings.viewer_background_worker_count = value;
-    }
-    if let Some(value) = obj
-        .get("viewer_danger_zone_enabled")
-        .and_then(serde_json::Value::as_bool)
-    {
-        settings.viewer_danger_zone_enabled = value;
-    }
-    if let Some(value) = obj.get("viewer_spad_ram_ratio_percent").and_then(parse_u8) {
-        settings.viewer_spad_ram_ratio_percent = value;
-    }
-    if let Some(value) = obj.get("viewer_open_mode").and_then(parse_viewer_open_mode) {
-        settings.viewer_open_mode = value;
-    }
-    if let Some(value) = obj
-        .get("reading_direction")
-        .and_then(parse_reading_direction)
-    {
-        settings.reading_direction = value;
-    }
-    if let Some(value) = obj.get("library_hud_mode").and_then(parse_library_hud_mode) {
-        settings.library_hud_mode = value;
-    }
-    if let Some(value) = obj
-        .get("library_hud_style")
-        .and_then(parse_library_hud_style)
-    {
-        settings.library_hud_style = value;
-    }
-    if let Some(value) = obj
-        .get("library_card_selection_style")
-        .and_then(parse_library_card_selection_style)
-    {
-        settings.library_card_selection_style = value;
-    }
-    if let Some(value) = obj.get("library_wheel_speed").and_then(parse_u16) {
-        settings.library_wheel_speed = value;
-    }
-    if let Some(value) = obj.get("library_hud_font_level").and_then(parse_u16) {
-        settings.library_hud_font_level = value;
-    }
-    if let Some(value) = obj
-        .get("folder_book_open_as_viewer")
-        .and_then(serde_json::Value::as_bool)
-    {
-        settings.folder_book_open_as_viewer = value;
-    }
-    if let Some(value) = obj
-        .get("resume_from_last_reading_position")
-        .and_then(serde_json::Value::as_bool)
-    {
-        settings.resume_from_last_reading_position = value;
-    }
-    if let Some(value) = obj
-        .get("open_rebuilt_cbz_in_new_viewer")
-        .and_then(serde_json::Value::as_bool)
-    {
-        settings.open_rebuilt_cbz_in_new_viewer = value;
-    }
-    if let Some(value) = obj.get("external_tools").and_then(parse_external_tools) {
-        settings.external_tools = value;
-    }
-
-    settings.viewer_spad_ram_ratio_percent = settings
-        .viewer_spad_ram_ratio_percent
-        .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT);
-
-    Some(settings)
-}
-
-fn parse_u16(value: &serde_json::Value) -> Option<u16> {
-    value.as_u64().and_then(|raw| u16::try_from(raw).ok())
-}
-
-fn parse_u8(value: &serde_json::Value) -> Option<u8> {
-    value.as_u64().map(|raw| raw.min(u8::MAX as u64) as u8)
-}
-
-fn parse_ui_language(value: &serde_json::Value) -> Option<UiLanguage> {
-    UiLanguage::from_code(value.as_str()?)
-}
-
-fn parse_viewer_quality(value: &serde_json::Value) -> Option<ViewerQuality> {
-    match value.as_str()? {
-        "speed" => Some(ViewerQuality::Speed),
-        "balanced" => Some(ViewerQuality::Balanced),
-        "quality" => Some(ViewerQuality::Quality),
-        "original" => Some(ViewerQuality::Original),
-        _ => None,
-    }
-}
-
-fn parse_viewer_open_mode(value: &serde_json::Value) -> Option<ViewerOpenMode> {
-    match value.as_str()? {
-        "windowed" => Some(ViewerOpenMode::Windowed),
-        "fullscreen" => Some(ViewerOpenMode::Fullscreen),
-        _ => None,
-    }
-}
-
-fn parse_reading_direction(value: &serde_json::Value) -> Option<ReadingDirection> {
-    match value.as_str()? {
-        "right_to_left" => Some(ReadingDirection::RightToLeft),
-        "left_to_right" => Some(ReadingDirection::LeftToRight),
-        _ => None,
-    }
-}
-
-fn parse_library_hud_mode(value: &serde_json::Value) -> Option<LibraryHudMode> {
-    match value.as_str()? {
-        "off" => Some(LibraryHudMode::Off),
-        "on" => Some(LibraryHudMode::On),
-        _ => None,
-    }
-}
-
-fn parse_library_hud_style(value: &serde_json::Value) -> Option<LibraryHudStyle> {
-    parse_library_hud_style_name(value.as_str()?)
-}
-
-fn parse_library_hud_style_name(value: &str) -> Option<LibraryHudStyle> {
-    match value {
-        "default" => Some(LibraryHudStyle::Default),
-        "white" => Some(LibraryHudStyle::White),
-        "blue" => Some(LibraryHudStyle::Blue),
-        "high_contrast" => Some(LibraryHudStyle::HighContrast),
-        "amber" => Some(LibraryHudStyle::Amber),
-        "rose" => Some(LibraryHudStyle::Rose),
-        "violet" => Some(LibraryHudStyle::Violet),
-        _ => None,
-    }
-}
-
-fn parse_library_card_selection_style(
-    value: &serde_json::Value,
-) -> Option<LibraryCardSelectionStyle> {
-    match value.as_str()? {
-        "default" => Some(LibraryCardSelectionStyle::Default),
-        "violet" => Some(LibraryCardSelectionStyle::Violet),
-        "amber" => Some(LibraryCardSelectionStyle::Amber),
-        "rose" => Some(LibraryCardSelectionStyle::Rose),
-        "high_contrast" => Some(LibraryCardSelectionStyle::HighContrast),
-        _ => None,
-    }
-}
-
-fn parse_external_tools(value: &serde_json::Value) -> Option<Vec<ExternalTool>> {
-    let items = value.as_array()?;
-    let mut tools = Vec::with_capacity(items.len());
-    for item in items {
-        if let Ok(tool) = serde_json::from_value::<ExternalTool>(item.clone()) {
-            tools.push(tool);
-        }
-    }
-    Some(tools)
 }

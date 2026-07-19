@@ -4,14 +4,14 @@ use std::time::{Duration, Instant};
 use crate::{
     domain::page_map::{BookPageMap, PageDescriptor, PageFormat, SourceRevision},
     infra::{
+        archive::BookReader,
         archive::folder::FolderImageReader,
         archive::zip::{ZipPageMapReadOutcome, ZipReader},
-        archive::BookReader,
         image::page_map::{
-            read_image_metadata, read_image_metadata_lightweight_first,
-            LightweightImageMetadataOutcome,
+            LightweightImageMetadataOutcome, read_image_metadata,
+            read_image_metadata_lightweight_first,
         },
-        page_map::build::{assemble_zip_fast_page_map, FastBuildOutcome, PageMapBuildStatus},
+        page_map::build::{FastBuildOutcome, PageMapBuildStatus, assemble_zip_fast_page_map},
     },
 };
 
@@ -20,9 +20,9 @@ use crate::{
 mod rar_adaptive;
 
 #[cfg(feature = "rar")]
-pub(crate) use rar_adaptive::build_book_page_map_slow_from_rar_path;
-#[cfg(feature = "rar")]
 pub(crate) use rar_adaptive::RarPageMapSlowOutcome;
+#[cfg(feature = "rar")]
+pub(crate) use rar_adaptive::build_book_page_map_slow_from_rar_path;
 
 #[cfg_attr(not(test), allow(dead_code))]
 /// Folder の FAST 判定。Ready だけが cache 保存へ進める。

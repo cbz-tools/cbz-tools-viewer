@@ -7,11 +7,11 @@ use std::path::Path;
 #[cfg(feature = "rar")]
 use std::{path::PathBuf, time::Instant};
 
+use super::{BookReader, CbzRebuildArchiveEntry};
 #[cfg(feature = "rar")]
 use super::{
-    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry, CbzRebuildArchiveEntryKind,
+    CbzRebuildArchiveEntryKind, write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry,
 };
-use super::{BookReader, CbzRebuildArchiveEntry};
 #[cfg(feature = "rar")]
 use crate::util::archive_path::is_supported_image_name;
 #[cfg(feature = "rar")]

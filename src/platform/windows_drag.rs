@@ -5,33 +5,33 @@ use anyhow::Result;
 #[cfg(windows)]
 mod imp {
     use std::{
-        mem::{size_of, ManuallyDrop},
+        mem::{ManuallyDrop, size_of},
         os::windows::ffi::OsStrExt,
         path::PathBuf,
         ptr,
     };
 
-    use anyhow::{bail, Context, Result};
+    use anyhow::{Context, Result, bail};
     use windows::{
-        core::{implement, Error as WinError, BOOL, HRESULT},
         Win32::{
             Foundation::{
-                DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, GlobalFree,
+                DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
                 DRAGDROP_S_USEDEFAULTCURSORS, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL,
-                HWND, OLE_E_ADVISENOTSUPPORTED, RPC_E_CHANGED_MODE, S_OK,
+                GlobalFree, HWND, OLE_E_ADVISENOTSUPPORTED, RPC_E_CHANGED_MODE, S_OK,
             },
             System::{
                 Com::{
-                    CoInitializeEx, CoUninitialize, IAdviseSink, IDataObject, IDataObject_Impl,
-                    IEnumFORMATETC, IEnumSTATDATA, COINIT_APARTMENTTHREADED, DATADIR_GET,
-                    DVASPECT_CONTENT, FORMATETC, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
+                    COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, DATADIR_GET,
+                    DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl,
+                    IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
                 },
-                Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE, GMEM_ZEROINIT},
-                Ole::{IDropSource, IDropSource_Impl, CF_HDROP, DROPEFFECT_COPY},
+                Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock},
+                Ole::{CF_HDROP, DROPEFFECT_COPY, IDropSource, IDropSource_Impl},
                 SystemServices::MK_LBUTTON,
             },
-            UI::Shell::{SHCreateStdEnumFmtEtc, SHDoDragDrop, DROPFILES},
+            UI::Shell::{DROPFILES, SHCreateStdEnumFmtEtc, SHDoDragDrop},
         },
+        core::{BOOL, Error as WinError, HRESULT, implement},
     };
     // windows-core は直接依存として残す。
     // windows の `#[implement(...)]` 展開は COM/OLE IDataObject/IDropSource 実装で

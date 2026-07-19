@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Key};
 
 use crate::domain::app_settings::{
-    normalize_external_tool_executable, AppSettings, ExternalToolShortcut,
+    AppSettings, ExternalToolShortcut, normalize_external_tool_executable,
 };
 use crate::infra::worker::external_tool_worker::{ExternalToolRunRequest, ExternalToolRunResult};
 use crate::ui::viewer::{ExternalToolButtonModel, ExternalToolTrigger};

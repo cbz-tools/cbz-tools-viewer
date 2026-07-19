@@ -3,17 +3,17 @@ use eframe::egui;
 use crate::domain::app_settings::AppSettings;
 use crate::domain::app_settings::UiLanguage;
 use crate::domain::performance::{
-    PerformanceResources, PERFORMANCE_CACHE_MIN_MIB, SPAD_RAM_RATIO_MAX_PERCENT,
+    PERFORMANCE_CACHE_MIN_MIB, PerformanceResources, SPAD_RAM_RATIO_MAX_PERCENT,
     SPAD_RAM_RATIO_MIN_PERCENT,
 };
 
-use super::super::i18n::{tr, TextKey};
+use super::super::i18n::{TextKey, tr};
 use super::super::{icons, theme};
-use super::widgets::{
-    format_bytes_label, format_mib_label, inline_reset_button, section_header, setting_block,
-    subsection_header, subtle_text, PERFORMANCE_SELECT_WIDTH,
-};
 use super::SettingsEvent;
+use super::widgets::{
+    PERFORMANCE_SELECT_WIDTH, format_bytes_label, format_mib_label, inline_reset_button,
+    section_header, setting_block, subsection_header, subtle_text,
+};
 
 struct PerformanceChoiceRowConfig<'a> {
     label: &'a str,
@@ -144,7 +144,7 @@ pub(super) fn show_performance_tab(
                 .color(theme::DELETE_RED),
             )
             .fill(egui::Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)),
+            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT)),
         )
         .on_hover_text(tr(language, TextKey::CacheClearTooltip))
         .clicked()
@@ -227,7 +227,7 @@ fn danger_zone_block(
 ) {
     let frame = egui::Frame::new()
         .fill(theme::SURFACE_BG)
-        .stroke(egui::Stroke::new(1.0, theme::DELETE_RED))
+        .stroke(egui::Stroke::new(1.0_f32, theme::DELETE_RED))
         .inner_margin(egui::Margin::symmetric(10, 8));
     frame.show(ui, |ui| {
         ui.horizontal(|ui| {

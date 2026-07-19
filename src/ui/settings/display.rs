@@ -4,7 +4,7 @@ use crate::domain::app_settings::UiLanguage;
 use crate::domain::app_settings::{AppSettings, ReadingDirection, ViewerQuality};
 
 use super::super::common::reading_direction_label;
-use super::super::i18n::{tr, ui_language_choice_key, TextKey};
+use super::super::i18n::{TextKey, tr, ui_language_choice_key};
 use super::widgets::{section_header, setting_block, subtle_text};
 
 pub(super) fn show_general_tab(

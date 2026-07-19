@@ -1,20 +1,20 @@
 use std::{collections::HashMap, path::Path};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use quick_xml::{
-    events::{BytesStart, Event},
     Reader,
+    events::{BytesStart, Event},
 };
 
 use crate::domain::page_map::{
     BookPageMap, PageDescriptor, PageFormat, PageImageFormat, SourceRevision,
 };
 use crate::infra::image::page_map::{
-    read_image_metadata, read_image_metadata_lightweight_first, LightweightImageMetadataOutcome,
+    LightweightImageMetadataOutcome, read_image_metadata, read_image_metadata_lightweight_first,
 };
 
-use super::{zip::ZipArchiveCore, BookReader};
+use super::{BookReader, zip::ZipArchiveCore};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct EpubImageBook {
@@ -231,7 +231,7 @@ pub(crate) fn build_book_page_map_slow_from_epub_path(
                 return Err(EpubPageMapSlowFailure {
                     page_index: Some(page.page_index),
                     image_path: Some(page.image_path.clone()),
-                })
+                });
             }
         };
         pages.push(PageDescriptor {
@@ -411,7 +411,7 @@ fn extract_xhtml_image_paths(xhtml_path: &str, xml: &[u8]) -> Result<Vec<String>
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(err) => {
-                return Err(anyhow!(err)).with_context(|| format!("parse xhtml: {xhtml_path}"))
+                return Err(anyhow!(err)).with_context(|| format!("parse xhtml: {xhtml_path}"));
             }
         }
         buf.clear();
@@ -460,6 +460,7 @@ fn attr_value_exact_or_local(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<St
     attr_value(e, key)
 }
 
+#[allow(deprecated)] // Keep the existing decode-and-unescape behavior without XML 1.0 normalization.
 fn decode_attr_value(
     e: &BytesStart<'_>,
     attr: &quick_xml::events::attributes::Attribute<'_>,

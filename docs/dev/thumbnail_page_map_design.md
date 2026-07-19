@@ -44,6 +44,28 @@ Library
 
 ---
 
+## Page Map cache unavailable時
+
+Page Map disk cacheはthumbnail workerの必須起動条件ではない。
+primaryとfallbackの両方でPage Map cacheをopenできない場合はwarningを1回記録し、
+worker lifetime中をthumbnail-only modeとしてrequest loopを継続する。
+
+```text
+thumbnail cache open成功
+Page Map cache open失敗
+  |
+  +-- thumbnail生成とLibrary表示を継続
+  +-- Library background FAST/SLOW Page Map生成をskip
+```
+
+このmodeではPage Map cache lookup、FAST、SLOW予約、Page Map deferred persistenceを開始しない。
+runtime中のPage Map cache自動復旧は保証せず、application再起動後にcache openを再試行する。
+
+Viewer bootstrapはthumbnail workerとは独立した既存fallbackを維持し、
+Page Mapを利用できないsessionでも通常読書を継続する。
+
+---
+
 ## 優先サムネイル生成
 
 優先サムネイル生成は、Library が本を表示するための通常経路である。
@@ -145,11 +167,16 @@ Failed の場合は、通常読書へのフォールバックを妨げない。
 
 理由は、サムネイルのリトライを Page Map の再試行経路にしてしまうと、Library の軽い復旧処理が暗黙の全ページ走査になってしまうためである。
 
+`process_thumb`の呼出しscopeは、normal thumbnailでは`ThumbnailAndPageMap`、
+retry thumbnailでは`ThumbnailOnly`とする。`ThumbnailOnly`はPage Map cache lookupを行わず、
+FAST Page Map、SLOW Page Map予約、Page Map deferred persistenceを開始しない。
+
 ```text
 リトライサムネイル生成でやること:
   - サムネイル再生成
 
 リトライサムネイル生成でやらないこと:
+  - Page Map cache lookup
   - FAST Page Map再生成
   - SLOW Page Map生成
   - 全ページ走査
@@ -158,6 +185,8 @@ Failed の場合は、通常読書へのフォールバックを妨げない。
 Page Map の失敗は、サムネイル失敗とは別の問題である。
 
 そのため、サムネイルのリトライ経路に Page Map の責務を持たせない。
+Page Map生成はnormal thumbnail経路または専用Page Map経路の責務であり、
+thumbnailとPage Mapは独立した成果物として扱う。
 
 ---
 
@@ -208,14 +237,44 @@ Viewer起動
   |     => Mapped
   |
   +-- 保存済みPage Mapなし
-  |     +-- FAST生成可能
-  |     |     => Mapped
-  |     |
-  |     +-- FAST生成不可
-  |           => Unavailable
+        +-- source kind別FAST生成を試行
+              |
+              +-- ZIP / CBZ、EPUB等
+              |     |
+              |     +-- FAST Ready
+              |     |     => Mapped
+              |     |
+              |     +-- FAST不可 / RequiresComplete
+              |           => Unavailable
+              |
+              +-- FolderBook
+                    |
+                    +-- FAST Ready
+                    |     => Mapped
+                    |
+                    +-- FAST RequiresComplete
+                          => bootstrap中に同期SLOWを実行
+                          => 成功: Mapped
+                          => 失敗: Unavailable
 ```
 
-Viewer は、読書中に SLOW Page Map 生成を開始しない。
+FolderBook は、内部に JPEG、PNG、WebP、TIFF など複数の画像形式が混在することが通常である。
+FAST Page Map は、全ページについて軽量 metadata 取得が成立した場合だけ `Ready` になる。
+1ページでも FAST 経路だけで descriptor を確定できなければ `RequiresComplete` になり得る。
+
+FolderBook は archive 展開を必要とせず、各画像 file へ直接アクセスできる。
+この形式固有の性質を利用し、FolderBook に限って Viewer bootstrap 中の同期 SLOW を許可する。
+目的は、読書開始前に完全な Page Map を確定し、AUTO 見開き、進捗表示、
+Streaming 計画を session 開始時から安定させることである。
+
+これは FolderBook が常に SLOW という意味ではない。
+FAST 対応画像だけで構成される場合や、画像形式が混在していても全 page descriptor を
+FAST で取得できる場合は `Ready` となり、同期 SLOW は実行しない。
+この例外を ZIP / CBZ、RAR / CBR、EPUB などへ一般化しない。
+
+Viewer は、読書 session 開始後に SLOW Page Map 生成を開始しない。
+FolderBook の同期 SLOW は ViewerState を構築する前の bootstrap 処理であり、
+読書中の background SLOW ではない。
 
 読書中に Page Map の有無が変わると、進捗表示、AUTO見開き、Streaming/cache計画が途中で変わる可能性がある。
 

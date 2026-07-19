@@ -12,8 +12,8 @@ pub fn detect_pc_resources() -> PerformanceResources {
         use std::os::windows::ffi::OsStringExt;
 
         use windows::Win32::Graphics::Dxgi::{
-            CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIFactory6,
-            DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            CreateDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+            IDXGIAdapter1, IDXGIFactory1, IDXGIFactory6,
         };
         use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
 
@@ -36,70 +36,75 @@ pub fn detect_pc_resources() -> PerformanceResources {
         let mut best_dedicated_vram_bytes: Option<u64> = None;
 
         // SAFETY: DXGI factory 生成は所有権付き COM wrapper を返し、失敗は `Err` で扱う。
-        if let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory6>() } {
-            let mut index = 0u32;
-            loop {
-                // SAFETY: `index` はこのループで単調増加し、列挙失敗で終了する。
-                let Ok(adapter) = (unsafe {
-                    factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
-                        index,
-                        DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
-                    )
-                }) else {
+        match unsafe { CreateDXGIFactory1::<IDXGIFactory6>() } {
+            Ok(factory) => {
+                let mut index = 0u32;
+                loop {
+                    // SAFETY: `index` はこのループで単調増加し、列挙失敗で終了する。
+                    let Ok(adapter) = (unsafe {
+                        factory.EnumAdapterByGpuPreference::<IDXGIAdapter1>(
+                            index,
+                            DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE,
+                        )
+                    }) else {
+                        break;
+                    };
+                    // SAFETY: `adapter` は直前の DXGI 列挙成功値。
+                    let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+                        index = index.saturating_add(1);
+                        continue;
+                    };
+                    if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                        index = index.saturating_add(1);
+                        continue;
+                    }
+                    let adapter_name = {
+                        let len = desc
+                            .Description
+                            .iter()
+                            .position(|&c| c == 0)
+                            .unwrap_or(desc.Description.len());
+                        OsString::from_wide(&desc.Description[..len])
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                    best_adapter_name = Some(adapter_name);
+                    best_dedicated_vram_bytes = Some(desc.DedicatedVideoMemory as u64);
                     break;
-                };
-                // SAFETY: `adapter` は直前の DXGI 列挙成功値。
-                let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
-                    index = index.saturating_add(1);
-                    continue;
-                };
-                if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
-                    index = index.saturating_add(1);
-                    continue;
                 }
-                let adapter_name = {
-                    let len = desc
-                        .Description
-                        .iter()
-                        .position(|&c| c == 0)
-                        .unwrap_or(desc.Description.len());
-                    OsString::from_wide(&desc.Description[..len])
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                best_adapter_name = Some(adapter_name);
-                best_dedicated_vram_bytes = Some(desc.DedicatedVideoMemory as u64);
-                break;
             }
-        } else if let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } {
-            let mut index = 0u32;
-            loop {
-                // SAFETY: `index` はこのループで単調増加し、列挙失敗で終了する。
-                let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
-                    break;
-                };
-                // SAFETY: `adapter` は直前の DXGI 列挙成功値。
-                let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
-                    index = index.saturating_add(1);
-                    continue;
-                };
-                if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
-                    index = index.saturating_add(1);
-                    continue;
+            _ => {
+                if let Ok(factory) = unsafe { CreateDXGIFactory1::<IDXGIFactory1>() } {
+                    let mut index = 0u32;
+                    loop {
+                        // SAFETY: `index` はこのループで単調増加し、列挙失敗で終了する。
+                        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else {
+                            break;
+                        };
+                        // SAFETY: `adapter` は直前の DXGI 列挙成功値。
+                        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else {
+                            index = index.saturating_add(1);
+                            continue;
+                        };
+                        if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32) != 0 {
+                            index = index.saturating_add(1);
+                            continue;
+                        }
+                        let adapter_name = {
+                            let len = desc
+                                .Description
+                                .iter()
+                                .position(|&c| c == 0)
+                                .unwrap_or(desc.Description.len());
+                            OsString::from_wide(&desc.Description[..len])
+                                .to_string_lossy()
+                                .into_owned()
+                        };
+                        best_adapter_name = Some(adapter_name);
+                        best_dedicated_vram_bytes = Some(desc.DedicatedVideoMemory as u64);
+                        break;
+                    }
                 }
-                let adapter_name = {
-                    let len = desc
-                        .Description
-                        .iter()
-                        .position(|&c| c == 0)
-                        .unwrap_or(desc.Description.len());
-                    OsString::from_wide(&desc.Description[..len])
-                        .to_string_lossy()
-                        .into_owned()
-                };
-                best_adapter_name = Some(adapter_name);
-                best_dedicated_vram_bytes = Some(desc.DedicatedVideoMemory as u64);
-                break;
             }
         }
 

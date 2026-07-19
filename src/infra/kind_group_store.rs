@@ -2,7 +2,7 @@ use std::{path::PathBuf, time::SystemTime};
 
 use serde::{Deserialize, Serialize};
 
-use crate::domain::kind_group::{validate, CompiledKindRule, GroupDef, KindGroupConfig};
+use crate::domain::kind_group::{CompiledKindRule, GroupDef, KindGroupConfig, validate};
 
 /// %LOCALAPPDATA%/cbz-viewer/kind_groups.toml
 pub fn kind_groups_path() -> PathBuf {

@@ -7,19 +7,19 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 
 use eframe::egui::{
-    self, pos2, vec2, Color32, CornerRadius, Key, Popup, PopupCloseBehavior, Rect, Sense, Stroke,
-    Vec2,
+    self, Color32, CornerRadius, Key, Popup, PopupCloseBehavior, Rect, Sense, Stroke, Vec2, pos2,
+    vec2,
 };
 
 use crate::domain::{
     app_settings::{LibraryCardSelectionStyle, LibraryHudMode, LibraryHudStyle, UiLanguage},
     archive::{BookId, BookMeta, FolderMeta, LibraryEntry},
-    filename_parser::{parse_filename, FilenamePartRole},
+    filename_parser::{FilenamePartRole, parse_filename},
 };
 
 use super::{
     common::paint_favorite_star,
-    i18n::{tr, TextKey},
+    i18n::{TextKey, tr},
     icons,
     library::{BookViewState, ReadingHudState},
     theme,
@@ -874,11 +874,11 @@ fn draw_thumb_cell(
 
                 let old_separator = ui.visuals().widgets.noninteractive.bg_stroke;
                 ui.visuals_mut().widgets.noninteractive.bg_stroke =
-                    egui::Stroke::new(1.0, theme::SEPARATOR_WEAK);
+                    egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK);
 
                 egui::Frame::new()
                     .fill(theme::SURFACE_BG)
-                    .stroke(egui::Stroke::new(1.0, theme::SEPARATOR_WEAK))
+                    .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
                     .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
                         render_context_menu_header(
@@ -1354,14 +1354,14 @@ fn draw_cell_selection_border(
         painter.rect_stroke(
             selection_rect,
             selection_rounding,
-            Stroke::new(6.0, palette.border),
+            Stroke::new(6.0_f32, palette.border),
             egui::StrokeKind::Inside,
         );
     } else if hovered {
         painter.rect_stroke(
             selection_rect,
             selection_rounding,
-            Stroke::new(2.0, theme::ACCENT.linear_multiply(0.7)),
+            Stroke::new(2.0_f32, theme::ACCENT.linear_multiply(0.7)),
             egui::StrokeKind::Inside,
         );
     }

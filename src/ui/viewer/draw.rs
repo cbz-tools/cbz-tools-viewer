@@ -2,12 +2,8 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use eframe::egui::{self, pos2, vec2, Color32, Rect};
+use eframe::egui::{self, Color32, Rect, pos2, vec2};
 
-use super::icons;
-use super::progress::render_page_progress_bar;
-use super::theme;
-use super::toolbar::{render_viewer_toolbar, ViewerToolbarContext};
 use super::ExternalToolButtonModel;
 use super::ExternalToolToolbarState;
 use super::OverlayRenderResult;
@@ -15,10 +11,14 @@ use super::ToolbarEvents;
 use super::ViewerDeleteRangeSelection;
 use super::ViewerState;
 use super::ViewerUiCapabilities;
+use super::icons;
+use super::progress::render_page_progress_bar;
+use super::theme;
+use super::toolbar::{ViewerToolbarContext, render_viewer_toolbar};
 use crate::domain::app_settings::ReadingDirection;
 use crate::domain::app_settings::UiLanguage;
-use crate::infra::ipc::ViewerFavoriteState;
-use crate::ui::i18n::{tr, TextKey};
+use crate::domain::ipc_contract::ViewerFavoriteState;
+use crate::ui::i18n::{TextKey, tr};
 use crate::ui::thumb_cache::LoadedDiskThumb;
 
 #[cfg(debug_assertions)]
@@ -122,7 +122,7 @@ pub(super) fn draw_pages(
             let x = lr.max.x;
             ui.painter().line_segment(
                 [pos2(x, area.min.y), pos2(x, area.max.y)],
-                egui::Stroke::new(1.0, theme::BORDER.linear_multiply(0.75)),
+                egui::Stroke::new(1.0_f32, theme::BORDER.linear_multiply(0.75)),
             );
         }
 
@@ -437,11 +437,7 @@ fn debug_overlay_state_label(
                     | "cache_full_no_priority_improvement"
             )
         );
-    if saturated {
-        "Saturated"
-    } else {
-        "Running"
-    }
+    if saturated { "Saturated" } else { "Running" }
 }
 
 #[cfg(debug_assertions)]
@@ -546,7 +542,13 @@ fn draw_debug_cache_overlay(ui: &mut egui::Ui, state: &mut ViewerState, area: &R
     ];
     let spad_section = state.spad_overlay_lines().to_vec();
 
-    let sections = [page_section, l1_section, l2_section, spad_section, bg_section];
+    let sections = [
+        page_section,
+        l1_section,
+        l2_section,
+        spad_section,
+        bg_section,
+    ];
     let debug_text = sections
         .iter()
         .map(|section| section.join("\n"))
@@ -655,7 +657,7 @@ pub(super) fn draw_fullscreen_overlay(
     let top_resp = ui.scope_builder(egui::UiBuilder::new().max_rect(top_toolbar_rect), |ui| {
         egui::Frame::default()
             .fill(overlay_fill)
-            .stroke(egui::Stroke::new(1.0, theme::SEPARATOR_WEAK))
+            .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
             .show(ui, |ui| {
                 render_viewer_toolbar(
                     ui,
@@ -1036,7 +1038,7 @@ pub(super) fn draw_boundary_preview_card(
     ui.painter().rect_stroke(
         card_rect,
         egui::CornerRadius::same(8),
-        egui::Stroke::new(1.0, border),
+        egui::Stroke::new(1.0_f32, border),
         egui::StrokeKind::Inside,
     );
 
@@ -1169,7 +1171,7 @@ fn draw_boundary_preview_header(
         painter.rect_stroke(
             close_rect.expand(1.0),
             egui::CornerRadius::same(3),
-            egui::Stroke::new(1.0, theme::HOVER_BORDER),
+            egui::Stroke::new(1.0_f32, theme::HOVER_BORDER),
             egui::StrokeKind::Inside,
         );
     }
@@ -1332,7 +1334,7 @@ fn paint_hover_border(ui: &egui::Ui, resp: &egui::Response) {
         ui.painter().rect_stroke(
             resp.rect,
             egui::CornerRadius::same(4),
-            egui::Stroke::new(1.0, theme::HOVER_BORDER),
+            egui::Stroke::new(1.0_f32, theme::HOVER_BORDER),
             egui::StrokeKind::Inside,
         );
     }

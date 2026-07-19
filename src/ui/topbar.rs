@@ -13,7 +13,7 @@ use crate::domain::{
 
 use super::{
     common::paint_quiet_hover_border,
-    i18n::{tr, TextKey},
+    i18n::{TextKey, tr},
     icons,
     library::{LibraryScope, LibraryState},
     theme,
@@ -86,8 +86,8 @@ pub fn show(
     let mut path_blank_clicked = false;
     let mut path_edit_rect = None;
     state.path_input_focused = false;
-    let quiet_stroke = egui::Stroke::new(1.0, egui::Color32::TRANSPARENT);
-    let selected_stroke = egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
+    let quiet_stroke = egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT);
+    let selected_stroke = egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
 
     ui.horizontal(|ui| {
         ui.set_height(TOPBAR_HEIGHT);
@@ -445,7 +445,7 @@ pub fn show(
             // ── Viewer mode ───────────────────────────────────────────────
             egui::Frame::new()
                 .fill(egui::Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(1.0, theme::SEPARATOR_WEAK))
+                .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
                 .corner_radius(egui::CornerRadius::same(6))
                 .inner_margin(egui::Margin::symmetric(2, 2))
                 .show(ui, |ui| {
@@ -575,11 +575,7 @@ fn search_placeholder_text(language: UiLanguage, current_dir: Option<&Path>) -> 
 fn current_folder_name(current_dir: Option<&Path>) -> Option<String> {
     let current_dir = current_dir?;
     let name = current_dir.file_name()?.to_string_lossy().trim().to_owned();
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 fn sort_label(language: UiLanguage, key: &SortKey) -> &'static str {

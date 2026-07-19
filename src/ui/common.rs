@@ -3,7 +3,7 @@ use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke};
 use crate::domain::app_settings::{ReadingDirection, UiLanguage};
 
 use super::{
-    i18n::{tr, TextKey},
+    i18n::{TextKey, tr},
     theme,
 };
 
@@ -12,7 +12,7 @@ pub fn paint_quiet_hover_border(ui: &egui::Ui, resp: &egui::Response) {
         ui.painter().rect_stroke(
             resp.rect,
             egui::CornerRadius::same(4),
-            egui::Stroke::new(1.0, theme::HOVER_BORDER),
+            egui::Stroke::new(1.0_f32, theme::HOVER_BORDER),
             egui::StrokeKind::Inside,
         );
     }

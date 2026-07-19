@@ -6,10 +6,10 @@ use crate::domain::archive::{BookId, BookMeta, LibraryEntry};
 use crate::infra::favorite_store::FavoriteState;
 use crate::ui::library::HistoryEntry;
 
+use super::App;
 use super::platform::{
     is_supported_archive_path, normalize_dir_path, paths_equivalent_for_selection,
 };
-use super::App;
 
 #[derive(Clone, Debug)]
 pub(super) struct PendingAfterLoad {

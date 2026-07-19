@@ -7,7 +7,7 @@ use std::{path::Path, sync::Arc, time::SystemTime};
 use anyhow::Result;
 
 use crate::domain::archive::{BookId, BookMeta, FolderMeta, ImageFileMeta, LibraryEntry};
-use crate::util::archive_path::is_supported_archive_path;
+use crate::util::archive_path::{is_supported_archive_path, is_supported_image_path};
 
 pub fn scan_dir(root: &Path) -> Result<Vec<LibraryEntry>> {
     let mut entries = Vec::new();
@@ -60,7 +60,7 @@ pub fn scan_dir(root: &Path) -> Result<Vec<LibraryEntry>> {
                     modified,
                     page_count: None,
                 }));
-            } else if is_supported_image(&path) {
+            } else if is_supported_image_path(&path) {
                 entries.push(LibraryEntry::ImageFile(ImageFileMeta {
                     path: Arc::from(path.as_path()),
                     title,
@@ -116,7 +116,7 @@ pub fn scan_path(path: &Path) -> Result<Option<LibraryEntry>> {
                 page_count: None,
             })));
         }
-        if is_supported_image(path) {
+        if is_supported_image_path(path) {
             return Ok(Some(LibraryEntry::ImageFile(ImageFileMeta {
                 path: Arc::from(path),
                 title,
@@ -138,16 +138,6 @@ fn has_direct_image(path: &Path) -> bool {
         let Ok(meta) = entry.metadata() else {
             return false;
         };
-        meta.is_file() && is_supported_image(&entry.path())
+        meta.is_file() && is_supported_image_path(&entry.path())
     })
-}
-
-fn is_supported_image(path: &Path) -> bool {
-    let Some(ext) = path.extension().and_then(|x| x.to_str()) else {
-        return false;
-    };
-    matches!(
-        ext.to_ascii_lowercase().as_str(),
-        "jpg" | "jpeg" | "png" | "webp" | "gif" | "avif" | "avifs" | "bmp" | "tif" | "tiff"
-    )
 }

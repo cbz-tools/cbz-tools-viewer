@@ -1,3 +1,5 @@
+pub(crate) mod cbz_rebuild;
+pub(crate) mod cbz_rebuild_transaction;
 pub mod epub;
 pub mod folder;
 pub mod page_map;
@@ -12,7 +14,7 @@ use std::{
     io::{Seek, Write},
     path::Path,
 };
-use zip_writer::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+use zip_writer::{CompressionMethod, ZipWriter, write::SimpleFileOptions};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BookSourceKind {

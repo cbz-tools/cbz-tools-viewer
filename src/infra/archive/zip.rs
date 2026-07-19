@@ -11,7 +11,7 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use flate2::read::DeflateDecoder;
 use memmap2::Mmap;
@@ -19,16 +19,16 @@ use std::io::Read as _;
 // encoding_rs: Shift-JIS (CP932) ZIP ファイル名のデコードに使用
 
 use crate::domain::page_map::PageImageFormat;
-use crate::infra::image::page_map::{probe_png_metadata, JpegMetadataProbe, MetadataProbeResult};
+use crate::infra::image::page_map::{JpegMetadataProbe, MetadataProbeResult, probe_png_metadata};
 use crate::util::{archive_path::is_supported_image_name, natural_sort};
 
 use super::{
+    BookReader, CbzRebuildArchiveEntry, CbzRebuildArchiveEntryKind,
     page_map::{
-        page_map_format_for_name, ZipPageMapIssueReason, ZipPageMapSlowFailureReason,
-        ZipPageMapSlowReason,
+        ZipPageMapIssueReason, ZipPageMapSlowFailureReason, ZipPageMapSlowReason,
+        page_map_format_for_name,
     },
-    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry, BookReader,
-    CbzRebuildArchiveEntry, CbzRebuildArchiveEntryKind,
+    write_cbz_rebuild_directory_entry, write_cbz_rebuild_file_entry,
 };
 use zip_writer::ZipWriter;
 
@@ -519,7 +519,7 @@ fn read_page_map_metadata_deflate(entry: &ZipEntry, raw: &[u8]) -> Result<ZipPag
             MetadataProbeResult::Invalid => {
                 return Ok(ZipPageMapReadOutcome::Failed(
                     ZipPageMapIssueReason::InvalidHeader,
-                ))
+                ));
             }
             MetadataProbeResult::Done {
                 format,

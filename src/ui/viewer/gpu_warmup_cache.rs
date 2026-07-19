@@ -7,7 +7,7 @@ use eframe::egui;
 use super::gpu_texture_history::{
     GpuTextureHit, GpuTextureHitKind, GpuTextureHitSource, GpuTextureKey,
 };
-use super::working_set::{page_render_signature_rank, DisplayRequirement, GpuTextureEntrySnapshot};
+use super::working_set::{DisplayRequirement, GpuTextureEntrySnapshot, page_render_signature_rank};
 
 #[cfg(debug_assertions)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

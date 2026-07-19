@@ -5,7 +5,7 @@ use std::collections::{HashMap, VecDeque};
 use eframe::egui;
 
 use super::working_set::{
-    page_render_signature_rank, DisplayRequirement, GpuTextureEntrySnapshot, PageRenderSignatureKey,
+    DisplayRequirement, GpuTextureEntrySnapshot, PageRenderSignatureKey, page_render_signature_rank,
 };
 
 pub(super) type GpuTextureKey = PageRenderSignatureKey;

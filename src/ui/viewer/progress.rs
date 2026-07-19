@@ -4,9 +4,9 @@ use crate::domain::app_settings::ReadingDirection;
 use crate::domain::app_settings::UiLanguage;
 use crate::ui::i18n::format_page_count_label;
 
-use super::theme;
 use super::ViewerDeleteRangeSelection;
 use super::ViewerState;
+use super::theme;
 
 const DELETE_RANGE_OVERLAY_MIN_WIDTH: f32 = 5.0;
 const DELETE_RANGE_OVERLAY_FILL_ALPHA: u8 = 84;
@@ -123,6 +123,10 @@ pub(super) fn render_page_progress_bar(
                 painter,
                 track_rect,
                 state.delete_range_selection(),
+                state
+                    .current_displayed_page_min_max()
+                    .map(|(_, max_page)| max_page)
+                    .unwrap_or(selected_physical_page),
                 reading_direction,
                 max,
             );
@@ -136,14 +140,14 @@ pub(super) fn render_page_progress_bar(
             painter.rect_stroke(
                 thumb_rect,
                 2.0,
-                egui::Stroke::new(1.0, theme::ACCENT_ACTIVE),
+                egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE),
                 egui::StrokeKind::Inside,
             );
             if hovered_now {
                 painter.rect_stroke(
                     track_rect.expand(0.5),
                     3.0,
-                    egui::Stroke::new(1.0, theme::HOVER_BORDER_WEAK),
+                    egui::Stroke::new(1.0_f32, theme::HOVER_BORDER_WEAK),
                     egui::StrokeKind::Outside,
                 );
             }
@@ -199,6 +203,7 @@ fn draw_delete_range_overlay(
     painter: &egui::Painter,
     track_rect: egui::Rect,
     selection: ViewerDeleteRangeSelection,
+    provisional_end: u32,
     reading_direction: ReadingDirection,
     max_page: u32,
 ) {
@@ -206,72 +211,93 @@ fn draw_delete_range_overlay(
         return;
     };
     match selection.end {
-        None => {
-            let start_color = egui::Color32::from_rgba_unmultiplied(
-                37,
-                99,
-                235,
-                DELETE_RANGE_OVERLAY_EDGE_ALPHA,
-            );
+        None if start == provisional_end => {
+            let start_color =
+                egui::Color32::from_rgba_unmultiplied(37, 99, 235, DELETE_RANGE_OVERLAY_EDGE_ALPHA);
             let x = progress_x_for_physical_page(track_rect, start, max_page, reading_direction);
             painter.line_segment(
                 [
                     egui::pos2(x, track_rect.min.y),
                     egui::pos2(x, track_rect.max.y),
                 ],
-                egui::Stroke::new(1.5, start_color),
+                egui::Stroke::new(1.5_f32, start_color),
             );
         }
-        Some(end) => {
-            let edge_color = egui::Color32::from_rgba_unmultiplied(
-                theme::DELETE_RED.r(),
-                theme::DELETE_RED.g(),
-                theme::DELETE_RED.b(),
-                DELETE_RANGE_OVERLAY_EDGE_ALPHA,
-            );
-            let start_visual = visual_page_from_physical(start, max_page, reading_direction);
-            let end_visual = visual_page_from_physical(end, max_page, reading_direction);
-            let left_x =
-                progress_x_for_visual_page(track_rect, start_visual.min(end_visual), max_page);
-            let right_x =
-                progress_x_for_visual_page(track_rect, start_visual.max(end_visual), max_page);
-            let mut left = left_x.min(right_x);
-            let mut right = left_x.max(right_x);
-            if right - left < DELETE_RANGE_OVERLAY_MIN_WIDTH {
-                let center = (left + right) * 0.5;
-                left = (center - DELETE_RANGE_OVERLAY_MIN_WIDTH * 0.5).clamp(
-                    track_rect.min.x,
-                    (track_rect.max.x - DELETE_RANGE_OVERLAY_MIN_WIDTH).max(track_rect.min.x),
-                );
-                right = (left + DELETE_RANGE_OVERLAY_MIN_WIDTH).min(track_rect.max.x);
-            }
-            let overlay_rect = egui::Rect::from_min_max(
-                egui::pos2(left, track_rect.min.y + 0.5),
-                egui::pos2(right, track_rect.max.y - 0.5),
-            );
-            let fill_color = egui::Color32::from_rgba_unmultiplied(
-                theme::DELETE_RED.r(),
-                theme::DELETE_RED.g(),
-                theme::DELETE_RED.b(),
-                DELETE_RANGE_OVERLAY_FILL_ALPHA,
-            );
-            painter.rect_filled(overlay_rect, 2.0, fill_color);
-            painter.line_segment(
-                [
-                    egui::pos2(overlay_rect.min.x, track_rect.min.y),
-                    egui::pos2(overlay_rect.min.x, track_rect.max.y),
-                ],
-                egui::Stroke::new(1.5, edge_color),
-            );
-            painter.line_segment(
-                [
-                    egui::pos2(overlay_rect.max.x, track_rect.min.y),
-                    egui::pos2(overlay_rect.max.x, track_rect.max.y),
-                ],
-                egui::Stroke::new(1.5, edge_color),
-            );
-        }
+        None => draw_delete_range_interval_overlay(
+            painter,
+            track_rect,
+            start,
+            provisional_end,
+            egui::Color32::from_rgb(217, 119, 6),
+            reading_direction,
+            max_page,
+        ),
+        Some(end) => draw_delete_range_interval_overlay(
+            painter,
+            track_rect,
+            start,
+            end,
+            theme::DELETE_RED,
+            reading_direction,
+            max_page,
+        ),
     }
+}
+
+fn draw_delete_range_interval_overlay(
+    painter: &egui::Painter,
+    track_rect: egui::Rect,
+    start: u32,
+    end: u32,
+    color: egui::Color32,
+    reading_direction: ReadingDirection,
+    max_page: u32,
+) {
+    let edge_color = egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        DELETE_RANGE_OVERLAY_EDGE_ALPHA,
+    );
+    let start_visual = visual_page_from_physical(start, max_page, reading_direction);
+    let end_visual = visual_page_from_physical(end, max_page, reading_direction);
+    let left_x = progress_x_for_visual_page(track_rect, start_visual.min(end_visual), max_page);
+    let right_x = progress_x_for_visual_page(track_rect, start_visual.max(end_visual), max_page);
+    let mut left = left_x.min(right_x);
+    let mut right = left_x.max(right_x);
+    if right - left < DELETE_RANGE_OVERLAY_MIN_WIDTH {
+        let center = (left + right) * 0.5;
+        left = (center - DELETE_RANGE_OVERLAY_MIN_WIDTH * 0.5).clamp(
+            track_rect.min.x,
+            (track_rect.max.x - DELETE_RANGE_OVERLAY_MIN_WIDTH).max(track_rect.min.x),
+        );
+        right = (left + DELETE_RANGE_OVERLAY_MIN_WIDTH).min(track_rect.max.x);
+    }
+    let overlay_rect = egui::Rect::from_min_max(
+        egui::pos2(left, track_rect.min.y + 0.5),
+        egui::pos2(right, track_rect.max.y - 0.5),
+    );
+    let fill_color = egui::Color32::from_rgba_unmultiplied(
+        color.r(),
+        color.g(),
+        color.b(),
+        DELETE_RANGE_OVERLAY_FILL_ALPHA,
+    );
+    painter.rect_filled(overlay_rect, 2.0, fill_color);
+    painter.line_segment(
+        [
+            egui::pos2(overlay_rect.min.x, track_rect.min.y),
+            egui::pos2(overlay_rect.min.x, track_rect.max.y),
+        ],
+        egui::Stroke::new(1.5_f32, edge_color),
+    );
+    painter.line_segment(
+        [
+            egui::pos2(overlay_rect.max.x, track_rect.min.y),
+            egui::pos2(overlay_rect.max.x, track_rect.max.y),
+        ],
+        egui::Stroke::new(1.5_f32, edge_color),
+    );
 }
 
 fn progress_x_for_visual_page(track_rect: egui::Rect, visual_page: u32, max_page: u32) -> f32 {

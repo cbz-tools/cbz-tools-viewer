@@ -2,18 +2,18 @@ use eframe::egui::{self, Key};
 use egui_material_icons::MaterialIcon;
 
 use crate::domain::app_settings::{ReadingDirection, UiLanguage, ViewerQuality};
-use crate::domain::archive_settings::{SpreadMode, SLIDESHOW_INTERVAL_CHOICES};
-use crate::infra::ipc::ViewerFavoriteState;
+use crate::domain::archive_settings::{SLIDESHOW_INTERVAL_CHOICES, SpreadMode};
+use crate::domain::ipc_contract::ViewerFavoriteState;
 use crate::ui::common::reading_direction_label;
-use crate::ui::i18n::{tr, TextKey};
+use crate::ui::i18n::{TextKey, tr};
 
-use super::icons;
-use super::theme;
 use super::ExternalToolButtonModel;
 use super::ExternalToolToolbarState;
 use super::ToolbarEvents;
 use super::ViewerState;
 use super::ViewerUiCapabilities;
+use super::icons;
+use super::theme;
 
 pub(super) struct ViewerToolbarContext<'a> {
     pub(super) state: &'a ViewerState,
@@ -54,9 +54,9 @@ fn favorite_button_and_hover(
             egui::Color32::TRANSPARENT
         })
         .stroke(if matches!(favorite_state, ViewerFavoriteState::On) {
-            egui::Stroke::new(1.0, theme::ACCENT_ACTIVE)
+            egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE)
         } else {
-            egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)
+            egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT)
         });
     let hover = if favorite_toggle_pending {
         tr(language, TextKey::FavoriteUpdating)
@@ -158,14 +158,14 @@ pub(super) fn render_viewer_toolbar(
             ui.painter().rect_stroke(
                 resp.rect,
                 egui::CornerRadius::same(4),
-                egui::Stroke::new(1.0, theme::HOVER_BORDER_WEAK),
+                egui::Stroke::new(1.0_f32, theme::HOVER_BORDER_WEAK),
                 egui::StrokeKind::Inside,
             );
         }
     }
 
-    let quiet_stroke = egui::Stroke::new(1.0, egui::Color32::TRANSPARENT);
-    let selected_stroke = egui::Stroke::new(1.0, theme::ACCENT_ACTIVE);
+    let quiet_stroke = egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT);
+    let selected_stroke = egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
     let current_book_path = state.persistent.entry.path.as_ref();
     ui.horizontal(|ui| {
         let (favorite_button, favorite_hover, favorite_disabled) =

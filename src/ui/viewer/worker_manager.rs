@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::Path,
-    sync::{mpsc, Arc, Mutex, OnceLock, RwLock},
+    sync::{Arc, Mutex, OnceLock, RwLock, mpsc},
     thread,
     time::Duration,
 };
@@ -20,8 +20,9 @@ use super::{
     decode_layout::request_display_width_for_pair,
     state::{RgbaCacheKey, RgbaPageCache},
     streaming_cache::{
-        desired_auto_streaming_sequence, SimpleStreamingCachePolicy, StreamingCachePlanner,
-        StreamingCacheStopReason, StreamingCompletionAdmissionInput, StreamingCompletionDropReason,
+        SimpleStreamingCachePolicy, StreamingCachePlanner, StreamingCacheStopReason,
+        StreamingCompletionAdmissionInput, StreamingCompletionDropReason,
+        desired_auto_streaming_sequence,
     },
     working_set::{
         BgAdmissionState, BgInflightEntry, BgRenderContext, PageRenderSignatureKey,
@@ -1165,7 +1166,11 @@ fn pump_background_work(
         snapshot.target_page,
         streaming_anchor_page(&snapshot),
         snapshot.page_count,
-        desired_sequence.iter().take(20).copied().collect::<Vec<_>>()
+        desired_sequence
+            .iter()
+            .take(20)
+            .copied()
+            .collect::<Vec<_>>()
     );
 
     match plan.stop_reason {
@@ -1265,13 +1270,15 @@ fn update_l2_streaming_status(
     snapshot: Option<&ViewerWorkerManagerSnapshot>,
     settled: bool,
 ) {
+    let cache_guard;
     let Ok(mut status) = l2_status.write() else {
         return;
     };
     status.generation = snapshot.map(|snapshot| snapshot.generation).unwrap_or(0);
     status.book_id = snapshot.map(|snapshot| snapshot.book_id.clone());
     status.settled = settled;
-    if let Ok(cache) = bg_rgba_cache.try_read() {
+    cache_guard = bg_rgba_cache.try_read().ok();
+    if let Some(cache) = cache_guard.as_ref() {
         (status.current_bytes, status.max_bytes) = (cache.current_bytes(), cache.max_bytes());
         status.cached_page_count = cache.page_order().len();
     }

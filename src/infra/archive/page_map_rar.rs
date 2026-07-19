@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::domain::page_map::{BookPageMap, PageDescriptor, PageFormat, SourceRevision};
 use crate::infra::image::page_map::{
-    read_image_metadata, read_image_metadata_lightweight_first, LightweightImageMetadataOutcome,
+    LightweightImageMetadataOutcome, read_image_metadata, read_image_metadata_lightweight_first,
 };
 use crate::util::natural_sort;
 
@@ -297,7 +297,7 @@ fn build_rar_page_map_parallel(
                     });
                 }
             }
-        }
+        };
     }
 
     if let Some(failure) = first_failure {

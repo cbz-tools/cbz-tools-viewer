@@ -314,7 +314,9 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::ClearBookSettings => "Clear Book Settings",
         TextKey::ClearBookSettingsQuestion => "Reset this book's settings?",
         TextKey::ClearBookSettingsQuestionMultiple => "Reset settings for {} selected books?",
-        TextKey::ClearBookSettingsNote => "Reading state, resume position, and display settings return to defaults. The book, thumbnails, Page Map, favorites, and groups are not deleted.",
+        TextKey::ClearBookSettingsNote => {
+            "Reading state, resume position, and display settings return to defaults. The book, thumbnails, Page Map, favorites, and groups are not deleted."
+        }
         TextKey::Reset => "Reset",
         TextKey::ExternalToolsMenu => "External Tools >",
         TextKey::MultipleSelectionUnavailable => "  Unavailable while multiple items are selected",
@@ -442,18 +444,10 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::QualityBalancedDesc => {
             "Balances image quality and display speed. This is the normal recommendation."
         }
-        TextKey::QualityQualityDesc => {
-            "Downscales with high quality to match the display size."
-        }
-        TextKey::QualityOriginalDesc => {
-            "Preserves the original resolution as much as possible."
-        }
-        TextKey::QualityByBookNote => {
-            "Book-specific settings override the global setting."
-        }
-        TextKey::QualityAnimationNote => {
-            "Some image processing does not apply to animated images."
-        }
+        TextKey::QualityQualityDesc => "Downscales with high quality to match the display size.",
+        TextKey::QualityOriginalDesc => "Preserves the original resolution as much as possible.",
+        TextKey::QualityByBookNote => "Book-specific settings override the global setting.",
+        TextKey::QualityAnimationNote => "Some image processing does not apply to animated images.",
         TextKey::DefaultReadingDirection => "Default reading direction",
         TextKey::Startup => "Startup",
         TextKey::PageDeleteSection => "Page delete",
@@ -491,18 +485,20 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::MemoryCache => "Memory cache",
         TextKey::L1VramCache => "L1 VRAM Cache",
         TextKey::L2RamCache => "L2 RAM Cache",
-        TextKey::L2RamCacheDescription => "Stores decoded RGBA images in system memory. Next and previous book preloading each use 5% of this setting by default.",
+        TextKey::L2RamCacheDescription => {
+            "Stores decoded RGBA images in system memory. Next and previous book preloading each use 5% of this setting by default."
+        }
         TextKey::AdjacentBookPreloadRam => "Adjacent Book Preload RAM",
-        TextKey::AdjacentBookPreloadRamDescription => "Percentage of the L2 RAM Cache setting used for each adjacent book. Applies separately to Next and Previous. The two-page guarantee is separate from this percentage. Takes effect the next time the Viewer starts.",
+        TextKey::AdjacentBookPreloadRamDescription => {
+            "Percentage of the L2 RAM Cache setting used for each adjacent book. Applies separately to Next and Previous. The two-page guarantee is separate from this percentage. Takes effect the next time the Viewer starts."
+        }
         TextKey::GPUKeepNote => "Keeps images before and after display in GPU memory.",
         TextKey::CacheResetDefault => "Restore default",
         TextKey::CacheUpperLimit => "Normal upper limit",
         TextKey::CacheUsage => "Usage",
         TextKey::DiskCache => "Disk cache",
         TextKey::CacheClear => "Clear thumbnail cache",
-        TextKey::CacheClearTooltip => {
-            "Delete the disk cache and regenerate it when displayed"
-        }
+        TextKey::CacheClearTooltip => "Delete the disk cache and regenerate it when displayed",
         TextKey::DangerZone => "Danger Zone",
         TextKey::Unavailable => "Unavailable",
         TextKey::MiB => "MiB",
@@ -530,7 +526,9 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::DangerZoneTitle => "Danger Zone",
         TextKey::DangerZoneEnableLabel => "Enable Danger Zone",
         TextKey::DangerZoneEnableDescription => "Allows entering values above the normal limits.",
-        TextKey::DangerZoneBodyText => "In the danger zone, you can enter arbitrary values up to the detected resource limit. Existing values are not changed automatically.",
+        TextKey::DangerZoneBodyText => {
+            "In the danger zone, you can enter arbitrary values up to the detected resource limit. Existing values are not changed automatically."
+        }
         TextKey::InputRangeLabel => "Input range",
     };
     debug_assert!(
@@ -631,7 +629,9 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::ErrorTitle => Some("エラー"),
         TextKey::ViewerInitFailed => Some("ビューア初期化に失敗しました。"),
         TextKey::Ok => Some("OK"),
-        TextKey::CacheClearFailed => Some("キャッシュ保存先を開けないため、キャッシュ削除を実行できませんでした。"),
+        TextKey::CacheClearFailed => {
+            Some("キャッシュ保存先を開けないため、キャッシュ削除を実行できませんでした。")
+        }
         TextKey::FileCount => Some("{} 件のファイル"),
         TextKey::FolderCount => Some("{} 件のフォルダ"),
         TextKey::FilesAndFoldersCount => Some("{} 件のファイル、{} 件のフォルダ"),
@@ -651,9 +651,7 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::DeleteRangeReplaceNote => {
             Some("元の本は置換または削除されます。この操作は元に戻せません。")
         }
-        TextKey::DeleteRangeNextBookNote => {
-            Some("現在のViewerは成功後に次の本へ移動します。")
-        }
+        TextKey::DeleteRangeNextBookNote => Some("現在のViewerは成功後に次の本へ移動します。"),
         TextKey::DeleteRangeProcessing => Some("アーカイブを再構築中..."),
         TextKey::DeleteRangeFailed => Some("アーカイブの再構築に失敗しました。"),
         TextKey::DeleteRangeAllPagesNotAllowed => {
@@ -704,9 +702,9 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::CardSelectionStyleHighContrast => Some("高コントラスト"),
         TextKey::ImageFolder => Some("画像フォルダ"),
         TextKey::ImageFolderOpenAsBook => Some("画像フォルダを本として開く"),
-        TextKey::ImageFolderDescription => Some(
-            "ON では画像フォルダを Viewer で開きます。OFF ではフォルダへ移動します。",
-        ),
+        TextKey::ImageFolderDescription => {
+            Some("ON では画像フォルダを Viewer で開きます。OFF ではフォルダへ移動します。")
+        }
         TextKey::QualityGlobal => Some("画質（グローバル設定）"),
         TextKey::QualitySpeed => Some("速度優先"),
         TextKey::QualityBalanced => Some("標準"),
@@ -716,16 +714,18 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::QualityBalancedDesc => {
             Some("画質と表示速度のバランスを取ります。通常はこちらを推奨します。")
         }
-        TextKey::QualityQualityDesc => {
-            Some("表示サイズに合わせて高品質に縮小します。表示までの時間とCPU使用量が増える場合があります。")
+        TextKey::QualityQualityDesc => Some(
+            "表示サイズに合わせて高品質に縮小します。表示までの時間とCPU使用量が増える場合があります。",
+        ),
+        TextKey::QualityOriginalDesc => Some(
+            "元画像の解像度を可能な範囲で維持します。読み込み時間とメモリ・GPUメモリ使用量が大きく増え、キャッシュできるページ数が減ります。",
+        ),
+        TextKey::QualityByBookNote => Some(
+            "ビューアで本ごとに画質を変更できます。本ごとの設定はグローバル設定より優先されます。",
+        ),
+        TextKey::QualityAnimationNote => {
+            Some("アニメーション画像には一部の画質処理が適用されません。")
         }
-        TextKey::QualityOriginalDesc => {
-            Some("元画像の解像度を可能な範囲で維持します。読み込み時間とメモリ・GPUメモリ使用量が大きく増え、キャッシュできるページ数が減ります。")
-        }
-        TextKey::QualityByBookNote => {
-            Some("ビューアで本ごとに画質を変更できます。本ごとの設定はグローバル設定より優先されます。")
-        }
-        TextKey::QualityAnimationNote => Some("アニメーション画像には一部の画質処理が適用されません。"),
         TextKey::DefaultReadingDirection => Some("既定のページ開き"),
         TextKey::Startup => Some("起動時"),
         TextKey::PageDeleteSection => Some("ページ削除"),
@@ -763,9 +763,13 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::MemoryCache => Some("メモリキャッシュ"),
         TextKey::L1VramCache => Some("L1 VRAM Cache"),
         TextKey::L2RamCache => Some("L2 RAM Cache"),
-        TextKey::L2RamCacheDescription => Some("デコード済みRGBAをRAMへ保持する容量です。通常時は次本・前本の先読みがそれぞれこの設定の5%を使用します。"),
+        TextKey::L2RamCacheDescription => Some(
+            "デコード済みRGBAをRAMへ保持する容量です。通常時は次本・前本の先読みがそれぞれこの設定の5%を使用します。",
+        ),
         TextKey::AdjacentBookPreloadRam => Some("隣接本の先読みRAM"),
-        TextKey::AdjacentBookPreloadRamDescription => Some("L2 RAM Cache設定容量に対する隣接本1冊あたりの割合です。次本と前本にそれぞれ適用されます。2ページ保証はこの割合とは別です。Viewerを次回起動した後に反映されます。"),
+        TextKey::AdjacentBookPreloadRamDescription => Some(
+            "L2 RAM Cache設定容量に対する隣接本1冊あたりの割合です。次本と前本にそれぞれ適用されます。2ページ保証はこの割合とは別です。Viewerを次回起動した後に反映されます。",
+        ),
         TextKey::GPUKeepNote => Some("表示前後の画像をGPUメモリに保持します。"),
         TextKey::CacheResetDefault => Some("検出資源から算出した既定値（{}）に戻す"),
         TextKey::CacheUpperLimit => Some("通常上限"),
@@ -797,8 +801,12 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::StandardLabel => Some("標準"),
         TextKey::DangerZoneTitle => Some("Danger Zone"),
         TextKey::DangerZoneEnableLabel => Some("Danger Zone を有効にする"),
-        TextKey::DangerZoneEnableDescription => Some("有効にすると、通常上限を超える値を手入力できます。"),
-        TextKey::DangerZoneBodyText => Some("危険領域では、検出資源の上限まで任意値を入力できます。既存値は自動変更しません。"),
+        TextKey::DangerZoneEnableDescription => {
+            Some("有効にすると、通常上限を超える値を手入力できます。")
+        }
+        TextKey::DangerZoneBodyText => {
+            Some("危険領域では、検出資源の上限まで任意値を入力できます。既存値は自動変更しません。")
+        }
         TextKey::InputRangeLabel => Some("入力範囲"),
     }
 }

@@ -1,4 +1,6 @@
+mod app_settings_store;
 pub mod archive;
+pub(crate) use app_settings_store::app_settings_resolution;
 pub mod cache;
 pub mod config_io;
 pub mod favorite_store;

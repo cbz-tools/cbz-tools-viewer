@@ -122,6 +122,45 @@ impl DiskCache {
         Ok(removed)
     }
 
+    /// current revision 以外の同一 BookId のサムネイルを削除する。
+    pub fn prune_thumbs_except(
+        &self,
+        id: &BookId,
+        file_size: u64,
+        modified: Option<SystemTime>,
+    ) -> Result<usize> {
+        let hex = id.0.to_hex();
+        let dir = self.root.join(&hex[..2]);
+        if !dir.exists() {
+            return Ok(0);
+        }
+        let current_name = self
+            .thumb_path(id, file_size, modified)
+            .file_name()
+            .map(|name| name.to_owned());
+
+        let mut removed = 0usize;
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name() else {
+                continue;
+            };
+            if current_name.as_deref() != Some(name)
+                && name
+                    .to_str()
+                    .is_some_and(|name| name.starts_with(hex.as_str()) && name.ends_with(".webp"))
+                && std::fs::remove_file(&path).is_ok()
+            {
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     pub fn rename_thumb_artifact(
         &self,
         old_id: &BookId,

@@ -8,11 +8,6 @@ use std::{
 use blake3::Hash;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::infra::archive::{
-    collect_cbz_rebuild_archive_selection, write_cbz_rebuild_tmp_archive,
-    CbzRebuildArchiveSelection,
-};
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct BookId(pub Hash);
 
@@ -162,18 +157,6 @@ pub struct CbzRebuildPlan {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CbzRebuildPreparedTmp {
-    pub plan: CbzRebuildPlan,
-    pub selection: CbzRebuildArchiveSelection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CbzRebuildCompleted {
-    pub plan: CbzRebuildPlan,
-    pub selection: CbzRebuildArchiveSelection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CbzRebuildPlanError {
     UnsupportedLibraryEntryKind,
     EpubNotSupported,
@@ -182,33 +165,6 @@ pub enum CbzRebuildPlanError {
     OutputPathAlreadyExists(PathBuf),
     TmpPathAlreadyExists(PathBuf),
     BackupPathAlreadyExists(PathBuf),
-}
-
-#[derive(Debug)]
-pub enum CbzRebuildFinalizeError {
-    OldArchiveMissing(PathBuf),
-    TmpArchiveMissing(PathBuf),
-    BackupPathAlreadyExists(PathBuf),
-    OutputPathAlreadyExists(PathBuf),
-    RenameOldToBackup {
-        old_path: PathBuf,
-        backup_path: PathBuf,
-        source: std::io::Error,
-    },
-    RenameTmpToOutput {
-        tmp_path: PathBuf,
-        output_path: PathBuf,
-        source: std::io::Error,
-    },
-    RemoveBackup {
-        backup_path: PathBuf,
-        source: std::io::Error,
-    },
-    RollbackRenameBackupToOld {
-        backup_path: PathBuf,
-        old_path: PathBuf,
-        source: std::io::Error,
-    },
 }
 
 impl std::fmt::Display for CbzRebuildPlanError {
@@ -247,98 +203,6 @@ impl std::fmt::Display for CbzRebuildPlanError {
 }
 
 impl std::error::Error for CbzRebuildPlanError {}
-
-impl std::fmt::Display for CbzRebuildFinalizeError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::OldArchiveMissing(path) => {
-                write!(
-                    f,
-                    "cbz rebuild finalize failed before rename: old archive missing: {}",
-                    path.display()
-                )
-            }
-            Self::TmpArchiveMissing(path) => {
-                write!(
-                    f,
-                    "cbz rebuild finalize failed before rename: tmp archive missing: {}",
-                    path.display()
-                )
-            }
-            Self::BackupPathAlreadyExists(path) => {
-                write!(
-                    f,
-                    "cbz rebuild finalize failed before rename: backup path already exists: {}",
-                    path.display()
-                )
-            }
-            Self::OutputPathAlreadyExists(path) => {
-                write!(
-                    f,
-                    "cbz rebuild finalize failed before rename: output path already exists: {}",
-                    path.display()
-                )
-            }
-            Self::RenameOldToBackup {
-                old_path,
-                backup_path,
-                source,
-            } => write!(
-                f,
-                "cbz rebuild finalize failed at old->backup rename: {} -> {}: {}",
-                old_path.display(),
-                backup_path.display(),
-                source
-            ),
-            Self::RenameTmpToOutput {
-                tmp_path,
-                output_path,
-                source,
-            } => write!(
-                f,
-                "cbz rebuild finalize failed at tmp->output rename: {} -> {}: {}",
-                tmp_path.display(),
-                output_path.display(),
-                source
-            ),
-            Self::RemoveBackup {
-                backup_path,
-                source,
-            } => write!(
-                f,
-                "cbz rebuild finalize failed after output commit at backup delete: {}: {}",
-                backup_path.display(),
-                source
-            ),
-            Self::RollbackRenameBackupToOld {
-                backup_path,
-                old_path,
-                source,
-            } => write!(
-                f,
-                "cbz rebuild finalize failed during rollback backup->old rename: {} -> {}: {}",
-                backup_path.display(),
-                old_path.display(),
-                source
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CbzRebuildFinalizeError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::RenameOldToBackup { source, .. }
-            | Self::RenameTmpToOutput { source, .. }
-            | Self::RemoveBackup { source, .. }
-            | Self::RollbackRenameBackupToOld { source, .. } => Some(source),
-            Self::OldArchiveMissing(_)
-            | Self::TmpArchiveMissing(_)
-            | Self::BackupPathAlreadyExists(_)
-            | Self::OutputPathAlreadyExists(_) => None,
-        }
-    }
-}
 
 pub fn plan_cbz_rebuild_for_library_entry(
     entry: &LibraryEntry,
@@ -383,16 +247,6 @@ pub fn plan_cbz_rebuild_for_library_entry(
     backup_path.push(".rebuild_backup");
     let backup_path = PathBuf::from(backup_path);
 
-    if output_path != input_path && output_path.exists() {
-        return Err(CbzRebuildPlanError::OutputPathAlreadyExists(output_path));
-    }
-    if tmp_path.exists() {
-        return Err(CbzRebuildPlanError::TmpPathAlreadyExists(tmp_path));
-    }
-    if backup_path.exists() {
-        return Err(CbzRebuildPlanError::BackupPathAlreadyExists(backup_path));
-    }
-
     Ok(CbzRebuildPlan {
         input_path,
         output_path,
@@ -400,90 +254,4 @@ pub fn plan_cbz_rebuild_for_library_entry(
         backup_path,
         delete_entries: options.delete_entries,
     })
-}
-
-pub fn prepare_cbz_rebuild_tmp_for_library_entry(
-    entry: &LibraryEntry,
-    options: CbzRebuildPlanOptions,
-) -> anyhow::Result<CbzRebuildPreparedTmp> {
-    let plan = plan_cbz_rebuild_for_library_entry(entry, options).map_err(anyhow::Error::from)?;
-    let selection = collect_cbz_rebuild_archive_selection(&plan.input_path, &plan.delete_entries)?;
-    write_cbz_rebuild_tmp_archive(&plan.input_path, &plan.tmp_path, &selection)?;
-    Ok(CbzRebuildPreparedTmp { plan, selection })
-}
-
-pub fn finalize_cbz_rebuild_for_library_entry(
-    prepared: CbzRebuildPreparedTmp,
-) -> Result<CbzRebuildCompleted, CbzRebuildFinalizeError> {
-    finalize_cbz_rebuild_plan(&prepared.plan)?;
-    Ok(CbzRebuildCompleted {
-        plan: prepared.plan,
-        selection: prepared.selection,
-    })
-}
-
-pub fn rebuild_cbz_for_library_entry(
-    entry: &LibraryEntry,
-    options: CbzRebuildPlanOptions,
-) -> anyhow::Result<CbzRebuildCompleted> {
-    let prepared = prepare_cbz_rebuild_tmp_for_library_entry(entry, options)?;
-    let completed =
-        finalize_cbz_rebuild_for_library_entry(prepared).map_err(anyhow::Error::from)?;
-    Ok(completed)
-}
-
-fn finalize_cbz_rebuild_plan(plan: &CbzRebuildPlan) -> Result<(), CbzRebuildFinalizeError> {
-    if !plan.input_path.exists() {
-        return Err(CbzRebuildFinalizeError::OldArchiveMissing(
-            plan.input_path.clone(),
-        ));
-    }
-    if !plan.tmp_path.exists() {
-        return Err(CbzRebuildFinalizeError::TmpArchiveMissing(
-            plan.tmp_path.clone(),
-        ));
-    }
-    if plan.backup_path.exists() {
-        return Err(CbzRebuildFinalizeError::BackupPathAlreadyExists(
-            plan.backup_path.clone(),
-        ));
-    }
-    if plan.output_path != plan.input_path && plan.output_path.exists() {
-        return Err(CbzRebuildFinalizeError::OutputPathAlreadyExists(
-            plan.output_path.clone(),
-        ));
-    }
-
-    std::fs::rename(&plan.input_path, &plan.backup_path).map_err(|source| {
-        CbzRebuildFinalizeError::RenameOldToBackup {
-            old_path: plan.input_path.clone(),
-            backup_path: plan.backup_path.clone(),
-            source,
-        }
-    })?;
-
-    if let Err(source) = std::fs::rename(&plan.tmp_path, &plan.output_path) {
-        let rollback_result = std::fs::rename(&plan.backup_path, &plan.input_path);
-        return match rollback_result {
-            Ok(()) => Err(CbzRebuildFinalizeError::RenameTmpToOutput {
-                tmp_path: plan.tmp_path.clone(),
-                output_path: plan.output_path.clone(),
-                source,
-            }),
-            Err(rollback_source) => Err(CbzRebuildFinalizeError::RollbackRenameBackupToOld {
-                backup_path: plan.backup_path.clone(),
-                old_path: plan.input_path.clone(),
-                source: rollback_source,
-            }),
-        };
-    }
-
-    std::fs::remove_file(&plan.backup_path).map_err(|source| {
-        CbzRebuildFinalizeError::RemoveBackup {
-            backup_path: plan.backup_path.clone(),
-            source,
-        }
-    })?;
-
-    Ok(())
 }

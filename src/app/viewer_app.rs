@@ -1,30 +1,30 @@
 use std::path::Path;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 use std::time::{Instant, SystemTime};
 
 use eframe::egui::{self, Key};
-#[cfg(windows)]
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::domain::app_settings::{
-    normalize_external_tool_executable, AppSettings, ReadingDirection, ViewerQuality,
+    AppSettings, ReadingDirection, ViewerQuality, normalize_external_tool_executable,
 };
 use crate::domain::archive::{BookId, BookMeta};
 use crate::domain::archive_settings::{SettingsStore, SpreadMode};
-use crate::domain::performance::{PerformanceResources, PerformanceSettingsResolved};
-use crate::infra::archive::{book_source_kind, folder::FolderImageReader, BookSourceKind};
-use crate::infra::cache::disk::DiskCache;
-use crate::infra::ipc::{
-    AdjacentBooksKind, ImageOrderSnapshot, IpcClient, LibraryToViewer, ViewerBookState,
+use crate::domain::ipc_contract::{
+    AdjacentBook, AdjacentBooksKind, ImageOrderSnapshot, LibraryToViewer, ViewerBookState,
     ViewerFavoriteState, ViewerToLibrary,
 };
+use crate::domain::performance::{PerformanceResources, PerformanceSettingsResolved};
+use crate::infra::app_settings_resolution::resolve_performance_settings;
+use crate::infra::archive::{BookSourceKind, book_source_kind, folder::FolderImageReader};
+use crate::infra::cache::disk::DiskCache;
+use crate::infra::ipc::IpcClient;
 use crate::infra::page_map::viewer_bootstrap::bootstrap_viewer_page_map;
 use crate::infra::worker::external_tool_worker::{
     ExternalToolRunRequest, ExternalToolRunResult, ExternalToolWorker,
 };
-use crate::ui::i18n::{tr, TextKey};
+use crate::ui::i18n::{TextKey, tr};
 use crate::ui::thumb_cache::load_disk_thumb_texture;
 use crate::ui::viewer::{
     self, BoundaryPreviewDirection, ExternalToolButtonModel, ExternalToolToolbarState,
@@ -34,18 +34,11 @@ use crate::ui::viewer::{
 use crate::util::archive_path::is_supported_archive_path;
 use crate::{LaunchOptions, StartupMode};
 
-use super::ui_helpers::{dialog_button_row, setup_style, DialogButtonSpec};
+use super::ui_helpers::{DialogButtonSpec, dialog_button_row, setup_style};
 use crate::ui::{icons, theme};
 
 #[cfg(windows)]
-use windows::Win32::{
-    Foundation::HWND,
-    Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST},
-    UI::WindowsAndMessaging::{
-        AdjustWindowRectEx, GetWindowLongPtrW, GetWindowPlacement, IsZoomed, SetWindowPlacement,
-        GWL_EXSTYLE, GWL_STYLE, SW_SHOWMAXIMIZED, WINDOWPLACEMENT, WINDOW_EX_STYLE, WINDOW_STYLE,
-    },
-};
+use crate::platform::windows_window::StartupRestoreRectAdjustment;
 
 const READING_SESSION_ACK_TIMEOUT: Duration = Duration::from_millis(800);
 const LIBRARY_IPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -84,6 +77,7 @@ pub struct ViewerApp {
     pending_startup_maximize: bool,
     startup_maximize_sent: bool,
     startup_maximize_frame_count: u32,
+    skip_ui_this_frame: bool,
     startup_restore_rect_adjustment_pending: bool,
     startup_restore_rect_adjustment_attempts: u8,
     saved_viewer_win_pos: Option<[f32; 2]>,
@@ -429,7 +423,7 @@ impl ViewerApp {
             crate::infra::system_resources::detect_pc_resources();
         let app_settings = AppSettings::load_with_resources(&performance_resources);
         let performance_settings =
-            app_settings.normalized_performance_settings(&performance_resources);
+            resolve_performance_settings(&app_settings, &performance_resources);
         tracing::debug!(
             "[viewer.settings.applied] source=app_settings viewer_quality={:?} viewer_l1_vram_cache_max_mb={} viewer_l2_ram_cache_max_mib={} viewer_background_worker_count={} spad_ram_ratio_percent={}",
             app_settings.viewer_quality,
@@ -461,7 +455,8 @@ impl ViewerApp {
                                         break;
                                     }
                                     tracing::debug!(request = ?request, "viewer.ipc.writer.send.done");
-                                    match conn.recv_from_library() {
+                                    let receive_result = conn.recv_from_library();
+                                    match receive_result {
                                         Ok(msg) => {
                                             if event_tx.send(IpcEvent::Message(msg)).is_err() {
                                                 break;
@@ -621,6 +616,7 @@ impl ViewerApp {
             pending_startup_maximize,
             startup_maximize_sent: false,
             startup_maximize_frame_count: 0,
+            skip_ui_this_frame: false,
             startup_restore_rect_adjustment_pending,
             startup_restore_rect_adjustment_attempts: 0,
             saved_viewer_win_pos,
@@ -639,6 +635,7 @@ impl ViewerApp {
         path: &Path,
         book_state: ViewerBookState,
         force_page_map_unavailable: bool,
+        spad_targets: Option<(Option<AdjacentBook>, Option<AdjacentBook>)>,
     ) -> anyhow::Result<()> {
         let started_at = Instant::now();
         self.send_reading_session_finished(false);
@@ -647,6 +644,7 @@ impl ViewerApp {
             "viewer.ipc.apply_navigate.start"
         );
         self.state.close_boundary_preview();
+        self.clear_pending_spad_request();
         let entry = book_meta_from_path(path);
         let file_settings = self.settings.get(&entry.path);
         let effective_quality = file_settings
@@ -700,18 +698,23 @@ impl ViewerApp {
             let current_display_w = viewport_size.x.max(1.0) as u32;
             let current_display_h = viewport_size.y.max(1.0) as u32;
             let current_max_tex_side = viewer::max_texture_side_from_context(ctx);
-            self.state
-                .promote_spad_ready_pages_to_l1_future(
-                    ctx,
-                    spad_ready_pages,
-                    current_display_w,
-                    current_display_h,
-                    current_max_tex_side,
-                );
+            self.state.promote_spad_ready_pages_to_l1_future(
+                ctx,
+                spad_ready_pages,
+                current_display_w,
+                current_display_h,
+                current_max_tex_side,
+            );
         }
         self.book_state = book_state;
         self.favorite_state = book_state.favorite_state;
-        self.send_spad_request();
+        // DeleteAndNext は遷移結果と同じ IPC 応答で SPAD 候補を受け取る。
+        // Library UI の非同期反映を待つ間に、前後本を再照会しない。
+        if let Some((spad_prev, spad_next)) = spad_targets {
+            self.configure_spad_targets(spad_prev, spad_next);
+        } else {
+            self.send_spad_request();
+        }
         set_viewer_title(ctx, path);
         tracing::info!(
             target_path = %path.display(),
@@ -868,6 +871,35 @@ impl ViewerApp {
         *pending_spad_request_id = Some(request_id);
     }
 
+    fn clear_pending_spad_request(&mut self) {
+        if let ViewerMode::Library {
+            pending_spad_request_id,
+            ..
+        } = &mut self.mode
+        {
+            *pending_spad_request_id = None;
+        }
+    }
+
+    fn configure_spad_targets(&mut self, prev: Option<AdjacentBook>, next: Option<AdjacentBook>) {
+        let prev_layout_settings = prev.as_ref().map(|book| {
+            let settings = self.settings.get(&book.path);
+            viewer::SpadTargetLayoutSettings {
+                spread_setting: settings.spread_mode,
+                cover_blank: settings.cover_blank,
+            }
+        });
+        let next_layout_settings = next.as_ref().map(|book| {
+            let settings = self.settings.get(&book.path);
+            viewer::SpadTargetLayoutSettings {
+                spread_setting: settings.spread_mode,
+                cover_blank: settings.cover_blank,
+            }
+        });
+        self.state
+            .configure_spad_targets(prev, next, prev_layout_settings, next_layout_settings);
+    }
+
     fn book_meta_for_preview_path(path: &Path) -> Option<BookMeta> {
         let metadata = std::fs::metadata(path).ok()?;
         let title = path
@@ -981,6 +1013,7 @@ impl ViewerApp {
                         request_id,
                         next_path,
                         next_book_state,
+                        spad_targets,
                         ..
                     } => {
                         if self.is_current_library_request(request_id) {
@@ -995,12 +1028,17 @@ impl ViewerApp {
                                     if let (Some(path), Some(book_state)) =
                                         (next_path, next_book_state)
                                     {
-                                        if let Err(e) = self.reopen_to_path(
+                                        let reopen_result = self.reopen_to_path(
                                             ctx,
                                             path.as_path(),
                                             book_state,
                                             false,
-                                        ) {
+                                            spad_targets.map(|targets| {
+                                                let targets = *targets;
+                                                (targets.prev, targets.next)
+                                            }),
+                                        );
+                                        if let Err(e) = reopen_result {
                                             tracing::warn!(error = %e, "ipc delete-next apply failed");
                                         }
                                     } else {
@@ -1034,9 +1072,9 @@ impl ViewerApp {
                                 self.state.discard_reading_session_notification();
                             }
                             self.state.close_boundary_preview();
-                            if let Err(e) =
-                                self.reopen_to_path(ctx, path.as_path(), book_state, false)
-                            {
+                            let reopen_result =
+                                self.reopen_to_path(ctx, path.as_path(), book_state, false, None);
+                            if let Err(e) = reopen_result {
                                 tracing::warn!(error = %e, "ipc navigate apply failed");
                             }
                             self.clear_pending_library_action();
@@ -1167,8 +1205,12 @@ impl ViewerApp {
                                 continue;
                             };
                             let candidate_path = match probe {
-                                BoundaryPreviewDirection::Previous => prev.as_ref().map(|book| book.path.as_path()),
-                                BoundaryPreviewDirection::Next => next.as_ref().map(|book| book.path.as_path()),
+                                BoundaryPreviewDirection::Previous => {
+                                    prev.as_ref().map(|book| book.path.as_path())
+                                }
+                                BoundaryPreviewDirection::Next => {
+                                    next.as_ref().map(|book| book.path.as_path())
+                                }
                             };
                             let Some(path) = candidate_path else {
                                 let _ = self.state.boundary_preview_clear_if_matches(request_id);
@@ -1202,26 +1244,7 @@ impl ViewerApp {
                             if !is_current {
                                 continue;
                             }
-                            let prev_layout_settings = prev.as_ref().map(|book| {
-                                let settings = self.settings.get(&book.path);
-                                viewer::SpadTargetLayoutSettings {
-                                    spread_setting: settings.spread_mode,
-                                    cover_blank: settings.cover_blank,
-                                }
-                            });
-                            let next_layout_settings = next.as_ref().map(|book| {
-                                let settings = self.settings.get(&book.path);
-                                viewer::SpadTargetLayoutSettings {
-                                    spread_setting: settings.spread_mode,
-                                    cover_blank: settings.cover_blank,
-                                }
-                            });
-                            self.state.configure_spad_targets(
-                                prev.clone(),
-                                next.clone(),
-                                prev_layout_settings,
-                                next_layout_settings,
-                            );
+                            self.configure_spad_targets(prev, next);
                             if let ViewerMode::Library {
                                 pending_spad_request_id,
                                 ..
@@ -1398,7 +1421,9 @@ impl ViewerApp {
         }
         book_state.start_page = Some(start_page);
         self.image_order_snapshot_applied = true;
-        if let Err(error) = self.reopen_to_path(ctx, snapshot.folder.as_path(), book_state, true) {
+        if let Err(error) =
+            self.reopen_to_path(ctx, snapshot.folder.as_path(), book_state, true, None)
+        {
             tracing::warn!(
                 error = %error,
                 path = %snapshot.folder.display(),
@@ -2031,20 +2056,6 @@ impl ViewerApp {
         session.save();
     }
 
-    #[cfg(windows)]
-    fn main_window_hwnd(frame: &eframe::Frame) -> Option<HWND> {
-        let handle = frame.window_handle().ok()?;
-        match handle.as_raw() {
-            RawWindowHandle::Win32(h) => Some(HWND(h.hwnd.get() as *mut core::ffi::c_void)),
-            _ => None,
-        }
-    }
-
-    #[cfg(not(windows))]
-    fn main_window_hwnd(_frame: &eframe::Frame) -> Option<()> {
-        None
-    }
-
     fn maybe_apply_startup_restore_rect_adjustment(
         &mut self,
         ctx: &egui::Context,
@@ -2071,32 +2082,23 @@ impl ViewerApp {
 
         #[cfg(windows)]
         {
-            let Some(hwnd) = Self::main_window_hwnd(frame) else {
-                ctx.request_repaint();
-                return;
-            };
             let egui_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
-            let mut placement = WINDOWPLACEMENT {
-                length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
-                ..Default::default()
-            };
-            let placement_ok = unsafe { GetWindowPlacement(hwnd, &mut placement).is_ok() };
-            let win32_zoomed = unsafe { IsZoomed(hwnd).as_bool() };
-            let show_maximized = placement.showCmd == SW_SHOWMAXIMIZED.0 as u32;
-            if !(egui_maximized && placement_ok && win32_zoomed && show_maximized) {
-                ctx.request_repaint();
-                return;
-            }
-            tracing::debug!(
+            match crate::platform::windows_window::adjust_maximized_viewer_restore_rect(
+                frame,
                 egui_maximized,
-                placement_ok,
-                win32_zoomed,
-                show_cmd = placement.showCmd,
-                "viewer.startup_restore_rect.adjustment.ready"
-            );
-            if self.apply_startup_restore_rect_adjustment_windows(hwnd, placement) {
-                self.startup_restore_rect_adjustment_pending = false;
-                return;
+                self.saved_viewer_win_pos,
+                self.saved_viewer_win_size,
+            ) {
+                StartupRestoreRectAdjustment::WindowHandleUnavailable
+                | StartupRestoreRectAdjustment::MaximizedStateNotReady => {
+                    ctx.request_repaint();
+                    return;
+                }
+                StartupRestoreRectAdjustment::Applied => {
+                    self.startup_restore_rect_adjustment_pending = false;
+                    return;
+                }
+                StartupRestoreRectAdjustment::ApplyFailed => {}
             }
         }
         #[cfg(not(windows))]
@@ -2115,116 +2117,6 @@ impl ViewerApp {
         } else {
             ctx.request_repaint();
         }
-    }
-
-    #[cfg(windows)]
-    fn apply_startup_restore_rect_adjustment_windows(
-        &self,
-        hwnd: HWND,
-        mut placement: WINDOWPLACEMENT,
-    ) -> bool {
-        let (Some(saved_pos), Some(saved_size)) =
-            (self.saved_viewer_win_pos, self.saved_viewer_win_size)
-        else {
-            tracing::warn!("viewer.startup_restore_rect.adjustment.saved_rect.unavailable");
-            return false;
-        };
-
-        // SAFETY: `hwnd` は現在の viewer window handle で、style 読み取りは副作用を持たない。
-        let style_bits = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) };
-        // SAFETY: `hwnd` は現在の viewer window handle で、extended style 読み取りは副作用を持たない。
-        let exstyle_bits = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
-        let style = WINDOW_STYLE(style_bits as u32);
-        let exstyle = WINDOW_EX_STYLE(exstyle_bits as u32);
-        let inner_w = saved_size[0].round().max(1.0) as i32;
-        let inner_h = saved_size[1].round().max(1.0) as i32;
-        let mut rect = windows::Win32::Foundation::RECT {
-            left: 0,
-            top: 0,
-            right: inner_w,
-            bottom: inner_h,
-        };
-        // SAFETY:
-        // `rect` は有効な入出力バッファで、style / exstyle は直前に同一 hwnd から取得した値。
-        unsafe {
-            if AdjustWindowRectEx(&mut rect, style, false, exstyle).is_err() {
-                tracing::warn!("viewer.startup_restore_rect.adjustment.adjust_window_rect.failed");
-                return false;
-            }
-        }
-        let outer_w = rect.right - rect.left;
-        let outer_h = rect.bottom - rect.top;
-        if outer_w <= 0 || outer_h <= 0 {
-            tracing::warn!(
-                outer_w,
-                outer_h,
-                "viewer.startup_restore_rect.adjustment.invalid_outer_size"
-            );
-            return false;
-        }
-        let mut work_offset_x = 0i32;
-        let mut work_offset_y = 0i32;
-        // SAFETY:
-        // `hwnd` は有効 window handle で、`monitor_info.cbSize` は Win32 要件どおり設定済み。
-        unsafe {
-            let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-            if !monitor.0.is_null() {
-                let mut monitor_info = MONITORINFO {
-                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                    ..Default::default()
-                };
-                if GetMonitorInfoW(monitor, &mut monitor_info).as_bool() {
-                    work_offset_x = monitor_info.rcWork.left - monitor_info.rcMonitor.left;
-                    work_offset_y = monitor_info.rcWork.top - monitor_info.rcMonitor.top;
-                } else {
-                    tracing::warn!(
-                        "viewer.startup_restore_rect.adjustment.monitor_info.unavailable"
-                    );
-                }
-            } else {
-                tracing::warn!("viewer.startup_restore_rect.adjustment.monitor.unavailable");
-            }
-        }
-        let left = saved_pos[0].round() as i32 - work_offset_x;
-        let top = saved_pos[1].round() as i32 - work_offset_y;
-        let before = placement.rcNormalPosition;
-        placement.rcNormalPosition.left = left;
-        placement.rcNormalPosition.top = top;
-        placement.rcNormalPosition.right = left + outer_w;
-        placement.rcNormalPosition.bottom = top + outer_h;
-
-        tracing::debug!(
-            saved_pos = ?saved_pos,
-            saved_size = ?saved_size,
-            show_cmd = placement.showCmd,
-            before_left = before.left,
-            before_top = before.top,
-            before_right = before.right,
-            before_bottom = before.bottom,
-            work_offset_x,
-            work_offset_y,
-            after_left = placement.rcNormalPosition.left,
-            after_top = placement.rcNormalPosition.top,
-            after_right = placement.rcNormalPosition.right,
-            after_bottom = placement.rcNormalPosition.bottom,
-            "viewer.startup_restore_rect.adjustment.apply"
-        );
-        // SAFETY: `placement` は `GetWindowPlacement` 由来の構造体を更新したもので、同じ hwnd へ戻す。
-        unsafe {
-            if SetWindowPlacement(hwnd, &placement).is_err() {
-                tracing::warn!(
-                    "viewer.startup_restore_rect.adjustment.set_window_placement.failed"
-                );
-                return false;
-            }
-        }
-        tracing::debug!("viewer.startup_restore_rect.adjustment.applied");
-        true
-    }
-
-    #[cfg(not(windows))]
-    fn apply_startup_restore_rect_adjustment_windows(&self, _frame: &eframe::Frame) -> bool {
-        false
     }
 }
 
@@ -2265,7 +2157,8 @@ fn validate_image_order_snapshot(snapshot: &ImageOrderSnapshot) -> Option<usize>
 }
 
 impl eframe::App for ViewerApp {
-    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.skip_ui_this_frame = false;
         if self.pending_startup_maximize && !self.startup_maximize_sent {
             self.startup_maximize_frame_count = self.startup_maximize_frame_count.saturating_add(1);
             if self.startup_maximize_frame_count >= STARTUP_MAXIMIZE_TRIGGER_FRAME {
@@ -2285,6 +2178,7 @@ impl eframe::App for ViewerApp {
             self.send_reading_session_finished(true);
             self.state.close_boundary_preview();
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            self.skip_ui_this_frame = true;
             return;
         }
         if ctx.input(|i| i.key_pressed(Key::Escape)) {
@@ -2301,6 +2195,7 @@ impl eframe::App for ViewerApp {
             } else if self.opened_as_fullscreen {
                 self.send_reading_session_finished(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.skip_ui_this_frame = true;
                 return;
             } else if self.is_fullscreen {
                 self.is_fullscreen = false;
@@ -2308,6 +2203,7 @@ impl eframe::App for ViewerApp {
             } else {
                 self.send_reading_session_finished(true);
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                self.skip_ui_this_frame = true;
                 return;
             }
         }
@@ -2315,6 +2211,13 @@ impl eframe::App for ViewerApp {
         self.poll_external_tool_results(ctx);
         self.tick_external_tool_ui_state();
         self.schedule_external_tool_state_repaint(ctx);
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if self.skip_ui_this_frame {
+            return;
+        }
+        let ctx = ui.ctx().clone();
 
         let mut cover_blank_changed: Option<bool> = None;
         let mut spread_changed: Option<SpreadMode> = None;
@@ -2326,16 +2229,14 @@ impl eframe::App for ViewerApp {
         let external_tools = self.external_tool_button_models();
         let external_tool_state = self.external_tool_toolbar_state_for_ui();
 
-        #[allow(deprecated)]
         let panel = if self.is_fullscreen {
             egui::CentralPanel::default()
                 .frame(egui::Frame::default().inner_margin(egui::Margin::same(0)))
         } else {
             egui::CentralPanel::default()
         };
-        #[allow(deprecated)]
         {
-            panel.show(ctx, |ui| {
+            panel.show(ui, |ui| {
                 let action = viewer::show(
                     ui,
                     viewer::ViewerShowContext {
@@ -2370,7 +2271,7 @@ impl eframe::App for ViewerApp {
                 match action {
                     ViewerAction::None => {}
                     ViewerAction::ToggleFullscreen => {
-                        self.toggle_fullscreen(ctx);
+                        self.toggle_fullscreen(&ctx);
                     }
                     ViewerAction::RequestDelete => {
                         self.begin_delete_dialog();
@@ -2463,13 +2364,11 @@ impl eframe::App for ViewerApp {
         if let Some(v) = quality_changed {
             self.settings.set_quality_override(path, v);
         }
-        self.show_delete_dialog(ctx);
-        self.show_page_range_delete_dialog(ctx);
-        self.capture_viewer_window_state(ctx);
-        self.maybe_apply_startup_restore_rect_adjustment(ctx, frame);
+        self.show_delete_dialog(&ctx);
+        self.show_page_range_delete_dialog(&ctx);
+        self.capture_viewer_window_state(&ctx);
+        self.maybe_apply_startup_restore_rect_adjustment(&ctx, frame);
     }
-
-    fn ui(&mut self, _ui: &mut egui::Ui, _frame: &mut eframe::Frame) {}
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.send_reading_session_finished(true);

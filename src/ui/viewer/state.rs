@@ -9,20 +9,22 @@ use eframe::egui;
 
 use crate::domain::app_settings::{ReadingDirection, ViewerQuality};
 use crate::domain::archive::{BookId, BookMeta};
-use crate::domain::archive_settings::{clamp_slideshow_interval_secs, SpreadMode};
-use crate::domain::performance::{mib_to_bytes, split_mib_evenly, PerformanceSettingsResolved};
+use crate::domain::archive_settings::{SpreadMode, clamp_slideshow_interval_secs};
+use crate::domain::ipc_contract::{AdjacentBook, ViewerBookState};
+use crate::domain::performance::{PerformanceSettingsResolved, mib_to_bytes, split_mib_evenly};
 use crate::infra::archive::{viewer_page_display_labels, viewer_page_entry_names};
 use crate::infra::image::decode as img;
-use crate::infra::ipc::AdjacentBook;
 use crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode;
 use crate::infra::page_map::viewer_bootstrap::try_load_existing_viewer_page_map_for_spad;
 use crate::infra::worker::viewer_loader::{
     ViewerLoadRequest, ViewerLoader, ViewerResult, ViewerResultKind,
 };
+use crate::repaint::RepaintNotifier;
 use crate::ui::thumb_cache::LoadedDiskThumb;
 use crate::util::path_eq::paths_equivalent_for_selection;
 
-use super::auto_spread_plan::{build_auto_spread_plan, AutoSpreadPlan};
+use super::PageContent;
+use super::auto_spread_plan::{AutoSpreadPlan, build_auto_spread_plan};
 use super::decode_layout::{request_display_width_for_pair, static_rgba_bytes_for_decode};
 #[cfg(debug_assertions)]
 use super::gpu_texture_history::GpuTextureHistorySnapshot;
@@ -31,8 +33,8 @@ use super::gpu_warmup_cache::GpuWarmupCache;
 #[cfg(debug_assertions)]
 use super::gpu_warmup_cache::GpuWarmupCacheSnapshot;
 use super::gpu_warmup_planner::{
-    plan_gpu_warmup, resolve_future_candidate, GpuWarmupCandidateSnapshot, GpuWarmupPlanSnapshot,
-    RgbaReadyEntrySnapshot,
+    GpuWarmupCandidateSnapshot, GpuWarmupPlanSnapshot, RgbaReadyEntrySnapshot, plan_gpu_warmup,
+    resolve_future_candidate,
 };
 use super::streaming_cache::SimpleStreamingCachePolicy;
 use super::worker_manager::{
@@ -40,11 +42,10 @@ use super::worker_manager::{
     ViewerWorkerManagerSnapshot,
 };
 use super::working_set::{
-    page_render_signature_rank, BgAdmissionState, Direction, DisplayRequirement,
-    GpuTextureEntrySnapshot, PageRenderSignatureKey, RenderSignature, WorkingSetAnchorPage,
-    WorkingSetPage, WorkingSetPlan,
+    BgAdmissionState, Direction, DisplayRequirement, GpuTextureEntrySnapshot,
+    PageRenderSignatureKey, RenderSignature, WorkingSetAnchorPage, WorkingSetPage, WorkingSetPlan,
+    page_render_signature_rank,
 };
-use super::PageContent;
 
 const PREFETCH_DEEP_IDLE_DELAY: Duration = Duration::from_millis(250);
 const FOLLOW_LATEST_THRESHOLD: Duration = Duration::from_millis(180);
@@ -342,7 +343,7 @@ struct SpadResolvedDecodeTarget {
 
 struct SpadTargetState {
     path: PathBuf,
-    _book_state: crate::infra::ipc::ViewerBookState,
+    _book_state: ViewerBookState,
     page_count: Option<u32>,
     entry_page: u32,
     layout_hint: Option<SpadTargetLayoutHint>,
@@ -1465,7 +1466,7 @@ impl ViewerState {
         self.display_assets.gpu_warmup_cache.clear(reason);
     }
 
-pub fn configure_spad_targets(
+    pub fn configure_spad_targets(
         &mut self,
         prev: Option<AdjacentBook>,
         next: Option<AdjacentBook>,
@@ -1517,8 +1518,7 @@ pub fn configure_spad_targets(
                 reason
             );
         }
-        if !cancelled_any && (self.spad.prev.is_some() || self.spad.next.is_some())
-        {
+        if !cancelled_any && (self.spad.prev.is_some() || self.spad.next.is_some()) {
             spad_trace_debug!(
                 "[spad-cancel] session={} generation={} side=none target=- request_id=0 reason={}",
                 self.spad.session,
@@ -1618,8 +1618,12 @@ pub fn configure_spad_targets(
             SpreadMode::Spread => true,
         };
         let repaint_ctx = ctx.clone();
+        let repaint = {
+            let ctx = ctx.clone();
+            RepaintNotifier::new(move || ctx.request_repaint())
+        };
         let loader = Arc::new(
-            ViewerLoader::spawn(ctx, background_worker_count)
+            ViewerLoader::spawn(repaint, background_worker_count)
                 .map_err(|e| format!("viewer loader init failed: {e}"))?,
         );
         let worker_manager = ViewerWorkerManagerHandle::spawn(Arc::clone(&loader), repaint_ctx);
@@ -2539,31 +2543,34 @@ pub fn configure_spad_targets(
                     }
                 }
                 GpuTextureHitSource::Warmup => {
-                    if let Some((texture, estimated_bytes)) = self
+                    match self
                         .display_assets
                         .gpu_warmup_cache
                         .promote_to_history(&hit.key)
                     {
-                        let _ = self.display_assets.gpu_texture_history.insert(
-                            hit.key,
-                            texture,
-                            estimated_bytes,
-                        );
-                        self.record_committed_gpu_texture_hit(
-                            result.view_idx,
-                            left.page,
-                            right.page,
-                            "left",
-                            hit,
-                        );
-                        left_committed = true;
-                    } else {
-                        tracing::warn!(
-                            page = hit.key.page,
-                            source = hit.source.as_str(),
-                            reason = "warmup_missing_at_commit",
-                            "gpu-warmup-promote"
-                        );
+                        Some((texture, estimated_bytes)) => {
+                            let _ = self.display_assets.gpu_texture_history.insert(
+                                hit.key,
+                                texture,
+                                estimated_bytes,
+                            );
+                            self.record_committed_gpu_texture_hit(
+                                result.view_idx,
+                                left.page,
+                                right.page,
+                                "left",
+                                hit,
+                            );
+                            left_committed = true;
+                        }
+                        None => {
+                            tracing::warn!(
+                                page = hit.key.page,
+                                source = hit.source.as_str(),
+                                reason = "warmup_missing_at_commit",
+                                "gpu-warmup-promote"
+                            );
+                        }
                     }
                 }
             }
@@ -2599,31 +2606,34 @@ pub fn configure_spad_targets(
                     }
                 }
                 GpuTextureHitSource::Warmup => {
-                    if let Some((texture, estimated_bytes)) = self
+                    match self
                         .display_assets
                         .gpu_warmup_cache
                         .promote_to_history(&hit.key)
                     {
-                        let _ = self.display_assets.gpu_texture_history.insert(
-                            hit.key,
-                            texture,
-                            estimated_bytes,
-                        );
-                        self.record_committed_gpu_texture_hit(
-                            result.view_idx,
-                            left.page,
-                            right.page,
-                            "right",
-                            hit,
-                        );
-                        right_committed = true;
-                    } else {
-                        tracing::warn!(
-                            page = hit.key.page,
-                            source = hit.source.as_str(),
-                            reason = "warmup_missing_at_commit",
-                            "gpu-warmup-promote"
-                        );
+                        Some((texture, estimated_bytes)) => {
+                            let _ = self.display_assets.gpu_texture_history.insert(
+                                hit.key,
+                                texture,
+                                estimated_bytes,
+                            );
+                            self.record_committed_gpu_texture_hit(
+                                result.view_idx,
+                                left.page,
+                                right.page,
+                                "right",
+                                hit,
+                            );
+                            right_committed = true;
+                        }
+                        None => {
+                            tracing::warn!(
+                                page = hit.key.page,
+                                source = hit.source.as_str(),
+                                reason = "warmup_missing_at_commit",
+                                "gpu-warmup-promote"
+                            );
+                        }
                     }
                 }
             }
@@ -2909,8 +2919,8 @@ pub fn configure_spad_targets(
         max_tex_side: u32,
     ) {
         let (_, page_right) = self.current_view_pages(self.persistent.displayed_page);
-        let effective_spread =
-            page_right.is_some() || self.is_leading_cover_blank_spread(self.persistent.displayed_page);
+        let effective_spread = page_right.is_some()
+            || self.is_leading_cover_blank_spread(self.persistent.displayed_page);
         let page_decode_w = request_display_width_for_pair(
             self.resolved_full_equivalent_area(display_w, display_h).0,
             effective_spread,
@@ -3099,7 +3109,9 @@ pub fn configure_spad_targets(
         let decode_w = layout_hint
             .map(|hint| request_display_width_for_pair(full_equivalent_w, hint.effective_spread))
             .unwrap_or(current_decode_w);
-        let decode_h = layout_hint.map(|_| full_equivalent_h).unwrap_or(current_decode_h);
+        let decode_h = layout_hint
+            .map(|_| full_equivalent_h)
+            .unwrap_or(current_decode_h);
         SpadResolvedDecodeTarget {
             source,
             effective_spread,
@@ -3119,7 +3131,10 @@ pub fn configure_spad_targets(
         let total_bytes = self.total_l2_rgba_budget_bytes();
         let current_effective_spread = current_decode_w != full_equivalent_w;
         let prev_decode_target = self.resolve_spad_decode_target(
-            self.spad.prev.as_ref().and_then(|target| target.layout_hint),
+            self.spad
+                .prev
+                .as_ref()
+                .and_then(|target| target.layout_hint),
             full_equivalent_w,
             full_equivalent_h,
             current_decode_w,
@@ -3127,7 +3142,10 @@ pub fn configure_spad_targets(
             current_effective_spread,
         );
         let next_decode_target = self.resolve_spad_decode_target(
-            self.spad.next.as_ref().and_then(|target| target.layout_hint),
+            self.spad
+                .next
+                .as_ref()
+                .and_then(|target| target.layout_hint),
             full_equivalent_w,
             full_equivalent_h,
             current_decode_w,
@@ -3144,9 +3162,8 @@ pub fn configure_spad_targets(
             .next
             .as_ref()
             .map_or(0, |_| next_decode_target.two_page_rgba_bytes);
-        let extra_spad_bytes = total_bytes
-            .saturating_mul(self.request.spad_ram_ratio_percent as usize)
-            / 100;
+        let extra_spad_bytes =
+            total_bytes.saturating_mul(self.request.spad_ram_ratio_percent as usize) / 100;
         let prev_extra_budget_bytes = if self.spad.prev.is_some() {
             extra_spad_bytes
         } else {
@@ -3157,10 +3174,8 @@ pub fn configure_spad_targets(
         } else {
             0
         };
-        let prev_total_budget_bytes =
-            prev_guaranteed_bytes.saturating_add(prev_extra_budget_bytes);
-        let next_total_budget_bytes =
-            next_guaranteed_bytes.saturating_add(next_extra_budget_bytes);
+        let prev_total_budget_bytes = prev_guaranteed_bytes.saturating_add(prev_extra_budget_bytes);
+        let next_total_budget_bytes = next_guaranteed_bytes.saturating_add(next_extra_budget_bytes);
         // The two-page guarantees are outside the L2/SPAD percentage allocation.
         let reserved = prev_extra_budget_bytes.saturating_add(next_extra_budget_bytes);
         let minimum_l2_bytes = 1024 * 1024;
@@ -3260,7 +3275,9 @@ pub fn configure_spad_targets(
         }
         let Some(page_count) = target.page_count.filter(|page_count| *page_count > 0) else {
             target.scheduled_pages.push(target.entry_page);
-            target.scheduled_pages.push(target.entry_page.saturating_add(1));
+            target
+                .scheduled_pages
+                .push(target.entry_page.saturating_add(1));
             return;
         };
         let entry = if target.entry_page < page_count {
@@ -3367,7 +3384,11 @@ pub fn configure_spad_targets(
             }
             Self::ensure_spad_scheduled_pages(target);
             loop {
-                let Some(page) = target.scheduled_pages.get(target.next_dispatch_index).copied() else {
+                let Some(page) = target
+                    .scheduled_pages
+                    .get(target.next_dispatch_index)
+                    .copied()
+                else {
                     return false;
                 };
                 if target.ready_pages.contains_key(&page) || target.failed_pages.contains(&page) {
@@ -3399,13 +3420,12 @@ pub fn configure_spad_targets(
             target_budget_bytes,
             "spad.dispatch.decode_size"
         );
-        let render_signature =
-            RenderSignature::from_decode_request(
-                quality,
-                decode_target.decode_w,
-                decode_target.decode_h,
-                max_tex_side,
-            );
+        let render_signature = RenderSignature::from_decode_request(
+            quality,
+            decode_target.decode_w,
+            decode_target.decode_h,
+            max_tex_side,
+        );
         let request = ViewerLoadRequest {
             path: Arc::from(path.as_path()),
             view_idx: page,
@@ -3423,15 +3443,18 @@ pub fn configure_spad_targets(
             SpadSide::Next => self.request.loader.send_spad_next_request(request),
             SpadSide::Prev => self.request.loader.send_spad_prev_request(request),
         };
-        self.set_spad_inflight(side, SpadInflightRequest {
-            request_id,
-            session,
-            generation,
+        self.set_spad_inflight(
             side,
-            path: path.clone(),
-            page,
-            render_signature,
-        });
+            SpadInflightRequest {
+                request_id,
+                session,
+                generation,
+                side,
+                path: path.clone(),
+                page,
+                render_signature,
+            },
+        );
         spad_trace_debug!(
             "[spad-dispatch] session={} generation={} side={} page={} path={} request_id={}",
             session,
@@ -3665,11 +3688,20 @@ pub fn configure_spad_targets(
 
     fn handle_spad_result(&mut self, expected_side: SpadSide, result: ViewerResult) {
         let Some(inflight) = self.spad_inflight(expected_side) else {
-            spad_trace_debug!("[spad-drop] reason=no_inflight side={} request_id={}", expected_side.as_str(), result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=no_inflight side={} request_id={}",
+                expected_side.as_str(),
+                result.request_id
+            );
             return;
         };
         if inflight.side != expected_side {
-            spad_trace_debug!("[spad-drop] reason=side expected_side={} inflight_side={} request_id={}", expected_side.as_str(), inflight.side.as_str(), result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=side expected_side={} inflight_side={} request_id={}",
+                expected_side.as_str(),
+                inflight.side.as_str(),
+                result.request_id
+            );
             return;
         }
         if inflight.request_id != result.request_id {
@@ -3702,15 +3734,27 @@ pub fn configure_spad_targets(
             return;
         }
         let Some(inflight) = self.take_spad_inflight(expected_side) else {
-            spad_trace_debug!("[spad-drop] reason=no_inflight_after_match side={} request_id={}", expected_side.as_str(), result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=no_inflight_after_match side={} request_id={}",
+                expected_side.as_str(),
+                result.request_id
+            );
             return;
         };
         let Some(target) = self.spad_target_mut(inflight.side) else {
-            spad_trace_debug!("[spad-drop] reason=target_missing side={} request_id={}", expected_side.as_str(), result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=target_missing side={} request_id={}",
+                expected_side.as_str(),
+                result.request_id
+            );
             return;
         };
         if target.path != inflight.path {
-            spad_trace_debug!("[spad-drop] reason=target_mismatch side={} request_id={}", expected_side.as_str(), result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=target_mismatch side={} request_id={}",
+                expected_side.as_str(),
+                result.request_id
+            );
             return;
         }
         if result.page_count > 0 && target.page_count != Some(result.page_count) {
@@ -3749,12 +3793,18 @@ pub fn configure_spad_targets(
         }
         let Some(frames) = result.left.filter(|_| !result.left_is_animation_stream) else {
             Self::mark_spad_page_failed(target, inflight.page);
-            spad_trace_debug!("[spad-drop] reason=decode_missing request_id={}", result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=decode_missing request_id={}",
+                result.request_id
+            );
             return;
         };
         let Some(bytes) = RgbaPageCache::static_rgba_bytes(frames.as_ref()) else {
             Self::mark_spad_page_failed(target, inflight.page);
-            spad_trace_debug!("[spad-drop] reason=non_static request_id={}", result.request_id);
+            spad_trace_debug!(
+                "[spad-drop] reason=non_static request_id={}",
+                result.request_id
+            );
             return;
         };
         if target.current_bytes.saturating_add(bytes) > target.max_bytes {
@@ -3895,14 +3945,20 @@ pub fn configure_spad_targets(
         let ready_batch_generation = spad_ready_pages.first().map(|ready| ready.generation);
         if let Some(page_count) = spad_ready_pages
             .iter()
-            .filter(|ready| paths_equivalent_for_selection(&ready.target_path, &self.persistent.entry.path))
+            .filter(|ready| {
+                paths_equivalent_for_selection(&ready.target_path, &self.persistent.entry.path)
+            })
             .filter(|ready| Some(ready.session) == ready_batch_session)
             .filter(|ready| Some(ready.generation) == ready_batch_generation)
             .filter_map(|ready| ready.target_page_count)
             .find(|page_count| *page_count > 0)
         {
             if self.adopt_page_count_if_empty(page_count, "spad-promote") {
-                tracing::info!(page_count, source = "spad-promote", "spad.promote.page_count_adopt");
+                tracing::info!(
+                    page_count,
+                    source = "spad-promote",
+                    "spad.promote.page_count_adopt"
+                );
             }
         }
         let layout = self.view_layout_for_with_caller(
@@ -3918,24 +3974,53 @@ pub fn configure_spad_targets(
         );
         for ready in spad_ready_pages {
             if !paths_equivalent_for_selection(&ready.target_path, &self.persistent.entry.path) {
-                tracing::info!(page = ready.page, reason = "target_mismatch", "spad.promote.drop");
-                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=target_mismatch", ready.page);
+                tracing::info!(
+                    page = ready.page,
+                    reason = "target_mismatch",
+                    "spad.promote.drop"
+                );
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=target_mismatch",
+                    ready.page
+                );
                 continue;
             }
             if Some(ready.session) != ready_batch_session {
-                tracing::info!(page = ready.page, reason = "session_mismatch", "spad.promote.drop");
-                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=session_mismatch", ready.page);
+                tracing::info!(
+                    page = ready.page,
+                    reason = "session_mismatch",
+                    "spad.promote.drop"
+                );
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=session_mismatch",
+                    ready.page
+                );
                 continue;
             }
             if Some(ready.generation) != ready_batch_generation {
-                tracing::info!(page = ready.page, reason = "generation_mismatch", "spad.promote.drop");
-                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=generation_mismatch", ready.page);
+                tracing::info!(
+                    page = ready.page,
+                    reason = "generation_mismatch",
+                    "spad.promote.drop"
+                );
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=generation_mismatch",
+                    ready.page
+                );
                 continue;
             }
             if let Some(page_count) = ready.target_page_count {
                 if ready.page >= page_count {
-                    tracing::info!(page = ready.page, reason = "page_out_of_range", page_count, "spad.promote.drop");
-                    spad_trace_debug!("[spad-promote-l1-failed] page={} reason=page_out_of_range", ready.page);
+                    tracing::info!(
+                        page = ready.page,
+                        reason = "page_out_of_range",
+                        page_count,
+                        "spad.promote.drop"
+                    );
+                    spad_trace_debug!(
+                        "[spad-promote-l1-failed] page={} reason=page_out_of_range",
+                        ready.page
+                    );
                     continue;
                 }
             } else if self.persistent.page_count > 0 && ready.page >= self.persistent.page_count {
@@ -3945,7 +4030,10 @@ pub fn configure_spad_targets(
                     page_count = self.persistent.page_count,
                     "spad.promote.drop"
                 );
-                spad_trace_debug!("[spad-promote-l1-failed] page={} reason=page_out_of_range", ready.page);
+                spad_trace_debug!(
+                    "[spad-promote-l1-failed] page={} reason=page_out_of_range",
+                    ready.page
+                );
                 continue;
             }
             if !ready.render_signature.is_suitable_for(requirement) {
@@ -3961,10 +4049,13 @@ pub fn configure_spad_targets(
                 );
                 continue;
             }
-            let content =
-                PageContent::from_frames(ready.frames, "viewer_spad_promote", ctx);
+            let content = PageContent::from_frames(ready.frames, "viewer_spad_promote", ctx);
             let PageContent::Static(texture) = content else {
-                tracing::info!(page = ready.page, reason = "non_static", "spad.promote.drop");
+                tracing::info!(
+                    page = ready.page,
+                    reason = "non_static",
+                    "spad.promote.drop"
+                );
                 spad_trace_debug!(
                     "[spad-promote-l1-failed] page={} reason=non_static",
                     ready.page
@@ -3984,7 +4075,11 @@ pub fn configure_spad_targets(
                 tracing::info!(page = ready.page, estimated_bytes, "spad.promote.success");
                 spad_trace_debug!("[spad-promote-l1] page={}", ready.page);
             } else {
-                tracing::info!(page = ready.page, reason = "warmup_rejected", "spad.promote.drop");
+                tracing::info!(
+                    page = ready.page,
+                    reason = "warmup_rejected",
+                    "spad.promote.drop"
+                );
                 spad_trace_debug!(
                     "[spad-promote-l1-failed] page={} reason=warmup_rejected",
                     ready.page
@@ -3993,6 +4088,7 @@ pub fn configure_spad_targets(
         }
     }
 
+    #[cfg(debug_assertions)]
     pub(super) fn spad_overlay_lines(&self) -> [String; 3] {
         [
             "SPAD".to_owned(),
@@ -4019,7 +4115,12 @@ pub fn configure_spad_targets(
         let Some(first) = target.ready_pages.keys().next().copied() else {
             return "-".to_owned();
         };
-        let last = target.ready_pages.keys().next_back().copied().unwrap_or(first);
+        let last = target
+            .ready_pages
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(first);
         format!("{}p {}..{}", target.ready_pages.len(), first, last)
     }
 

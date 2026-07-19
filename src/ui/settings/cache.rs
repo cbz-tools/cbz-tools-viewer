@@ -8,12 +8,12 @@ use crate::domain::app_settings::{
 };
 use crate::domain::app_settings::{LibraryCardSelectionStyle, LibraryHudStyle, UiLanguage};
 
-use super::super::i18n::{tr, TextKey};
-use super::widgets::{
-    combo_row_with_reset, section_header, setting_block, slider_row_with_reset, subtle_text,
-    SliderRange, SliderRowConfig,
-};
+use super::super::i18n::{TextKey, tr};
 use super::SettingsEvent;
+use super::widgets::{
+    SliderRange, SliderRowConfig, combo_row_with_reset, section_header, setting_block,
+    slider_row_with_reset, subtle_text,
+};
 
 pub(super) fn show_library_tab(
     ui: &mut egui::Ui,

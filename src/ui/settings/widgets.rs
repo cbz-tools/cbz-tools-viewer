@@ -2,7 +2,7 @@ use eframe::egui;
 
 use crate::domain::app_settings::UiLanguage;
 
-use super::super::i18n::{tr, TextKey};
+use super::super::i18n::{TextKey, tr};
 use super::super::theme;
 use super::SETTINGS_BUTTON_HEIGHT;
 
@@ -45,7 +45,7 @@ pub(super) fn setting_block<R>(
 ) -> R {
     let resp = egui::Frame::new()
         .fill(theme::SURFACE_BG)
-        .stroke(egui::Stroke::new(1.0, theme::SEPARATOR_WEAK))
+        .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
         .inner_margin(egui::Margin::symmetric(10, 8))
         .show(ui, |ui| {
             ui.label(
@@ -92,7 +92,7 @@ pub(super) fn inline_reset_button(
             egui::Button::new(tr(language, TextKey::StandardLabel))
                 .min_size(SETTINGS_RESET_BUTTON_SIZE)
                 .fill(egui::Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)),
+                .stroke(egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT)),
         );
         if let Some(text) = hover_text {
             btn = btn.on_hover_text(text);
@@ -128,13 +128,13 @@ pub(super) fn slider_row_with_reset(
             .scope(|ui| {
                 ui.visuals_mut().widgets.inactive.bg_fill = theme::PROGRESS_BG;
                 ui.visuals_mut().widgets.inactive.bg_stroke =
-                    egui::Stroke::new(1.0, theme::SEPARATOR_WEAK);
+                    egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK);
                 ui.visuals_mut().widgets.active.bg_fill = theme::PROGRESS_ACTIVE;
                 ui.visuals_mut().widgets.active.bg_stroke =
-                    egui::Stroke::new(1.0, theme::PROGRESS_ACTIVE);
+                    egui::Stroke::new(1.0_f32, theme::PROGRESS_ACTIVE);
                 ui.visuals_mut().widgets.hovered.bg_fill = theme::PROGRESS_FILL;
                 ui.visuals_mut().widgets.hovered.bg_stroke =
-                    egui::Stroke::new(1.0, theme::HOVER_BORDER_WEAK);
+                    egui::Stroke::new(1.0_f32, theme::HOVER_BORDER_WEAK);
                 let slider = egui::Slider::new(
                     &mut slider_value,
                     config.range.min as f32..=config.range.max as f32,
@@ -177,7 +177,7 @@ pub(super) fn right_reset_button(
                 egui::Button::new(tr(language, TextKey::StandardLabel))
                     .min_size(SETTINGS_RESET_BUTTON_SIZE)
                     .fill(egui::Color32::TRANSPARENT)
-                    .stroke(egui::Stroke::new(1.0, egui::Color32::TRANSPARENT)),
+                    .stroke(egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT)),
             );
             if let Some(text) = hover_text {
                 btn = btn.on_hover_text(text);

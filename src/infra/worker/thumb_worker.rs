@@ -6,29 +6,30 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::RwLock;
-use tokio::sync::{oneshot, Semaphore};
+use tokio::sync::{Semaphore, oneshot};
 
+use super::storage_medium::{StorageMedium, detect_storage_medium_cached};
 use crate::domain::archive::BookId;
 use crate::domain::page::ImageFormatHint;
 use crate::domain::page_map::{BookPageMap, SourceRevision};
 use crate::domain::thumbnail::Thumbnail;
 use crate::infra::archive::{
-    book_source_kind,
-    epub::{build_book_page_map_fast_from_epub_reader, EpubImageReader, EpubPageMapFastOutcome},
+    BookReader, BookSourceKind, book_source_kind,
+    epub::{EpubImageReader, EpubPageMapFastOutcome, build_book_page_map_fast_from_epub_reader},
     folder::FolderImageReader,
     open_book_reader,
     page_map::{
-        build_folder_page_map_fast_lanes, build_zip_page_map_fast_lanes,
         FolderPageMapFastLaneOutput, FolderPageMapFastStatus, ZipPageMapFastOutput,
-        ZipPageMapFastStatus, ZipPageMapIssueReason,
+        ZipPageMapFastStatus, ZipPageMapIssueReason, build_folder_page_map_fast_lanes,
+        build_zip_page_map_fast_lanes,
     },
-    BookReader, BookSourceKind,
 };
+use crate::infra::cache::artifact_failure::{ArtifactFailureDiskCache, ArtifactKind};
 use crate::infra::cache::disk::DiskCache;
 use crate::infra::cache::memory::ThumbMemCache;
 use crate::infra::cache::page_map::PageMapDiskCache;
@@ -37,6 +38,7 @@ use crate::infra::page_map::coordinator::{
     PageMapCompleteRequest, PageMapCoordinator, PageMapFastPersistRequest,
     PageMapReadyPersistRequest,
 };
+use crate::repaint::RepaintNotifier;
 use crate::util::archive_path::is_supported_image_path;
 
 /// 通常スロットのタイムアウト。PNG デコード等の長時間処理を許容するため 15s に延ばす。
@@ -100,6 +102,11 @@ pub struct ThumbWorker {
 
 enum WorkerReq {
     Task(ThumbTask, u64),
+    PruneObsoleteArtifacts {
+        id: BookId,
+        source_path: Arc<Path>,
+        source_revision: SourceRevision,
+    },
     ClearPending,
     ClearCaches,
     RemoveArchiveCache(BookId),
@@ -107,7 +114,7 @@ enum WorkerReq {
 }
 
 impl ThumbWorker {
-    pub fn spawn(ctx: eframe::egui::Context, artifact_gate: Arc<RwLock<()>>) -> Self {
+    pub fn spawn(repaint: RepaintNotifier, artifact_gate: Arc<RwLock<()>>) -> Self {
         let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerReq>();
         let (resp_tx, resp_rx) = std::sync::mpsc::channel::<WorkerMsg>();
         let generation = Arc::new(AtomicU64::new(0));
@@ -119,11 +126,13 @@ impl ThumbWorker {
                 let generation = Arc::clone(&generation);
                 let artifact_generation = Arc::clone(&artifact_generation);
                 let artifact_gate = Arc::clone(&artifact_gate);
+                let req_tx = req_tx.clone();
                 move || {
                     worker_main(
                         req_rx,
+                        req_tx,
                         resp_tx,
-                        ctx,
+                        repaint,
                         generation,
                         artifact_generation,
                         artifact_gate,
@@ -187,13 +196,6 @@ impl Drop for ThumbWorker {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum StorageMedium {
-    Hdd,
-    Ssd,
-    Unknown,
-}
-
 fn hdd_permit_weight(path: &Path, hdd_weight: u32) -> u32 {
     let medium = detect_storage_medium_cached(path);
     if hdd_weight > 1 && medium == StorageMedium::Hdd {
@@ -203,264 +205,13 @@ fn hdd_permit_weight(path: &Path, hdd_weight: u32) -> u32 {
     }
 }
 
-fn detect_storage_medium_cached(path: &Path) -> StorageMedium {
-    static CACHE: OnceLock<Mutex<HashMap<String, StorageMedium>>> = OnceLock::new();
-    let key = storage_root_key(path);
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    {
-        let guard = match cache.lock() {
-            Ok(g) => g,
-            Err(_) => return StorageMedium::Unknown,
-        };
-        if let Some(medium) = guard.get(&key) {
-            return *medium;
-        }
-    }
-    let medium = detect_storage_medium(path);
-    let mut guard = match cache.lock() {
-        Ok(g) => g,
-        Err(_) => return StorageMedium::Unknown,
-    };
-    guard.insert(key.clone(), medium);
-    let medium = match medium {
-        StorageMedium::Hdd => "hdd",
-        StorageMedium::Ssd => "ssd",
-        StorageMedium::Unknown => "unknown",
-    };
-    log::debug!(
-        "[thumb-worker] storage_medium root={} medium={}",
-        key,
-        medium
-    );
-    guard.get(&key).copied().unwrap_or(StorageMedium::Unknown)
-}
-
-fn storage_root_key(path: &Path) -> String {
-    path.components()
-        .next()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .unwrap_or_else(|| "<unknown-root>".to_owned())
-}
-
-#[cfg(windows)]
-fn detect_storage_medium(path: &Path) -> StorageMedium {
-    let Some(root) = drive_root(path) else {
-        return StorageMedium::Unknown;
-    };
-    if let Some(medium) = detect_storage_medium_by_ioctl(path) {
-        return medium;
-    }
-    detect_storage_medium_by_wmi(root).unwrap_or(StorageMedium::Unknown)
-}
-
-#[cfg(windows)]
-fn detect_storage_medium_by_ioctl(path: &Path) -> Option<StorageMedium> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
-    use windows_sys::Win32::Storage::FileSystem::{
-        CreateFileW, GetDriveTypeW, GetVolumePathNameW, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-    };
-    use windows_sys::Win32::System::Ioctl::{
-        PropertyStandardQuery, StorageDeviceSeekPenaltyProperty, DEVICE_SEEK_PENALTY_DESCRIPTOR,
-        STORAGE_PROPERTY_QUERY,
-    };
-    use windows_sys::Win32::System::IO::DeviceIoControl;
-
-    const IOCTL_STORAGE_QUERY_PROPERTY: u32 = 0x002D1400;
-    const GENERIC_READ: u32 = 0x8000_0000;
-    const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-    const DRIVE_FIXED: u32 = 3;
-
-    let mut wide_path: Vec<u16> = path.as_os_str().encode_wide().collect();
-    wide_path.push(0);
-
-    let mut volume_root = [0u16; 260];
-    // SAFETY:
-    // 入出力バッファは固定長配列でこの呼び出し中生存し、失敗時は `None` へ落とす。
-    let ok = unsafe {
-        GetVolumePathNameW(
-            wide_path.as_ptr(),
-            volume_root.as_mut_ptr(),
-            volume_root.len() as u32,
-        )
-    };
-    if ok == 0 {
-        return None;
-    }
-
-    // SAFETY: `volume_root` は `GetVolumePathNameW` 成功で NUL 終端済み。
-    let drive_type = unsafe { GetDriveTypeW(volume_root.as_ptr()) };
-    if drive_type != DRIVE_FIXED {
-        return None;
-    }
-
-    // SAFETY:
-    // `volume_root` は NUL 終端済みで、成功時 handle はこの関数末尾で必ず `CloseHandle` する。
-    let handle = unsafe {
-        CreateFileW(
-            volume_root.as_ptr(),
-            GENERIC_READ,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS,
-            std::ptr::null_mut(),
-        )
-    };
-    if handle == INVALID_HANDLE_VALUE {
-        return None;
-    }
-
-    let mut query = STORAGE_PROPERTY_QUERY {
-        PropertyId: StorageDeviceSeekPenaltyProperty,
-        QueryType: PropertyStandardQuery,
-        AdditionalParameters: [0],
-    };
-    let mut desc = DEVICE_SEEK_PENALTY_DESCRIPTOR::default();
-    let mut returned = 0u32;
-    // SAFETY:
-    // query / desc / returned はすべて有効な入出力バッファで、サイズも構造体サイズを渡す。
-    let ok = unsafe {
-        DeviceIoControl(
-            handle,
-            IOCTL_STORAGE_QUERY_PROPERTY,
-            (&mut query as *mut STORAGE_PROPERTY_QUERY).cast(),
-            std::mem::size_of::<STORAGE_PROPERTY_QUERY>() as u32,
-            (&mut desc as *mut DEVICE_SEEK_PENALTY_DESCRIPTOR).cast(),
-            std::mem::size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>() as u32,
-            &mut returned,
-            std::ptr::null_mut(),
-        )
-    };
-    // SAFETY: `handle` は `CreateFileW` 成功値で、ここで 1 回だけ close する。
-    unsafe {
-        CloseHandle(handle);
-    }
-    if ok == 0 || returned < std::mem::size_of::<DEVICE_SEEK_PENALTY_DESCRIPTOR>() as u32 {
-        return None;
-    }
-    if desc.IncursSeekPenalty {
-        Some(StorageMedium::Hdd)
-    } else {
-        Some(StorageMedium::Ssd)
-    }
-}
-
-#[cfg(not(windows))]
-fn detect_storage_medium(_path: &Path) -> StorageMedium {
-    StorageMedium::Unknown
-}
-
-#[cfg(windows)]
-fn detect_storage_medium_by_wmi(root: &str) -> Option<StorageMedium> {
-    use serde::Deserialize;
-    use wmi::WMIConnection;
-
-    #[derive(Deserialize)]
-    struct Win32DiskPartition {
-        #[serde(rename = "DeviceID")]
-        device_id: String,
-    }
-
-    #[derive(Deserialize)]
-    struct Win32DiskDrive {
-        #[serde(rename = "Model")]
-        model: Option<String>,
-    }
-
-    #[derive(Deserialize)]
-    struct MsftPhysicalDisk {
-        #[serde(rename = "MediaType")]
-        media_type: Option<u16>,
-        #[serde(rename = "Model")]
-        model: Option<String>,
-        #[serde(rename = "FriendlyName")]
-        friendly_name: Option<String>,
-    }
-
-    let cimv2 = WMIConnection::new().ok()?;
-    let q1 = format!(
-        "ASSOCIATORS OF {{Win32_LogicalDisk.DeviceID='{}'}} WHERE AssocClass=Win32_LogicalDiskToPartition",
-        root
-    );
-    let partitions: Vec<Win32DiskPartition> = cimv2.raw_query(q1).ok()?;
-    let partition = partitions.first()?;
-    let q2 = format!(
-        "ASSOCIATORS OF {{Win32_DiskPartition.DeviceID='{}'}} WHERE AssocClass=Win32_DiskDriveToDiskPartition",
-        wql_escape_single_quoted(&partition.device_id)
-    );
-    let drives: Vec<Win32DiskDrive> = cimv2.raw_query(q2).ok()?;
-    let drive = drives.first()?;
-    let model = drive.model.as_deref().unwrap_or("");
-
-    let storage = WMIConnection::with_namespace_path("ROOT\\Microsoft\\Windows\\Storage").ok()?;
-    let physical_disks: Vec<MsftPhysicalDisk> = storage
-        .raw_query("SELECT MediaType, Model, FriendlyName FROM MSFT_PhysicalDisk")
-        .ok()?;
-    for pd in &physical_disks {
-        let pd_model = pd.model.as_deref().unwrap_or("");
-        let pd_name = pd.friendly_name.as_deref().unwrap_or("");
-        if !model.is_empty() && model_match(model, pd_model, pd_name) {
-            if let Some(medium) = media_type_to_medium(pd.media_type) {
-                return Some(medium);
-            }
-        }
-    }
-
-    if model_implies_ssd(model) {
-        return Some(StorageMedium::Ssd);
-    }
-
-    None
-}
-
-#[cfg(windows)]
-fn media_type_to_medium(media_type: Option<u16>) -> Option<StorageMedium> {
-    match media_type {
-        Some(3) => Some(StorageMedium::Hdd),
-        Some(4) | Some(5) => Some(StorageMedium::Ssd),
-        _ => None,
-    }
-}
-
-#[cfg(windows)]
-fn model_implies_ssd(model: &str) -> bool {
-    let lower = model.to_ascii_lowercase();
-    lower.contains("ssd") || lower.contains("nvme")
-}
-
-#[cfg(windows)]
-fn model_match(base: &str, lhs: &str, rhs: &str) -> bool {
-    let base_l = base.to_ascii_lowercase();
-    let lhs_l = lhs.to_ascii_lowercase();
-    let rhs_l = rhs.to_ascii_lowercase();
-    lhs_l.contains(&base_l)
-        || base_l.contains(&lhs_l)
-        || rhs_l.contains(&base_l)
-        || base_l.contains(&rhs_l)
-}
-
-#[cfg(windows)]
-fn drive_root(path: &Path) -> Option<&str> {
-    use std::path::Component;
-    match path.components().next() {
-        Some(Component::Prefix(prefix)) => prefix.as_os_str().to_str(),
-        _ => None,
-    }
-}
-
-#[cfg(windows)]
-fn wql_escape_single_quoted(s: &str) -> String {
-    s.replace('\\', r"\\").replace('\'', r"\'")
-}
-
 // ── ワーカースレッド本体 ──────────────────────────────────────────────────────
 
 fn worker_main(
     mut req_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerReq>,
+    req_tx: tokio::sync::mpsc::UnboundedSender<WorkerReq>,
     resp_tx: std::sync::mpsc::Sender<WorkerMsg>,
-    ctx: eframe::egui::Context,
+    repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
     artifact_gate: Arc<RwLock<()>>,
@@ -476,33 +227,58 @@ fn worker_main(
     };
 
     let disk_cache = Arc::new(disk_cache);
-    let page_map_cache =
-        match PageMapDiskCache::open(PageMapDiskCache::default_root()).or_else(|_| {
+    let page_map_cache = match PageMapDiskCache::open(PageMapDiskCache::default_root()).or_else(
+        |_| {
             PageMapDiskCache::open(
                 std::env::temp_dir()
                     .join(crate::app_identity::app_data_dir())
                     .join("page_maps"),
             )
-        }) {
-            Ok(cache) => Arc::new(cache),
-            Err(e) => {
-                tracing::error!("page map cache open failed; thumb worker disabled: {e}");
-                return;
-            }
-        };
+        },
+    ) {
+        Ok(cache) => Some(Arc::new(cache)),
+        Err(e) => {
+            tracing::warn!(
+                "page map cache open failed; continuing thumb worker in thumbnail-only mode: {e}"
+            );
+            None
+        }
+    };
+    let artifact_failure_cache = match ArtifactFailureDiskCache::open(
+        ArtifactFailureDiskCache::default_root(),
+    )
+    .or_else(|_| {
+        ArtifactFailureDiskCache::open(
+            std::env::temp_dir()
+                .join(crate::app_identity::app_data_dir())
+                .join("artifact_failures"),
+        )
+    }) {
+        Ok(cache) => Some(Arc::new(cache)),
+        Err(e) => {
+            tracing::warn!(
+                "artifact failure cache open failed; continuing without failure suppression: {e}"
+            );
+            None
+        }
+    };
     let page_map_coordinator = Arc::new(PageMapCoordinator::new(
         Arc::clone(&generation),
         Arc::clone(&artifact_generation),
         Arc::clone(&artifact_gate),
+        artifact_failure_cache.as_ref().map(Arc::clone),
     ));
     let shared = Arc::new(WorkerShared {
         mem_cache: ThumbMemCache::new(THUMB_MEM_CACHE_MAX_BYTES),
         disk_cache: Arc::clone(&disk_cache),
         page_map_cache,
+        artifact_failure_cache,
         page_map_coordinator,
         artifact_generation: Arc::clone(&artifact_generation),
         artifact_gate: Arc::clone(&artifact_gate),
         in_flight: Arc::new(Mutex::new(HashSet::new())),
+        pruned_revisions: Arc::new(Mutex::new(HashSet::new())),
+        req_tx,
     });
 
     let n = std::thread::available_parallelism()
@@ -526,6 +302,8 @@ fn worker_main(
     rt.block_on(async move {
         let normal_slots = n;
         let normal_sem = Arc::new(Semaphore::new(normal_slots));
+        // 表示要求に追従する旧世代掃除は 1 本に絞り、並列 I/O を増やさない。
+        let prune_sem = Arc::new(Semaphore::new(1));
         let hdd_normal_permits: u32 = if normal_slots >= 2 { 2 } else { 1 };
         let (retry_tx, retry_rx) = tokio::sync::mpsc::unbounded_channel::<(ThumbTask, u64)>();
 
@@ -542,8 +320,9 @@ fn worker_main(
         let normal_loop = tokio::spawn({
             let shared = Arc::clone(&shared);
             let resp_tx = resp_tx.clone();
-            let ctx = ctx.clone();
+            let repaint = repaint.clone();
             let normal_sem = Arc::clone(&normal_sem);
+            let prune_sem = Arc::clone(&prune_sem);
             let retry_tx = retry_tx.clone();
             let generation = Arc::clone(&generation);
             async move {
@@ -557,18 +336,42 @@ fn worker_main(
                         WorkerReq::ClearCaches => {
                             shared.mem_cache.clear();
                             shared.clear_in_flight();
+                            shared.clear_pruned_revisions();
                             shared.page_map_coordinator.clear_all();
                             continue;
                         }
                         WorkerReq::RemoveArchiveCache(id) => {
                             let removed = shared.mem_cache.remove_by_book_id(&id);
                             shared.remove_in_flight_by_book_id(&id);
+                            shared.remove_pruned_revisions_by_book_id(&id);
                             shared.page_map_coordinator.remove_by_book_id(&id);
                             tracing::debug!(
                                 id = %id.0.to_hex(),
                                 removed,
                                 "thumb worker: remove archive cache"
                             );
+                            continue;
+                        }
+                        WorkerReq::PruneObsoleteArtifacts {
+                            id,
+                            source_path,
+                            source_revision,
+                        } => {
+                            let shared = Arc::clone(&shared);
+                            let prune_sem = Arc::clone(&prune_sem);
+                            tokio::spawn(async move {
+                                let Ok(_permit) = prune_sem.acquire_owned().await else {
+                                    return;
+                                };
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    shared.prune_obsolete_artifacts(
+                                        &id,
+                                        source_path.as_ref(),
+                                        &source_revision,
+                                    );
+                                })
+                                .await;
+                            });
                             continue;
                         }
                         WorkerReq::Shutdown => {
@@ -596,7 +399,7 @@ fn worker_main(
                             };
                             let tx = resp_tx.clone();
                             let rtx = retry_tx.clone();
-                            let ctx2 = ctx.clone();
+                            let repaint = repaint.clone();
                             let generation = Arc::clone(&generation);
                             tokio::spawn({
                                 let shared = Arc::clone(&shared);
@@ -607,7 +410,7 @@ fn worker_main(
                                             shared,
                                             tx,
                                             retry_tx: Some(rtx),
-                                            ctx: ctx2,
+                                            repaint,
                                             generation,
                                         },
                                         permit,
@@ -630,10 +433,10 @@ fn worker_main(
         let retry_loop = tokio::spawn({
             let shared = Arc::clone(&shared);
             let resp_tx = resp_tx.clone();
-            let ctx = ctx.clone();
+            let repaint = repaint.clone();
             let generation = Arc::clone(&generation);
             async move {
-                retry_worker_loop(retry_rx, shared, resp_tx, ctx, generation).await;
+                retry_worker_loop(retry_rx, shared, resp_tx, repaint, generation).await;
             }
         });
 
@@ -669,13 +472,14 @@ async fn run_thumb_task(
             &shared_for_blocking,
             &generation_for_blocking,
             task_gen,
+            ArtifactScope::ThumbnailAndPageMap,
         )
     });
 
     let (done_tx, done_rx) = oneshot::channel::<()>();
     let tx_for_watch = runtime.tx.clone();
     let retry_tx_for_watch = runtime.retry_tx.clone();
-    let ctx_for_watch = runtime.ctx.clone();
+    let repaint_for_watch = runtime.repaint.clone();
     let generation_for_watch = Arc::clone(&runtime.generation);
     let path_disp_for_watch = path_disp.clone();
     tokio::spawn(async move {
@@ -687,10 +491,11 @@ async fn run_thumb_task(
                     msg,
                     deferred,
                     ThumbTaskResultContext {
+                        shared: Arc::clone(&runtime.shared),
                         task_gen,
                         tx: tx_for_watch,
                         retry_tx: retry_tx_for_watch,
-                        ctx: ctx_for_watch,
+                        repaint: repaint_for_watch,
                         generation: generation_for_watch,
                     },
                 )
@@ -702,7 +507,7 @@ async fn run_thumb_task(
                     let _ = rtx.send((task, task_gen));
                 } else {
                     let _ = runtime.tx.send(WorkerMsg::Failed(task.book_id));
-                    runtime.ctx.request_repaint();
+                    runtime.repaint.request_repaint();
                 }
             }
         }
@@ -738,8 +543,9 @@ async fn handle_thumb_result(
     }
     match msg {
         WorkerMsg::Ready(_) => {
+            clear_thumbnail_failure(&runtime.shared, &task);
             let _ = runtime.tx.send(msg);
-            runtime.ctx.request_repaint();
+            runtime.repaint.request_repaint();
             // UI を先に返し、WebP 保存は後段で実行する。
             if let Some(dc) = deferred {
                 tokio::spawn(async move {
@@ -758,8 +564,9 @@ async fn handle_thumb_result(
                 );
                 let _ = rtx.send((task, runtime.task_gen));
             } else {
+                mark_thumbnail_failure(&runtime.shared, &task);
                 let _ = runtime.tx.send(WorkerMsg::Failed(task.book_id));
-                runtime.ctx.request_repaint();
+                runtime.repaint.request_repaint();
             }
         }
         WorkerMsg::FailedPermanent(_) => {
@@ -767,8 +574,9 @@ async fn handle_thumb_result(
                 path = %task.path.display(),
                 "thumb task permanent failed → no retry"
             );
+            mark_thumbnail_failure(&runtime.shared, &task);
             let _ = runtime.tx.send(WorkerMsg::Failed(task.book_id));
-            runtime.ctx.request_repaint();
+            runtime.repaint.request_repaint();
         }
     }
 }
@@ -777,16 +585,68 @@ struct ThumbTaskRuntime {
     shared: Arc<WorkerShared>,
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     retry_tx: Option<tokio::sync::mpsc::UnboundedSender<(ThumbTask, u64)>>,
-    ctx: eframe::egui::Context,
+    repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
 }
 
 struct ThumbTaskResultContext {
+    shared: Arc<WorkerShared>,
     task_gen: u64,
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     retry_tx: Option<tokio::sync::mpsc::UnboundedSender<(ThumbTask, u64)>>,
-    ctx: eframe::egui::Context,
+    repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
+}
+
+fn mark_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
+    if !thumb_task_file_snapshot_matches(task) {
+        return;
+    }
+    let revision = SourceRevision::from_file_state(task.expected_size, task.expected_modified);
+    if let Some(cache) = shared.artifact_failure_cache.as_ref() {
+        match cache.mark_failure_for_revision(&task.book_id, &revision, ArtifactKind::Thumbnail) {
+            Ok(true) => {
+                tracing::debug!(
+                    id = %task.book_id.0.to_hex(),
+                    source_revision = ?revision,
+                    "thumbnail terminal failure cached"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    id = %task.book_id.0.to_hex(),
+                    source_revision = ?revision,
+                    error = %error,
+                    "thumbnail failure cache save failed"
+                );
+            }
+        }
+    }
+}
+
+fn clear_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
+    let revision = SourceRevision::from_file_state(task.expected_size, task.expected_modified);
+    if let Some(cache) = shared.artifact_failure_cache.as_ref() {
+        match cache.clear_failure_for_revision(&task.book_id, &revision, ArtifactKind::Thumbnail) {
+            Ok(true) => {
+                tracing::debug!(
+                    id = %task.book_id.0.to_hex(),
+                    source_revision = ?revision,
+                    "thumbnail failure cache cleared after success"
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                tracing::debug!(
+                    id = %task.book_id.0.to_hex(),
+                    source_revision = ?revision,
+                    error = %error,
+                    "thumbnail failure cache clear failed"
+                );
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -817,7 +677,7 @@ async fn retry_worker_loop(
     mut retry_rx: tokio::sync::mpsc::UnboundedReceiver<(ThumbTask, u64)>,
     shared: Arc<WorkerShared>,
     tx: std::sync::mpsc::Sender<WorkerMsg>,
-    ctx: eframe::egui::Context,
+    repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
 ) {
     let mut jobs: HashMap<BookId, RetryThumbJob> = HashMap::new();
@@ -831,7 +691,7 @@ async fn retry_worker_loop(
                 }
                 if let Err(task) = enqueue_retry_job(&mut jobs, task, task_gen) {
                     let _ = tx.send(WorkerMsg::Failed(task.book_id));
-                    ctx.request_repaint();
+                    repaint.request_repaint();
                 }
             }
             _ = tokio::time::sleep(tick) => {}
@@ -861,20 +721,22 @@ async fn retry_worker_loop(
         let current = match FileSnapshot::read(&job.task.path) {
             Ok(s) => s,
             Err(e) => {
+                let book_id_hex = job.task.book_id.0.to_hex();
                 tracing::warn!(
-                    id = &job.task.book_id.0.to_hex()[..8],
+                    id = &book_id_hex[..8],
                     path = %job.task.path.display(),
                     "retry metadata read failed → final failed: {e}"
                 );
                 let _ = tx.send(WorkerMsg::Failed(job.task.book_id));
-                ctx.request_repaint();
+                repaint.request_repaint();
                 continue;
             }
         };
 
         if current != job.last_snapshot {
+            let book_id_hex = job.task.book_id.0.to_hex();
             tracing::debug!(
-                id = &job.task.book_id.0.to_hex()[..8],
+                id = &book_id_hex[..8],
                 path = %job.task.path.display(),
                 old_size = job.last_snapshot.size,
                 new_size = current.size,
@@ -886,8 +748,9 @@ async fn retry_worker_loop(
             continue;
         }
 
+        let book_id_hex = job.task.book_id.0.to_hex();
         tracing::debug!(
-            id = &job.task.book_id.0.to_hex()[..8],
+            id = &book_id_hex[..8],
             path = %job.task.path.display(),
             retry_count = job.retry_count,
             "retry: thumbnail task start"
@@ -903,13 +766,15 @@ async fn retry_worker_loop(
                 &shared_for_blocking,
                 &generation_for_blocking,
                 task_generation,
+                ArtifactScope::ThumbnailOnly,
             )
         });
 
         match handle.await {
             Ok((WorkerMsg::Ready(ready), deferred)) => {
+                clear_thumbnail_failure(&shared, &job.task);
                 let _ = tx.send(WorkerMsg::Ready(ready));
-                ctx.request_repaint();
+                repaint.request_repaint();
                 if let Some(dc) = deferred {
                     tokio::spawn(async move {
                         dc.execute().await;
@@ -920,25 +785,29 @@ async fn retry_worker_loop(
                 // 差し替え後の古い retry task。新しい scan/request 側に任せる。
             }
             Ok((WorkerMsg::FailedPermanent(_), _)) => {
+                let book_id_hex = job.task.book_id.0.to_hex();
                 tracing::info!(
-                    id = &job.task.book_id.0.to_hex()[..8],
+                    id = &book_id_hex[..8],
                     path = %job.task.path.display(),
                     "retry: permanent failed"
                 );
+                mark_thumbnail_failure(&shared, &job.task);
                 let _ = tx.send(WorkerMsg::Failed(job.task.book_id.clone()));
-                ctx.request_repaint();
+                repaint.request_repaint();
             }
             Ok((WorkerMsg::Failed(_), _)) | Err(_) => {
                 job.retry_count += 1;
                 if job.retry_count >= RETRY_DELAYS.len() {
+                    let book_id_hex = job.task.book_id.0.to_hex();
                     tracing::warn!(
-                        id = &job.task.book_id.0.to_hex()[..8],
+                        id = &book_id_hex[..8],
                         path = %job.task.path.display(),
                         retry_count = job.retry_count,
                         "retry: final failed"
                     );
+                    mark_thumbnail_failure(&shared, &job.task);
                     let _ = tx.send(WorkerMsg::Failed(job.task.book_id.clone()));
-                    ctx.request_repaint();
+                    repaint.request_repaint();
                 } else {
                     let delay = RETRY_DELAYS[job.retry_count];
                     job.next_retry_at = Instant::now() + delay;
@@ -958,8 +827,9 @@ fn enqueue_retry_job(
     let snapshot = match FileSnapshot::read(&task.path) {
         Ok(s) => s,
         Err(e) => {
+            let id_hex = id.0.to_hex();
             tracing::warn!(
-                id = &id.0.to_hex()[..8],
+                id = &id_hex[..8],
                 path = %task.path.display(),
                 "retry enqueue skipped: metadata read failed: {e}"
             );
@@ -1054,11 +924,14 @@ fn thumb_task_file_snapshot_matches(task: &ThumbTask) -> bool {
 struct WorkerShared {
     mem_cache: ThumbMemCache,
     disk_cache: Arc<DiskCache>, // バックグラウンド書き込みと共有する。
-    page_map_cache: Arc<PageMapDiskCache>,
+    page_map_cache: Option<Arc<PageMapDiskCache>>,
+    artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
     page_map_coordinator: Arc<PageMapCoordinator>,
     artifact_generation: Arc<AtomicU64>,
     artifact_gate: Arc<RwLock<()>>,
     in_flight: Arc<Mutex<HashSet<ThumbTaskKey>>>,
+    pruned_revisions: Arc<Mutex<HashSet<ArtifactPruneKey>>>,
+    req_tx: tokio::sync::mpsc::UnboundedSender<WorkerReq>,
 }
 
 impl WorkerShared {
@@ -1088,6 +961,114 @@ impl WorkerShared {
             guard.retain(|key| &key.book_id != id);
         }
     }
+
+    fn schedule_artifact_prune(
+        &self,
+        id: &BookId,
+        source_path: Arc<Path>,
+        source_revision: SourceRevision,
+    ) {
+        let key = ArtifactPruneKey {
+            book_id: id.clone(),
+            source_revision: source_revision.clone(),
+        };
+        let mut guard = match self.pruned_revisions.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if !guard.insert(key.clone()) {
+            return;
+        }
+        if self
+            .req_tx
+            .send(WorkerReq::PruneObsoleteArtifacts {
+                id: id.clone(),
+                source_path,
+                source_revision,
+            })
+            .is_err()
+        {
+            guard.remove(&key);
+        }
+    }
+
+    fn clear_pruned_revisions(&self) {
+        if let Ok(mut guard) = self.pruned_revisions.lock() {
+            guard.clear();
+        }
+    }
+
+    fn remove_pruned_revisions_by_book_id(&self, id: &BookId) {
+        if let Ok(mut guard) = self.pruned_revisions.lock() {
+            guard.retain(|key| &key.book_id != id);
+        }
+    }
+
+    fn prune_obsolete_artifacts(
+        &self,
+        id: &BookId,
+        source_path: &Path,
+        source_revision: &SourceRevision,
+    ) {
+        let Ok(snapshot) = FileSnapshot::read(source_path) else {
+            return;
+        };
+        if SourceRevision::from_file_state(snapshot.size, snapshot.modified) != *source_revision {
+            return;
+        }
+
+        let _gate = self.artifact_gate.write();
+        let Ok(snapshot) = FileSnapshot::read(source_path) else {
+            return;
+        };
+        if SourceRevision::from_file_state(snapshot.size, snapshot.modified) != *source_revision {
+            return;
+        }
+
+        let thumbs = self
+            .disk_cache
+            .prune_thumbs_except(id, snapshot.size, snapshot.modified);
+        let page_maps = self
+            .page_map_cache
+            .as_ref()
+            .map(|cache| cache.prune_page_maps_except_revision(id, source_revision));
+        let failures = self
+            .artifact_failure_cache
+            .as_ref()
+            .map(|cache| cache.prune_failures_except_revision(id, source_revision));
+
+        let thumb_removed = log_prune_result("thumbnail", id, thumbs);
+        let page_map_removed = page_maps
+            .map(|result| log_prune_result("page-map", id, result))
+            .unwrap_or(0);
+        let failure_removed = failures
+            .map(|result| log_prune_result("artifact failure", id, result))
+            .unwrap_or(0);
+        if thumb_removed + page_map_removed + failure_removed > 0 {
+            tracing::debug!(
+                id = %id.0.to_hex(),
+                thumb_removed,
+                page_map_removed,
+                failure_removed,
+                "obsolete artifact revisions pruned"
+            );
+        }
+    }
+}
+
+fn log_prune_result(artifact: &str, id: &BookId, result: anyhow::Result<usize>) -> usize {
+    match result {
+        Ok(removed) => removed,
+        Err(error) => {
+            tracing::debug!(
+                id = %id.0.to_hex(),
+                artifact,
+                error = %error,
+                "obsolete artifact revision prune failed"
+            );
+            0
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1097,6 +1078,12 @@ struct ThumbTaskKey {
     expected_size: u64,
     expected_modified: Option<SystemTime>,
     bypass_cache: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ArtifactPruneKey {
+    book_id: BookId,
+    source_revision: SourceRevision,
 }
 
 impl ThumbTaskKey {
@@ -1225,7 +1212,8 @@ impl DeferredCache {
                     );
                     return;
                 }
-                if let Err(e) = disk_cache.put_thumb(&id, file_size, modified, &webp) {
+                let write_result = disk_cache.put_thumb(&id, file_size, modified, &webp);
+                if let Err(e) = write_result {
                     tracing::warn!("disk cache write: {e}");
                 }
             })
@@ -1249,11 +1237,18 @@ impl DeferredCache {
 
 // ── サムネイル生成処理 ────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy)]
+enum ArtifactScope {
+    ThumbnailAndPageMap,
+    ThumbnailOnly,
+}
+
 fn process_thumb(
     task: ThumbTask,
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    artifact_scope: ArtifactScope,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = &task.book_id;
     let source_revision =
@@ -1261,12 +1256,17 @@ fn process_thumb(
 
     // 要求後に差し替わった古い結果は UI に返さない。
     if !thumb_task_file_snapshot_matches(&task) {
+        let id_hex = id.0.to_hex();
         tracing::debug!(
-            id = &id.0.to_hex()[..8],
+            id = &id_hex[..8],
             path = %task.path.display(),
             "thumbnail task stale; file snapshot changed"
         );
         return (WorkerMsg::Stale(id.clone()), None);
+    }
+
+    if matches!(artifact_scope, ArtifactScope::ThumbnailAndPageMap) {
+        shared.schedule_artifact_prune(id, Arc::clone(&task.path), source_revision.clone());
     }
 
     let source_kind = book_source_kind(&task.path);
@@ -1277,26 +1277,48 @@ fn process_thumb(
         source_kind,
         BookSourceKind::Folder | BookSourceKind::Zip | BookSourceKind::Rar | BookSourceKind::Epub
     );
-    let page_map_cached = !task.bypass_cache
+    let page_map_cache = if matches!(artifact_scope, ArtifactScope::ThumbnailAndPageMap)
         && is_page_map_supported_source
-        && shared
-            .page_map_cache
-            .get_page_map_for_revision(id, &source_revision)
-            .is_some();
+    {
+        shared.page_map_cache.as_ref()
+    } else {
+        None
+    };
+    let page_map_cached = !task.bypass_cache
+        && page_map_cache.is_some_and(|cache| {
+            cache
+                .get_page_map_for_revision(id, &source_revision)
+                .is_some()
+        });
+    let page_map_failed = !task.bypass_cache
+        && shared.artifact_failure_cache.as_ref().is_some_and(|cache| {
+            cache.has_failure_for_revision(id, &source_revision, ArtifactKind::PageMap)
+        });
+    if page_map_failed {
+        tracing::debug!(
+            id = %id.0.to_hex(),
+            path = %task.path.display(),
+            source_revision = ?source_revision,
+            "thumbnail request skips page-map generation by failure cache"
+        );
+    }
 
     if !task.bypass_cache {
         if let Some(thumb) = shared.mem_cache.get(id, task.target_width) {
             if generation.load(Ordering::Relaxed) != task_generation {
                 return (WorkerMsg::Stale(id.clone()), None);
             }
-            let deferred = if is_page_map_supported_source && !page_map_cached {
-                page_map_cache_miss_deferred(
-                    &task,
-                    &source_revision,
-                    shared,
-                    generation,
-                    task_generation,
-                )
+            let deferred = if !page_map_cached && !page_map_failed {
+                page_map_cache.and_then(|cache| {
+                    page_map_cache_miss_deferred(
+                        &task,
+                        &source_revision,
+                        shared,
+                        generation,
+                        task_generation,
+                        Arc::clone(cache),
+                    )
+                })
             } else {
                 None
             };
@@ -1323,46 +1345,87 @@ fn process_thumb(
                     if generation.load(Ordering::Relaxed) != task_generation {
                         return (WorkerMsg::Stale(id.clone()), None);
                     }
-                    let deferred = if is_page_map_supported_source && !page_map_cached {
-                        page_map_cache_miss_deferred(
-                            &task,
-                            &source_revision,
-                            shared,
-                            generation,
-                            task_generation,
-                        )
+                    let deferred = if !page_map_cached && !page_map_failed {
+                        page_map_cache.and_then(|cache| {
+                            page_map_cache_miss_deferred(
+                                &task,
+                                &source_revision,
+                                shared,
+                                generation,
+                                task_generation,
+                                Arc::clone(cache),
+                            )
+                        })
                     } else {
                         None
                     };
                     return (store_and_ready(decoded, task, shared), deferred);
                 }
-                Err(_) => tracing::warn!(
-                    id = &id.0.to_hex()[..8],
-                    "broken disk cache entry, re-generating"
-                ),
+                Err(_) => {
+                    let id_hex = id.0.to_hex();
+                    tracing::warn!(id = &id_hex[..8], "broken disk cache entry, re-generating");
+                }
             }
         }
     }
 
+    if !task.bypass_cache
+        && shared.artifact_failure_cache.as_ref().is_some_and(|cache| {
+            cache.has_failure_for_revision(id, &source_revision, ArtifactKind::Thumbnail)
+        })
+    {
+        tracing::debug!(
+            id = %id.0.to_hex(),
+            path = %task.path.display(),
+            source_revision = ?source_revision,
+            "thumbnail request skipped by failure cache"
+        );
+        return (WorkerMsg::FailedPermanent(id.clone()), None);
+    }
+
     if is_folder_book {
-        if page_map_cached {
-            return process_folder_thumbnail_only(task, shared, generation, task_generation);
+        if let Some(page_map_cache) =
+            page_map_cache.filter(|_| !page_map_cached && !page_map_failed)
+        {
+            return process_folder_book_artifacts(
+                task,
+                shared,
+                generation,
+                task_generation,
+                Arc::clone(page_map_cache),
+            );
         }
-        return process_folder_book_artifacts(task, shared, generation, task_generation);
+        return process_folder_thumbnail_only(task, shared, generation, task_generation);
     }
 
     if is_zip_like {
-        if page_map_cached {
-            return process_zip_thumbnail_only(task, shared, generation, task_generation);
+        if let Some(page_map_cache) =
+            page_map_cache.filter(|_| !page_map_cached && !page_map_failed)
+        {
+            return process_zip_book_artifacts(
+                task,
+                shared,
+                generation,
+                task_generation,
+                Arc::clone(page_map_cache),
+            );
         }
-        return process_zip_book_artifacts(task, shared, generation, task_generation);
+        return process_zip_thumbnail_only(task, shared, generation, task_generation);
     }
 
     if is_epub {
-        if page_map_cached {
-            return process_epub_thumbnail_only(task, shared, generation, task_generation);
+        if let Some(page_map_cache) =
+            page_map_cache.filter(|_| !page_map_cached && !page_map_failed)
+        {
+            return process_epub_book_artifacts(
+                task,
+                shared,
+                generation,
+                task_generation,
+                Arc::clone(page_map_cache),
+            );
         }
-        return process_epub_book_artifacts(task, shared, generation, task_generation);
+        return process_epub_thumbnail_only(task, shared, generation, task_generation);
     }
 
     let raw = match read_thumb_source_bytes(&task.path) {
@@ -1438,17 +1501,24 @@ fn process_thumb(
         file_size: task.expected_size,
         modified: task.expected_modified,
         thumb: webp.map(|webp| DeferredThumbWrite { webp }),
-        page_map: if is_page_map_supported_source && !page_map_cached {
-            let request =
-                build_page_map_complete_request(&task, &source_revision, shared, task_generation);
-            if shared
-                .page_map_coordinator
-                .reserve_page_map_complete_request(&request)
-            {
-                Some(DeferredPageMap::Complete { request })
-            } else {
-                None
-            }
+        page_map: if !page_map_cached && !page_map_failed {
+            page_map_cache.and_then(|cache| {
+                let request = build_page_map_complete_request(
+                    &task,
+                    &source_revision,
+                    shared,
+                    task_generation,
+                    Arc::clone(cache),
+                );
+                if shared
+                    .page_map_coordinator
+                    .reserve_page_map_complete_request(&request)
+                {
+                    Some(DeferredPageMap::Complete { request })
+                } else {
+                    None
+                }
+            })
         } else {
             None
         },
@@ -1462,8 +1532,15 @@ fn page_map_cache_miss_deferred(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    page_map_cache: Arc<PageMapDiskCache>,
 ) -> Option<DeferredCache> {
-    let request = build_page_map_complete_request(task, source_revision, shared, task_generation);
+    let request = build_page_map_complete_request(
+        task,
+        source_revision,
+        shared,
+        task_generation,
+        page_map_cache,
+    );
     if !shared
         .page_map_coordinator
         .reserve_page_map_complete_request(&request)
@@ -1492,6 +1569,7 @@ fn build_page_map_complete_request(
     source_revision: &SourceRevision,
     shared: &WorkerShared,
     task_generation: u64,
+    page_map_cache: Arc<PageMapDiskCache>,
 ) -> PageMapCompleteRequest {
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     PageMapCompleteRequest {
@@ -1502,7 +1580,7 @@ fn build_page_map_complete_request(
         task_artifact_generation,
         page_count: None,
         reason: None,
-        page_map_cache: Arc::clone(&shared.page_map_cache),
+        page_map_cache,
     }
 }
 
@@ -1572,8 +1650,9 @@ fn process_zip_thumbnail_only(
         thumb: webp.map(|webp| DeferredThumbWrite { webp }),
         page_map: None,
     };
+    let book_id_hex = book_id.0.to_hex();
     tracing::debug!(
-        id = &book_id.0.to_hex()[..8],
+        id = &book_id_hex[..8],
         path = %task.path.display(),
         zip_scan_ms = zip_scan_ms.as_millis(),
         thumb_ms = thumb_started.elapsed().as_millis(),
@@ -1670,6 +1749,7 @@ fn process_epub_book_artifacts(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    page_map_cache: Arc<PageMapDiskCache>,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = task.book_id.clone();
     let source_revision =
@@ -1741,12 +1821,17 @@ fn process_epub_book_artifacts(
                 task_generation,
                 task_artifact_generation,
                 page_map,
-                page_map_cache: Arc::clone(&shared.page_map_cache),
+                page_map_cache: Arc::clone(&page_map_cache),
             }))
         }
         EpubPageMapFastOutcome::RequiresComplete => {
-            let request =
-                build_page_map_complete_request(&task, &source_revision, shared, task_generation);
+            let request = build_page_map_complete_request(
+                &task,
+                &source_revision,
+                shared,
+                task_generation,
+                Arc::clone(&page_map_cache),
+            );
             if shared
                 .page_map_coordinator
                 .reserve_page_map_complete_request(&request)
@@ -1758,8 +1843,9 @@ fn process_epub_book_artifacts(
         }
     };
 
+    let id_hex = id.0.to_hex();
     tracing::debug!(
-        id = &id.0.to_hex()[..8],
+        id = &id_hex[..8],
         path = %task.path.display(),
         page_count = page_count,
         page_map_fast_ready = page_map_fast_ready,
@@ -1814,6 +1900,7 @@ fn process_zip_book_artifacts(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    page_map_cache: Arc<PageMapDiskCache>,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = task.book_id.clone();
     let source_revision =
@@ -1906,8 +1993,9 @@ fn process_zip_book_artifacts(
 
     let webp = img::encode_webp(&decoded).ok();
 
+    let id_hex = id.0.to_hex();
     tracing::debug!(
-        id = &id.0.to_hex()[..8],
+        id = &id_hex[..8],
         path = %task.path.display(),
         page_count = page_count,
         zip_scan_ms = zip_scan_ms.as_millis(),
@@ -1941,21 +2029,17 @@ fn process_zip_book_artifacts(
 
     let msg = store_and_ready(decoded, task.clone(), shared);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
-    let page_map = if matches!(fast_lane_status, ZipPageMapFastStatus::Failed(_)) {
-        None
-    } else {
-        Some(DeferredPageMap::Fast(PageMapFastPersistRequest {
-            book_id: task.book_id.clone(),
-            source_path: Arc::clone(&task.path),
-            source_revision: source_revision.clone(),
-            task_generation,
-            task_artifact_generation,
-            page_count,
-            fast_lane_status,
-            fast_lane_pages: page_map_pages,
-            page_map_cache: Arc::clone(&shared.page_map_cache),
-        }))
-    };
+    let page_map = Some(DeferredPageMap::Fast(PageMapFastPersistRequest {
+        book_id: task.book_id.clone(),
+        source_path: Arc::clone(&task.path),
+        source_revision: source_revision.clone(),
+        task_generation,
+        task_artifact_generation,
+        page_count,
+        fast_lane_status,
+        fast_lane_pages: page_map_pages,
+        page_map_cache,
+    }));
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
@@ -2081,6 +2165,7 @@ fn process_folder_book_artifacts(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    page_map_cache: Arc<PageMapDiskCache>,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = task.book_id.clone();
     let source_revision =
@@ -2159,12 +2244,17 @@ fn process_folder_book_artifacts(
                 task_generation,
                 task_artifact_generation,
                 page_map: BookPageMap::new(source_revision.clone(), fast_lane_pages),
-                page_map_cache: Arc::clone(&shared.page_map_cache),
+                page_map_cache: Arc::clone(&page_map_cache),
             }))
         }
         FolderPageMapFastStatus::RequiresComplete => {
-            let request =
-                build_page_map_complete_request(&task, &source_revision, shared, task_generation);
+            let request = build_page_map_complete_request(
+                &task,
+                &source_revision,
+                shared,
+                task_generation,
+                Arc::clone(&page_map_cache),
+            );
             if shared
                 .page_map_coordinator
                 .reserve_page_map_complete_request(&request)
@@ -2174,11 +2264,17 @@ fn process_folder_book_artifacts(
                 None
             }
         }
-        FolderPageMapFastStatus::Failed => None,
+        FolderPageMapFastStatus::Failed => {
+            shared
+                .page_map_coordinator
+                .record_page_map_terminal_failure(&task.book_id, &source_revision);
+            None
+        }
     };
 
+    let id_hex = id.0.to_hex();
     tracing::debug!(
-        id = &id.0.to_hex()[..8],
+        id = &id_hex[..8],
         path = %task.path.display(),
         page_map_pages = fast_lane_page_count,
         page_map_fast_status = ?fast_lane_status,

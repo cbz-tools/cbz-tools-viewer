@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::domain::app_settings::{
-    ViewerQuality, VIEWER_BACKGROUND_WORKER_COUNT_DEFAULT, VIEWER_QUALITY_DEFAULT,
-    VIEWER_RGBA_CACHE_MAX_MB_DEFAULT,
+    VIEWER_BACKGROUND_WORKER_COUNT_DEFAULT, VIEWER_QUALITY_DEFAULT,
+    VIEWER_RGBA_CACHE_MAX_MB_DEFAULT, ViewerQuality,
 };
 use crate::domain::sort::{SortKey, SortOrder};
 use crate::util::path_eq::normalize_path_for_selection;
@@ -194,38 +194,7 @@ impl SessionState {
             return None;
         }
 
-        use windows::Win32::Foundation::POINT;
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        };
-
-        let center = POINT {
-            x: (x + w * 0.5).round() as i32,
-            y: (y + h * 0.5).round() as i32,
-        };
-        // SAFETY:
-        // 中心点から nearest monitor を引き、成功時だけ `MONITORINFO` を読み取る。
-        // `cbSize` は Win32 要件どおり設定済みで、失敗時は `None` を返す。
-        unsafe {
-            let monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
-            if monitor.0.is_null() {
-                return None;
-            }
-            let mut info = MONITORINFO {
-                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-                return None;
-            }
-            let rc = info.rcMonitor;
-            Some([
-                rc.left as f32,
-                rc.top as f32,
-                (rc.right - rc.left) as f32,
-                (rc.bottom - rc.top) as f32,
-            ])
-        }
+        crate::platform::windows_monitor::monitor_rect_from_point(x + w * 0.5, y + h * 0.5)
     }
 
     #[cfg(not(windows))]
@@ -371,6 +340,6 @@ fn virtual_screen_rect() -> (f32, f32, f32, f32) {
 
 #[cfg(windows)]
 #[link(name = "User32")]
-extern "system" {
+unsafe extern "system" {
     fn GetSystemMetrics(nIndex: i32) -> i32;
 }

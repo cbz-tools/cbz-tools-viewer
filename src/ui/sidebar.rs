@@ -8,13 +8,13 @@ use eframe::egui::text::LayoutJob;
 use crate::{
     domain::app_settings::UiLanguage,
     infra::cache::disk::DiskCache,
-    session::{unix_ns_to_system_time, HistoryEntry, LeftPaneTab},
-    ui::thumb_cache::load_disk_thumb_texture,
+    session::{HistoryEntry, LeftPaneTab, unix_ns_to_system_time},
+    ui::thumb_cache::{LoadedDiskThumb, load_disk_thumb_texture},
 };
 
 use super::{
     common::{paint_favorite_star_in_rect, paint_quiet_hover_border},
-    i18n::{tr, TextKey},
+    i18n::{TextKey, tr},
     icons,
     library::{LibraryScope, LibraryState, ReadingHudState},
     theme,
@@ -64,7 +64,7 @@ fn paint_sidebar_data_row_state(ui: &egui::Ui, rect: egui::Rect, selected: bool,
         ui.painter().rect_stroke(
             rect,
             egui::CornerRadius::same(4),
-            egui::Stroke::new(1.0, theme::HOVER_BORDER),
+            egui::Stroke::new(1.0_f32, theme::HOVER_BORDER),
             egui::StrokeKind::Inside,
         );
     } else if hovered {
@@ -73,7 +73,7 @@ fn paint_sidebar_data_row_state(ui: &egui::Ui, rect: egui::Rect, selected: bool,
         ui.painter().rect_stroke(
             rect,
             egui::CornerRadius::same(4),
-            egui::Stroke::new(3.0, theme::HOVER_BORDER),
+            egui::Stroke::new(3.0_f32, theme::HOVER_BORDER),
             egui::StrokeKind::Inside,
         );
     }
@@ -113,7 +113,7 @@ fn paint_reading_status_icon(
     };
     match state {
         ReadingHudState::Unread => {
-            let stroke = egui::Stroke::new(1.0, line_color);
+            let stroke = egui::Stroke::new(1.0_f32, line_color);
             let x0 = rect.min.x;
             let x1 = rect.max.x;
             let y0 = rect.min.y;
@@ -146,7 +146,7 @@ fn paint_reading_status_icon(
             painter.rect_stroke(
                 rect,
                 egui::CornerRadius::ZERO,
-                egui::Stroke::new(1.0, line_color),
+                egui::Stroke::new(1.0_f32, line_color),
                 egui::StrokeKind::Inside,
             );
         }
@@ -155,7 +155,7 @@ fn paint_reading_status_icon(
             painter.rect_stroke(
                 rect,
                 egui::CornerRadius::ZERO,
-                egui::Stroke::new(1.0, line_color),
+                egui::Stroke::new(1.0_f32, line_color),
                 egui::StrokeKind::Inside,
             );
         }
@@ -274,7 +274,7 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         disk_cache,
     } = context;
     let mut action: Option<SidebarAction> = None;
-    let quiet_stroke = egui::Stroke::new(1.0, egui::Color32::TRANSPARENT);
+    let quiet_stroke = egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT);
 
     ui.horizontal(|ui| {
         let is_library = *left_pane_tab == LeftPaneTab::Library;
@@ -344,15 +344,16 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                 if !history_textures.contains_key(&key) {
                     if let (Some(cache), Some(file_size)) = (disk_cache, entry.file_size) {
                         let modified = entry.modified_unix_ns.and_then(unix_ns_to_system_time);
-                        if let Some(thumb) = load_disk_thumb_texture(
+                        let loaded_thumb = load_disk_thumb_texture(
                             ui.ctx(),
                             cache,
                             &entry.path,
                             file_size,
                             modified,
                             format!("history_thumb_{}", key),
-                        ) {
-                            history_textures.insert(key.clone(), thumb.texture);
+                        );
+                        if let Some(LoadedDiskThumb { texture, .. }) = loaded_thumb {
+                            history_textures.insert(key.clone(), texture);
                         }
                     }
                 }
@@ -440,6 +441,11 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
 
     ui.separator();
     let mut remove_idx: Option<usize> = None;
+    let favorite_drag_id = ui.id().with("library_favorite_drag");
+    let mut favorite_drag_source = ui
+        .ctx()
+        .data(|data| data.get_temp::<usize>(favorite_drag_id));
+    let mut favorite_drop_index: Option<usize> = None;
     egui::ScrollArea::vertical()
         .id_salt("library_sidebar_scroll")
         .show(ui, |ui| {
@@ -465,8 +471,36 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                                 .fill(egui::Color32::TRANSPARENT)
                                 .stroke(quiet_stroke),
                         )
-                        .on_hover_text(path.to_string_lossy());
+                        .on_hover_text(path.to_string_lossy())
+                        .interact(egui::Sense::click_and_drag());
+                    if resp.drag_started() {
+                        favorite_drag_source = Some(i);
+                        ui.ctx()
+                            .data_mut(|data| data.insert_temp(favorite_drag_id, i));
+                    }
                     paint_sidebar_data_row_state(ui, resp.rect, is_current, resp.hovered());
+
+                    if let (Some(source), Some(pointer_pos)) = (
+                        favorite_drag_source,
+                        ui.ctx().input(|input| input.pointer.interact_pos()),
+                    ) {
+                        if source != i && resp.rect.contains(pointer_pos) {
+                            let insert_before = pointer_pos.y < resp.rect.center().y;
+                            favorite_drop_index = Some(i + usize::from(!insert_before));
+                            let y = if insert_before {
+                                resp.rect.top()
+                            } else {
+                                resp.rect.bottom()
+                            };
+                            ui.painter().line_segment(
+                                [
+                                    egui::pos2(resp.rect.left(), y),
+                                    egui::pos2(resp.rect.right(), y),
+                                ],
+                                egui::Stroke::new(2.0, theme::ACCENT_ACTIVE),
+                            );
+                        }
+                    }
                     let text_pos = resp.rect.left_center() + egui::vec2(22.0, 0.0);
                     let icon_rect = egui::Rect::from_min_size(
                         resp.rect.left_center() + egui::vec2(4.0, -6.0),
@@ -726,6 +760,24 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                 }
             }
         });
+
+    if !ui
+        .ctx()
+        .input(|input| input.pointer.button_down(egui::PointerButton::Primary))
+    {
+        if let (Some(source), Some(mut destination)) = (favorite_drag_source, favorite_drop_index) {
+            if source < destination {
+                destination -= 1;
+            }
+            if source != destination {
+                let moved = favorites.remove(source);
+                favorites.insert(destination, moved);
+                tracing::debug!(source, destination, "sidebar: favorite reordered");
+            }
+        }
+        ui.ctx()
+            .data_mut(|data| data.remove::<usize>(favorite_drag_id));
+    }
 
     if let Some(i) = remove_idx {
         let removed = favorites.get(i).map(|p| p.display().to_string());

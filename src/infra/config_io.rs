@@ -59,7 +59,7 @@ fn unique_temp_path(path: &Path) -> PathBuf {
 fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt as _;
     use windows_sys::Win32::Storage::FileSystem::{
-        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
     let temp_wide: Vec<u16> = temp_path
