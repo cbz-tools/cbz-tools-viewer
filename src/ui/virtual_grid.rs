@@ -90,6 +90,7 @@ pub struct GridViewContext<'a> {
     pub selected_set: &'a HashSet<usize>,
     pub is_favorite: &'a dyn Fn(&LibraryEntry) -> bool,
     pub reading_hud_state: &'a dyn Fn(&LibraryEntry) -> ReadingHudState,
+    pub has_page_map_failure: &'a dyn Fn(&LibraryEntry) -> bool,
     pub interaction_enabled: bool,
     pub external_tools: &'a [ExternalToolMenuItem],
     pub external_tool_busy: bool,
@@ -191,6 +192,7 @@ pub fn show_grid(
         selected_set,
         is_favorite,
         reading_hud_state,
+        has_page_map_failure,
         interaction_enabled,
         external_tools,
         external_tool_busy,
@@ -302,6 +304,7 @@ pub fn show_grid(
                         let can_toggle_favorite = entry.is_favorite_target();
                         let favorite_state = is_favorite(entry);
                         let reading_state = reading_hud_state(entry);
+                        let page_map_failed = has_page_map_failure(entry);
 
                         let thumb_state = thumb_cell_state(entry, book_states);
                         let action = draw_thumb_cell(
@@ -342,6 +345,7 @@ pub fn show_grid(
                                 hud_font_size,
                                 hud_selected: is_primary || is_in_set,
                                 reading_state,
+                                has_page_map_failure: page_map_failed,
                                 is_favorite: favorite_state,
                                 language,
                             },
@@ -517,6 +521,7 @@ struct ThumbCellRenderState {
     hud_font_size: f32,
     hud_selected: bool,
     reading_state: ReadingHudState,
+    has_page_map_failure: bool,
     is_favorite: bool,
     language: UiLanguage,
 }
@@ -1480,6 +1485,21 @@ fn render_thumb_cell_hud(
                     badge_palette,
                 );
             }
+            if render_state.has_page_map_failure {
+                let failure_palette = hud_overlay_palette(
+                    render_state.hud_style,
+                    render_state.hud_selected,
+                    render_state.selection_style,
+                    220,
+                );
+                draw_page_map_failure_overlay(
+                    painter,
+                    thumb_rect,
+                    tr(render_state.language, TextKey::PageMapUnavailableHud),
+                    render_state.hud_font_size,
+                    failure_palette,
+                );
+            }
             draw_multi_line_title_overlay(
                 painter,
                 thumb_rect,
@@ -1493,6 +1513,52 @@ fn render_thumb_cell_hud(
 
 fn hud_font(font_size: f32) -> egui::FontId {
     egui::FontId::proportional(font_size.clamp(8.0, 20.0))
+}
+
+fn draw_page_map_failure_overlay(
+    painter: &egui::Painter,
+    thumb_rect: Rect,
+    label: &str,
+    font_size: f32,
+    palette: HudPalette,
+) {
+    let font = hud_font(font_size);
+    let line_h = (font.size + 2.0).max(14.0);
+    let pad = vec2(7.0, 5.0);
+    let max_text_w = (thumb_rect.width() - 16.0).max(20.0);
+    let lines = layout_title_lines(painter, label, 2, max_text_w, font.clone());
+    if lines.is_empty() {
+        return;
+    }
+    let text_w = lines
+        .iter()
+        .map(|line| measured_text_width(painter, line, &font))
+        .fold(0.0, f32::max)
+        .min(max_text_w);
+    let panel_size = vec2(
+        (text_w + pad.x * 2.0).clamp(24.0, thumb_rect.width() - 8.0),
+        line_h * lines.len() as f32 + pad.y * 2.0,
+    );
+    let panel_center = pos2(
+        thumb_rect.center().x,
+        thumb_rect.center().y - thumb_rect.height() * 0.08,
+    );
+    let panel_rect = Rect::from_center_size(panel_center, panel_size);
+    painter.rect_filled(panel_rect, CornerRadius::same(4), palette.background);
+
+    let clipped = painter.with_clip_rect(panel_rect.shrink2(vec2(pad.x, 0.0)));
+    for (index, line) in lines.iter().enumerate() {
+        clipped.text(
+            pos2(
+                panel_rect.center().x,
+                panel_rect.min.y + pad.y + index as f32 * line_h,
+            ),
+            egui::Align2::CENTER_TOP,
+            line,
+            font.clone(),
+            palette.foreground,
+        );
+    }
 }
 
 fn draw_multi_line_title_overlay(

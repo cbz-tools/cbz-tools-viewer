@@ -36,7 +36,7 @@ use crate::infra::cache::page_map::PageMapDiskCache;
 use crate::infra::image::decode as img;
 use crate::infra::page_map::coordinator::{
     PageMapCompleteRequest, PageMapCoordinator, PageMapFastPersistRequest,
-    PageMapReadyPersistRequest,
+    PageMapReadyPersistRequest, PageMapStatus,
 };
 use crate::repaint::RepaintNotifier;
 use crate::util::archive_path::is_supported_image_path;
@@ -89,6 +89,7 @@ pub enum WorkerMsg {
     FailedPermanent(BookId),
     /// 要求後に同じ path/id のファイル内容が変わった古いタスク。UI へ失敗状態としては反映しない。
     Stale(BookId),
+    PageMapStatus(PageMapStatus),
 }
 
 // ── ThumbWorker ───────────────────────────────────────────────────────────────
@@ -262,11 +263,20 @@ fn worker_main(
             None
         }
     };
+    let page_map_status_notifier = {
+        let resp_tx = resp_tx.clone();
+        let repaint = repaint.clone();
+        Arc::new(move |status| {
+            let _ = resp_tx.send(WorkerMsg::PageMapStatus(status));
+            repaint.request_repaint();
+        })
+    };
     let page_map_coordinator = Arc::new(PageMapCoordinator::new(
         Arc::clone(&generation),
         Arc::clone(&artifact_generation),
         Arc::clone(&artifact_gate),
         artifact_failure_cache.as_ref().map(Arc::clone),
+        Some(page_map_status_notifier),
     ));
     let shared = Arc::new(WorkerShared {
         mem_cache: ThumbMemCache::new(THUMB_MEM_CACHE_MAX_BYTES),
@@ -556,6 +566,9 @@ async fn handle_thumb_result(
         WorkerMsg::Stale(_) => {
             // 古い結果は UI にも retry queue にも流さない。
         }
+        WorkerMsg::PageMapStatus(_) => {
+            // Page Map 状態は後段の coordinator から直接 UI へ通知される。
+        }
         WorkerMsg::Failed(_) => {
             if let Some(rtx) = runtime.retry_tx {
                 tracing::warn!(
@@ -783,6 +796,9 @@ async fn retry_worker_loop(
             }
             Ok((WorkerMsg::Stale(_), _)) => {
                 // 差し替え後の古い retry task。新しい scan/request 側に任せる。
+            }
+            Ok((WorkerMsg::PageMapStatus(_), _)) => {
+                // Page Map 状態は後段の coordinator から直接 UI へ通知される。
             }
             Ok((WorkerMsg::FailedPermanent(_), _)) => {
                 let book_id_hex = job.task.book_id.0.to_hex();

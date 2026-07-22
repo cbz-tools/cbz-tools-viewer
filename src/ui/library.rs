@@ -21,6 +21,23 @@ const LIBRARY_THUMB_TEXTURE_KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 // ライブラリフォルダのリアルタイム追従用ポーリング間隔
 const LIBRARY_DIR_POLL_INTERVAL: Duration = Duration::from_secs(3);
+// 起動前に記録済みの Page Map 失敗を、カードが初めて表示される際に読み出す。
+
+fn open_artifact_failure_cache() -> Option<ArtifactFailureDiskCache> {
+    ArtifactFailureDiskCache::open(ArtifactFailureDiskCache::default_root())
+        .or_else(|_| {
+            ArtifactFailureDiskCache::open(
+                std::env::temp_dir()
+                    .join(crate::app_identity::app_data_dir())
+                    .join("artifact_failures"),
+            )
+        })
+        .map_err(|error| {
+            tracing::warn!("library page-map failure cache unavailable: {error}");
+            error
+        })
+        .ok()
+}
 
 use eframe::egui;
 
@@ -30,9 +47,12 @@ use crate::{
         archive::{BookId, BookMeta, LibraryEntry},
         archive_settings::{FileSettings, ReadingState, SettingsStore, book_settings_path},
         kind_group::KindGroupConfig,
+        page_map::SourceRevision,
         sort::{SortKey, SortOrder},
     },
+    infra::cache::artifact_failure::{ArtifactFailureDiskCache, ArtifactKind},
     infra::favorite_store::{FavoriteState, FavoriteStore},
+    infra::page_map::coordinator::PageMapStatus,
     infra::worker::thumb_worker::{ThumbTask, ThumbWorker, WorkerMsg},
     repaint::RepaintNotifier,
     util::{
@@ -200,6 +220,9 @@ pub struct LibraryState {
     /// サイドバー操作後にグリッドのコンテキストメニューキャッシュをリセットする
     pub reset_context_menu_cache: bool,
     reading_hud_states: HashMap<PathBuf, ReadingHudState>,
+    page_map_failure_cache: Option<ArtifactFailureDiskCache>,
+    page_map_failure_revisions: HashMap<BookId, SourceRevision>,
+    page_map_failure_checked_revisions: HashMap<BookId, SourceRevision>,
 
     // ── サムネイルサイズ（AppSettings から更新） ─────────────────────────────
     /// サムネイル幅（px）
@@ -753,6 +776,91 @@ impl LibraryState {
         ReadingHudState::Unread
     }
 
+    pub(crate) fn has_page_map_failure_for_entry(&self, entry: &LibraryEntry) -> bool {
+        let LibraryEntry::Archive(book) = entry else {
+            return false;
+        };
+        let revision = SourceRevision::from_file_state(book.size, Some(book.modified));
+        self.page_map_failure_revisions.get(&book.id) == Some(&revision)
+    }
+
+    fn refresh_visible_page_map_failures(
+        &mut self,
+        visible_range: std::ops::RangeInclusive<usize>,
+        ctx: &egui::Context,
+    ) {
+        let checks: Vec<_> = visible_range
+            .filter_map(|idx| match self.entries.get(idx) {
+                Some(LibraryEntry::Archive(book)) => {
+                    let revision = SourceRevision::from_file_state(book.size, Some(book.modified));
+                    if self.page_map_failure_checked_revisions.get(&book.id) == Some(&revision) {
+                        return None;
+                    }
+                    Some((
+                        book.id.clone(),
+                        revision.clone(),
+                        self.page_map_failure_cache.as_ref().is_some_and(|cache| {
+                            cache.has_failure_for_revision(
+                                &book.id,
+                                &revision,
+                                ArtifactKind::PageMap,
+                            )
+                        }),
+                    ))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut changed = false;
+        for (id, revision, failed) in checks {
+            self.page_map_failure_checked_revisions
+                .insert(id.clone(), revision.clone());
+            if failed {
+                if self.page_map_failure_revisions.get(&id) != Some(&revision) {
+                    self.page_map_failure_revisions.insert(id, revision);
+                    changed = true;
+                }
+            } else if self.page_map_failure_revisions.remove(&id).is_some() {
+                changed = true;
+            }
+        }
+        if changed {
+            ctx.request_repaint();
+        }
+    }
+
+    fn apply_page_map_status(&mut self, status: PageMapStatus) {
+        self.page_map_failure_checked_revisions
+            .insert(status.book_id.clone(), status.source_revision.clone());
+        if status.failed {
+            self.page_map_failure_revisions
+                .insert(status.book_id, status.source_revision);
+        } else if self.page_map_failure_revisions.get(&status.book_id)
+            == Some(&status.source_revision)
+        {
+            self.page_map_failure_revisions.remove(&status.book_id);
+        }
+    }
+
+    fn prune_page_map_failure_states(&mut self) {
+        let revisions: HashMap<_, _> = self
+            .raw_entries
+            .iter()
+            .filter_map(|entry| match entry {
+                LibraryEntry::Archive(book) => Some((
+                    book.id.clone(),
+                    SourceRevision::from_file_state(book.size, Some(book.modified)),
+                )),
+                _ => None,
+            })
+            .collect();
+        self.page_map_failure_revisions
+            .retain(|id, revision| revisions.get(id) == Some(revision));
+        self.page_map_failure_checked_revisions
+            .retain(|id, revision| revisions.get(id) == Some(revision));
+    }
+
     pub(crate) fn refresh_reading_hud_state_for_path(&mut self, path: &Path) {
         let key = book_settings_path(path);
         let settings = SettingsStore::load().get(key.as_path());
@@ -1001,6 +1109,9 @@ impl LibraryState {
             scroll_selected_into_view_pending: false,
             reset_context_menu_cache: false,
             reading_hud_states: HashMap::new(),
+            page_map_failure_cache: open_artifact_failure_cache(),
+            page_map_failure_revisions: HashMap::new(),
+            page_map_failure_checked_revisions: HashMap::new(),
             thumb_w: theme::THUMB_W,
             thumb_h: theme::THUMB_H,
             wheel_scroll_multiplier: 2.0,
@@ -1619,6 +1730,7 @@ impl LibraryState {
     }
 
     fn rebuild_entries(&mut self) {
+        self.prune_page_map_failure_states();
         let selected_paths_before = self.selected_paths_snapshot();
         let selected_path_before = self
             .selected_idx
@@ -1794,6 +1906,10 @@ impl LibraryState {
                         state.thumb_requested = false;
                     }
                     stale += 1;
+                }
+                WorkerMsg::PageMapStatus(status) => {
+                    self.apply_page_map_status(status);
+                    ctx.request_repaint();
                 }
             }
             let processed_count = received + failed + stale;
@@ -2279,6 +2395,7 @@ pub fn show(
             selected_set: &state.selected_set,
             is_favorite: &|entry| state.is_favorite_entry(entry),
             reading_hud_state: &|entry| state.reading_hud_state_for_entry(entry),
+            has_page_map_failure: &|entry| state.has_page_map_failure_for_entry(entry),
             interaction_enabled: !interaction_blocked,
             external_tools,
             external_tool_busy,
@@ -2297,6 +2414,7 @@ pub fn show(
     );
 
     if let Some(visible_range) = result.visible_range.clone() {
+        state.refresh_visible_page_map_failures(visible_range.clone(), ui.ctx());
         let keep_indices = state.compute_texture_keep_indices_by_budget(visible_range.clone());
         state.evict_thumb_textures_outside_keep_indices(&keep_indices);
         state.ensure_visible_thumb_textures(&visible_range);

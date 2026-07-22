@@ -27,13 +27,23 @@ use crate::infra::cache::artifact_failure::{ArtifactFailureDiskCache, ArtifactKi
 use crate::infra::cache::page_map::PageMapDiskCache;
 use crate::infra::page_map::build::{PageMapBuildStatus, assemble_zip_fast_page_map};
 
-/// Page Map の生成結果を cache に反映し、stale と重複 complete を抑止する。
 #[derive(Clone, Debug)]
+pub struct PageMapStatus {
+    pub book_id: BookId,
+    pub source_revision: SourceRevision,
+    pub failed: bool,
+}
+
+type PageMapStatusNotifier = Arc<dyn Fn(PageMapStatus) + Send + Sync>;
+
+/// Page Map の生成結果を cache に反映し、stale と重複 complete を抑止する。
+#[derive(Clone)]
 pub struct PageMapCoordinator {
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
     artifact_gate: Arc<RwLock<()>>,
     artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
+    status_notifier: Option<PageMapStatusNotifier>,
     page_map_slow_states: Arc<Mutex<HashMap<PageMapTaskKey, PageMapSlowState>>>,
     page_map_complete_permit: Arc<Semaphore>,
 }
@@ -44,12 +54,14 @@ impl PageMapCoordinator {
         artifact_generation: Arc<AtomicU64>,
         artifact_gate: Arc<RwLock<()>>,
         artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
+        status_notifier: Option<PageMapStatusNotifier>,
     ) -> Self {
         Self {
             generation,
             artifact_generation,
             artifact_gate,
             artifact_failure_cache,
+            status_notifier,
             page_map_slow_states: Arc::new(Mutex::new(HashMap::new())),
             page_map_complete_permit: Arc::new(Semaphore::new(1)),
         }
@@ -809,6 +821,7 @@ impl PageMapCoordinator {
                 }
             }
         }
+        self.notify_status(id, revision, true);
     }
 
     fn clear_page_map_failure(&self, id: &BookId, revision: &SourceRevision) {
@@ -820,6 +833,7 @@ impl PageMapCoordinator {
                         source_revision = ?revision,
                         "page-map failure cache cleared after success"
                     );
+                    self.notify_status(id, revision, false);
                 }
                 Ok(false) => {}
                 Err(error) => {
@@ -831,6 +845,16 @@ impl PageMapCoordinator {
                     );
                 }
             }
+        }
+    }
+
+    fn notify_status(&self, id: &BookId, revision: &SourceRevision, failed: bool) {
+        if let Some(notifier) = self.status_notifier.as_ref() {
+            notifier(PageMapStatus {
+                book_id: id.clone(),
+                source_revision: revision.clone(),
+                failed,
+            });
         }
     }
 
