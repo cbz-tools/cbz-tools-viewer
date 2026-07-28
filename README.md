@@ -34,8 +34,7 @@ The demo manga assets are also licensed under the MIT License.
 
 # Highlights
 
-* Delete the current book and move on to the next one.
-* Select an unwanted page range in the viewer, exclude those pages, and rebuild the archive.
+* Organize books as you read. Delete unwanted books, exclude unnecessary pages, and optimize compression through integration with external tools.
 * Predictive loading and caching help keep page turns responsive, even in large books.
 * Adjacent book preloading prepares nearby pages from the next and previous books in the background, reducing the delay when moving between books.
 * Animated WebP streaming playback, including spread view.
@@ -78,7 +77,7 @@ See the [Operation Guide](docs/operation.md) for details.
 
 CBZ Viewer can launch external tools while you read.
 
-With the companion project **CBZ Tools Optimizer**, you can run CBZ / ZIP archive optimization, format conversion, and size reduction workflows.
+With the companion project [**CBZ Tools Optimizer**](https://github.com/cbz-tools/cbz-tools-optimizer), you can run CBZ / ZIP archive optimization, format conversion, and size reduction workflows.
 
 ---
 
@@ -93,15 +92,11 @@ With the companion project **CBZ Tools Optimizer**, you can run CBZ / ZIP archiv
 
 ## Archive
 
-* CBZ
-* ZIP
-* RAR
-* CBR
+* CBZ / ZIP
+* RAR / CBR
 * EPUB image books
 
-EPUB support is intended for image-based EPUB books. CBZ Viewer uses the EPUB reading order and treats image references in XHTML pages as comic pages.
-
-Text EPUB, reflow layout, CSS layout rendering, DRM-protected EPUB, audio, video, JavaScript, and SVG rendering are not supported.
+Image-based EPUB books are supported. Text EPUB, reflow and CSS-based layouts, DRM-protected EPUB, audio, video, JavaScript, and SVG rendering are not supported.
 
 ## Folder
 
@@ -115,7 +110,7 @@ Text EPUB, reflow layout, CSS layout rendering, DRM-protected EPUB, audio, video
 * AVIF (.avif / .avifs)
 * BMP
 * TIFF
-* GIF
+* GIF (static / animated)
 
 When you open a single supported image file, CBZ Viewer opens the parent folder as a book and starts from that image.
 
