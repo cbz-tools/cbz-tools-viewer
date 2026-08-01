@@ -17,6 +17,7 @@
 - Migrated the project from Rust 2021 to Rust 2024, pinned the toolchain and CI to Rust 1.97.0, and adopted Cargo resolver 3.
 - Updated eframe and egui to 0.35 and `egui_material_icons` to 0.7, including the required eframe lifecycle and root UI API migration while retaining the Glow renderer.
 - Updated `zip` to 8.6, `fast_image_resize` to 6, `lru` to 0.18, and `quick-xml` to 0.41.
+- Moved animated WebP inspection and frame decoding into the published crates.io `webp-anim` `0.1.0` crate, replacing the viewer's direct `libwebp-sys` integration.
 - Refreshed compatible direct dependencies within their existing version requirements, including serde_json, toml, chrono, tokio, memmap2, blake3, bytes, anyhow, and log.
 - Removed the unused direct development dependency on `tempfile` and made the required `windows-sys` `Win32_Security` feature explicit.
 

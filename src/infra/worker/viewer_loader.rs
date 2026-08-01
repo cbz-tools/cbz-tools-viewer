@@ -1164,33 +1164,26 @@ fn start_animation_stream(
     display_h: u32,
     quality: ViewerQuality,
 ) -> anyhow::Result<AnimationStreamChunkPage> {
+    let source = img::WebpAnimFrameSource::new(raw.as_ref())?;
     let key = (pn, display_w, display_h, quality);
-    let source = img::WebpAnimFrameSource::new(raw.to_vec())?;
     cached
         .animation_streams
         .insert(key, CachedAnimationStream { source });
-    read_animation_stream_chunk(cached, &key, pn)
+    read_animation_stream_chunk(cached, &key)
 }
 
 fn read_animation_stream_chunk(
     cached: &mut CachedReader,
     key: &AnimationStreamKey,
-    pn: u32,
 ) -> anyhow::Result<AnimationStreamChunkPage> {
-    let stream = cached
-        .animation_streams
-        .get_mut(key)
-        .context("animation stream missing")?;
-    let started = Instant::now();
-    let chunk = stream.source.decode_chunk(ANIMATION_STREAM_CHUNK_FRAMES)?;
-    tracing::trace!(
-        page_n = pn,
-        frame_count = chunk.frames.len(),
-        exhausted = chunk.exhausted,
-        elapsed_ms = started.elapsed().as_millis(),
-        total_frames = chunk.frame_count,
-        "viewer_loader: animation stream chunk ready"
-    );
+    let (chunk, original_canvas) = {
+        let stream = cached
+            .animation_streams
+            .get_mut(key)
+            .context("animation stream missing")?;
+        let chunk = stream.source.decode_chunk(ANIMATION_STREAM_CHUNK_FRAMES)?;
+        (chunk, stream.source.canvas())
+    };
 
     if chunk.exhausted {
         cached.animation_streams.remove(key);
@@ -1199,8 +1192,8 @@ fn read_animation_stream_chunk(
     Ok(AnimationStreamChunkPage {
         frames: Arc::new(chunk.frames),
         exhausted: chunk.exhausted,
-        orig_w: chunk.width,
-        orig_h: chunk.height,
+        orig_w: original_canvas.width,
+        orig_h: original_canvas.height,
     })
 }
 
@@ -1217,10 +1210,10 @@ fn get_animation_stream_chunk(
     if kind == ViewerRequestKind::AnimationStreamStart
         || !cached.animation_streams.contains_key(&key)
     {
-        let raw_data = get_page_raw(cached, pn)?;
-        return start_animation_stream(cached, pn, raw_data.raw, display_w, display_h, quality);
+        let raw = get_page_raw(cached, pn)?.raw;
+        return start_animation_stream(cached, pn, raw, display_w, display_h, quality);
     }
-    read_animation_stream_chunk(cached, &key, pn)
+    read_animation_stream_chunk(cached, &key)
 }
 
 fn get_animation_stream_chunk_or_failed(

@@ -1,6 +1,6 @@
 [package]
 name = "cbz-viewer"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 authors = []
 description = "High-performance CBZ/ZIP/RAR manga viewer"
@@ -65,7 +65,7 @@ unrar_sys         = { version = "0.5", optional = true }   # feature "rar" で�
 # --- 画像 (§11, §8) ---
 image             = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 webp              = "0.3"   # libwebp-sys（bundled C）経由の WebP デコード／エンコード
-libwebp-sys       = "0.9.6" # animated WebP の低レベル demux / decoder API
+webp-anim         = "0.1.0"   # crates.io の animated WebP inspect / decoder API
 zune-jpeg         = "0.5"   # 純 Rust JPEG デコード（mozjpeg feature なし時に使用）
 zune-core         = "0.5"   # zune-jpeg 0.5 が要求するバージョンに合わせる
 fast_image_resize = "6"

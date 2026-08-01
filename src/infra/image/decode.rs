@@ -7,12 +7,8 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use libwebp_sys::{
-    WEBP_CSP_MODE, WebPAnimDecoder, WebPAnimDecoderDelete, WebPAnimDecoderGetInfo,
-    WebPAnimDecoderGetNext, WebPAnimDecoderHasMoreFrames, WebPAnimDecoderNewInternal,
-    WebPAnimDecoderOptions, WebPAnimDecoderOptionsInitInternal, WebPAnimInfo, WebPData,
-    WebPGetDemuxABIVersion,
-};
+pub use webp_anim::is_animated_webp_fast;
+use webp_anim::{AnimationDecoder, DecodeLimits, InspectLimits, WebpKind, inspect};
 
 use crate::domain::app_settings::ViewerQuality;
 use crate::domain::page::ImageFormatHint;
@@ -22,9 +18,6 @@ use crate::domain::page::ImageFormatHint;
 pub const MIN_FRAME_DELAY_MS: u32 = 16;
 /// `egui` / `wgpu` から texture 上限を取得できない場合の保守的な fallback。
 pub(crate) const DEFAULT_MAX_TEXTURE_SIDE: u32 = 8192;
-const RIFF_HEADER_LEN: usize = 12;
-const RIFF_CHUNK_HEADER_LEN: usize = 8;
-const WEBP_ANIMATION_FLAG: u8 = 0x02;
 const STATIC_FRAME_DELAY_MS: u32 = 0;
 const FALLBACK_FRAME_DELAY_MS: u32 = 100;
 const MIN_ANIMATION_DELAY_MS: u32 = 20;
@@ -58,87 +51,30 @@ pub struct ViewerFrames {
 pub struct AnimationFrameChunk {
     pub frames: Vec<FrameData>,
     pub exhausted: bool,
-    pub width: u32,
-    pub height: u32,
-    pub frame_count: u32,
 }
 
-/// `libwebp` の WebPAnimDecoder をラップし、順次フレームを安全寄りに扱う。
+/// 共用 crate の decoder を viewer の再生フレーム型へ適合する。
 pub struct WebpAnimFrameSource {
-    // Keep WebPData.bytes alive for libwebp decoder lifetime.
-    _data: Vec<u8>,
-    decoder: *mut WebPAnimDecoder,
-    info: WebPAnimInfo,
-    prev_timestamp: i32,
-    emitted_frames: usize,
-}
-
-impl Drop for WebpAnimFrameSource {
-    fn drop(&mut self) {
-        // SAFETY: `decoder` は `WebPAnimDecoderNewInternal` 成功時だけ保持し、Drop で 1 回だけ解放する。
-        unsafe {
-            if !self.decoder.is_null() {
-                WebPAnimDecoderDelete(self.decoder);
-            }
-        }
-    }
+    decoder: AnimationDecoder,
 }
 
 impl WebpAnimFrameSource {
-    pub fn new(data: Vec<u8>) -> Result<Self> {
-        if !is_animated_webp_fast(&data) {
-            anyhow::bail!("not an animated webp");
-        }
-
-        // SAFETY: C struct は直後に init API へ渡し、未初期化のまま読み出さない。
-        let mut options: WebPAnimDecoderOptions = unsafe { std::mem::zeroed() };
-        let demux_abi = WebPGetDemuxABIVersion();
-        // SAFETY: `options` は有効な書込み先で、ABI version は libwebp から取得したものを使う。
-        let ok = unsafe { WebPAnimDecoderOptionsInitInternal(&mut options, demux_abi) };
-        if ok == 0 {
-            anyhow::bail!("WebPAnimDecoder options init failed");
-        }
-        options.color_mode = WEBP_CSP_MODE::MODE_RGBA;
-        options.use_threads = 1;
-
-        let webp_data = WebPData {
-            bytes: data.as_ptr(),
-            size: data.len(),
-        };
-        // SAFETY:
-        // `webp_data.bytes` は `data` の所有期間中ずっと生存し、`Self` が `_data` で保持する。
-        // `options` は初期化済みで、この呼び出し中生存する。
-        let decoder = unsafe { WebPAnimDecoderNewInternal(&webp_data, &options, demux_abi) };
-        if decoder.is_null() {
-            anyhow::bail!("WebPAnimDecoder creation failed");
-        }
-
-        // SAFETY: C struct は libwebp が全フィールドを書き込む出力バッファとしてだけ使う。
-        let mut info: WebPAnimInfo = unsafe { std::mem::zeroed() };
-        // SAFETY: `decoder` は null でない生成成功値、`info` は有効な出力先。
-        let ok = unsafe { WebPAnimDecoderGetInfo(decoder, &mut info) };
-        if ok == 0 {
-            // SAFETY: 生成成功した `decoder` を early return 前にここで解放する。
-            unsafe { WebPAnimDecoderDelete(decoder) };
-            anyhow::bail!("WebPAnimDecoder info failed");
-        }
-
+    pub fn new(data: &[u8]) -> Result<Self> {
         Ok(Self {
-            _data: data,
-            decoder,
-            info,
-            prev_timestamp: 0,
-            emitted_frames: 0,
+            decoder: AnimationDecoder::new(data, DecodeLimits::for_trusted_input())?,
         })
     }
 
     pub fn frame_count(&self) -> u32 {
-        self.info.frame_count
+        self.decoder.info().frame_count
+    }
+
+    pub fn canvas(&self) -> webp_anim::CanvasSize {
+        self.decoder.info().canvas
     }
 
     pub fn has_more_frames(&self) -> bool {
-        // SAFETY: `decoder` は `Self` の生存中だけ保持され、Drop まで解放しない。
-        unsafe { WebPAnimDecoderHasMoreFrames(self.decoder) > 0 }
+        self.decoder.has_more_frames()
     }
 
     pub fn next_frame(&mut self) -> Result<Option<FrameData>> {
@@ -146,44 +82,24 @@ impl WebpAnimFrameSource {
             return Ok(None);
         }
 
-        let bytes_per_frame = (self.info.canvas_width as usize)
-            .checked_mul(self.info.canvas_height as usize)
-            .and_then(|pixels| pixels.checked_mul(4))
-            .context("WebP animation frame size overflow")?;
-        let mut buf: *mut u8 = std::ptr::null_mut();
-        let mut timestamp: i32 = 0;
-        // SAFETY: `decoder` は有効で、`buf` / `timestamp` は libwebp への出力先。
-        let ok = unsafe { WebPAnimDecoderGetNext(self.decoder, &mut buf, &mut timestamp) };
-        if ok == 0 || buf.is_null() {
-            anyhow::bail!("WebPAnimDecoder get next frame failed");
-        }
-
-        // SAFETY:
-        // `buf` は libwebp が返した RGBA バッファ先頭で、サイズは checked 計算した
-        // canvas 幅高 × 4 bytes/pixel。
-        // ここでは即 `Vec` へコピーし、借用を持ち出さない。
-        let pixels = unsafe { std::slice::from_raw_parts(buf, bytes_per_frame) }.to_vec();
-        let raw_delay = if self.emitted_frames == 0 {
-            timestamp
-        } else {
-            timestamp.saturating_sub(self.prev_timestamp)
+        let Some(frame) = self.decoder.next_frame()? else {
+            return Ok(None);
         };
-        self.prev_timestamp = timestamp;
-        self.emitted_frames += 1;
+        let raw_delay = u32::try_from(frame.duration.as_millis()).unwrap_or(u32::MAX);
 
         Ok(Some(FrameData {
             image: DecodedImage {
-                width: self.info.canvas_width,
-                height: self.info.canvas_height,
-                pixels,
+                width: frame.canvas.width,
+                height: frame.canvas.height,
+                pixels: frame.rgba,
             },
-            delay_ms: raw_delay.max(MIN_FRAME_DELAY_MS as i32) as u32,
+            delay_ms: raw_delay.max(MIN_FRAME_DELAY_MS),
         }))
     }
 
     pub fn decode_chunk(&mut self, frame_limit: usize) -> Result<AnimationFrameChunk> {
         let limit = frame_limit.max(1);
-        let mut frames = Vec::with_capacity(limit.min(self.info.frame_count as usize));
+        let mut frames = Vec::with_capacity(limit.min(self.frame_count() as usize));
         while frames.len() < limit {
             let Some(frame) = self.next_frame()? else {
                 break;
@@ -193,9 +109,6 @@ impl WebpAnimFrameSource {
 
         Ok(AnimationFrameChunk {
             exhausted: !self.has_more_frames(),
-            width: self.info.canvas_width,
-            height: self.info.canvas_height,
-            frame_count: self.info.frame_count,
             frames,
         })
     }
@@ -432,7 +345,7 @@ fn decode_webp_frames_with_libwebp(
         }]);
     }
 
-    let mut source = WebpAnimFrameSource::new(data.to_vec())?;
+    let mut source = WebpAnimFrameSource::new(data)?;
     let frame_limit = frame_limit.unwrap_or(source.frame_count() as usize);
     let chunk = source.decode_chunk(frame_limit)?;
 
@@ -448,45 +361,10 @@ fn decode_webp_frames_with_libwebp(
 }
 
 pub fn is_animated_webp(data: &[u8]) -> Result<bool> {
-    use image::codecs::webp::WebPDecoder;
-
-    let decoder = WebPDecoder::new(std::io::Cursor::new(data)).context("WebP decoder")?;
-    Ok(decoder.has_animation())
-}
-
-pub fn is_animated_webp_fast(data: &[u8]) -> bool {
-    if data.len() < RIFF_HEADER_LEN + RIFF_CHUNK_HEADER_LEN + 1 {
-        return false;
-    }
-    if &data[0..4] != b"RIFF" || &data[8..RIFF_HEADER_LEN] != b"WEBP" {
-        return false;
-    }
-
-    let mut offset = RIFF_HEADER_LEN;
-    while offset + RIFF_CHUNK_HEADER_LEN <= data.len() {
-        let chunk = &data[offset..offset + 4];
-        let chunk_len = u32::from_le_bytes([
-            data[offset + 4],
-            data[offset + 5],
-            data[offset + 6],
-            data[offset + 7],
-        ]) as usize;
-        let payload = offset + RIFF_CHUNK_HEADER_LEN;
-        if payload > data.len() {
-            return false;
-        }
-        if chunk == b"VP8X" {
-            if payload >= data.len() {
-                return false;
-            }
-            return data[payload] & WEBP_ANIMATION_FLAG != 0;
-        }
-
-        let padded = (chunk_len + 1) & !1;
-        offset = payload.saturating_add(padded);
-    }
-
-    false
+    Ok(matches!(
+        inspect(data, InspectLimits::for_trusted_input())?,
+        WebpKind::Animated(_)
+    ))
 }
 
 fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {

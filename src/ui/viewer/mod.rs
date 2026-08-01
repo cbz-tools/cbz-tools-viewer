@@ -591,7 +591,6 @@ impl PageContent {
         label: &str,
         ctx: &egui::Context,
     ) -> Self {
-        let started = Instant::now();
         let queue: VecDeque<img::FrameData> = frames
             .iter()
             .map(|f| img::FrameData {
@@ -631,13 +630,6 @@ impl PageContent {
             &first.pixels,
         );
         let texture = ctx.load_texture(label, color, egui::TextureOptions::LINEAR);
-        tracing::debug!(
-            label,
-            frame_count = queue.len(),
-            exhausted,
-            elapsed_ms = started.elapsed().as_millis(),
-            "viewer_ui: animation stream texture upload complete"
-        );
         let delay = queue
             .front()
             .map(|f| f.delay_ms.max(img::MIN_FRAME_DELAY_MS) as u64)
