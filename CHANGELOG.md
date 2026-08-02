@@ -23,6 +23,7 @@
 
 ### Fixed
 
+- Fixed the Library top-bar path input field extending into the `Viewer:` controls.
 - Fixed the viewer opening-page cover-blank layout so Cover Blank now consistently shows a blank page paired with the cover in spread and auto modes.
 - Fixed viewer toolbar page titles for cover-blank spreads, including left-to-right and right-to-left reading directions.
 - Localized the viewer cover-blank toolbar label so English shows `Blank` and Japanese shows `ブランク`.

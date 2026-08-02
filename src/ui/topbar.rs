@@ -21,10 +21,8 @@ use super::{
 
 const FILTER_INPUT_WIDTH: f32 = 200.0;
 const FILTER_INPUT_HEIGHT: f32 = 24.0;
-const TRAILING_UI_RESERVE_WIDTH: f32 = 680.0;
 const TOPBAR_HEIGHT: f32 = 32.0;
 const TOPBAR_GAP_SMALL: f32 = 2.0;
-const PATH_MIN_WIDTH: f32 = 120.0;
 const ICON_SIZE_MENU_SETTINGS: f32 = 18.0;
 const ICON_SIZE_NAV: f32 = 16.0;
 const ICON_SIZE_SEARCH: f32 = 15.0;
@@ -176,154 +174,6 @@ pub fn show(
         nav_reload = nav_reload_resp.clicked();
         ui.add_space(TOPBAR_GAP_SMALL);
         ui.separator();
-
-        // path領域を先に確保して、右側UI描画で潰れないようにする。
-        let path_width = (ui.available_width() - TRAILING_UI_RESERVE_WIDTH).max(PATH_MIN_WIDTH);
-        let mut breadcrumb_segment_clicked = false;
-        ui.allocate_ui_with_layout(
-            egui::vec2(path_width, FILTER_INPUT_HEIGHT),
-            egui::Layout::left_to_right(egui::Align::Center),
-            |ui| {
-                if state.is_path_editing {
-                    let textedit_id = ui.id().with("path_edit_buffer");
-                    let output = egui::TextEdit::singleline(&mut state.path_edit_buffer)
-                        .id(textedit_id)
-                        .hint_text(tr(language, TextKey::EnterPathHint))
-                        .desired_width(path_width)
-                        .font(egui::TextStyle::Monospace)
-                        .show(ui);
-                    let path_resp = output.response;
-                    path_edit_rect = Some(path_resp.rect);
-                    if !state.path_input_focused {
-                        path_resp.request_focus();
-                    }
-                    if state.path_edit_select_all_pending && path_resp.has_focus() {
-                        let mut text_edit_state = output.state;
-                        let ccursor_range = CCursorRange::two(
-                            CCursor::new(0),
-                            CCursor::new(state.path_edit_buffer.chars().count()),
-                        );
-                        text_edit_state.cursor.set_char_range(Some(ccursor_range));
-                        text_edit_state.store(ui.ctx(), textedit_id);
-                        state.path_edit_select_all_pending = false;
-                    }
-                    state.path_input_focused = path_resp.has_focus();
-                    let lost_focus = path_resp.lost_focus();
-                    let mut enter_pressed = false;
-                    let mut esc_pressed = false;
-                    if path_resp.has_focus() {
-                        ui.input_mut(|i| {
-                            enter_pressed = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
-                            esc_pressed = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
-                            i.consume_key(egui::Modifiers::CTRL, egui::Key::C);
-                            i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
-                            i.consume_key(egui::Modifiers::CTRL, egui::Key::A);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::Home);
-                            i.consume_key(egui::Modifiers::NONE, egui::Key::End);
-                        });
-                    }
-                    if path_resp.has_focus() && enter_pressed {
-                        path_commit = Some(state.path_edit_buffer.trim().to_owned());
-                    } else if (path_resp.has_focus() && esc_pressed) || lost_focus {
-                        path_cancelled = true;
-                    }
-                } else if let Some(current_dir) = state.current_dir.as_deref() {
-                    for (idx, (label, target)) in
-                        breadcrumb_segments(current_dir).into_iter().enumerate()
-                    {
-                        if idx > 0 {
-                            ui.label(">");
-                        }
-                        if ui.link(label).clicked() {
-                            breadcrumb_segment_clicked = true;
-                            breadcrumb_nav = Some(target);
-                        }
-                    }
-
-                    // グループフィルタ表示（is_path_editing == false のとき）
-                    let active_group_label = match &state.filter.scope {
-                        LibraryScope::Any => None,
-                        LibraryScope::Favorites => {
-                            Some(tr(language, TextKey::FavoritesScopeLabel).to_string())
-                        }
-                        LibraryScope::Unread => Some(tr(language, TextKey::Unread).to_string()),
-                        LibraryScope::Reading => Some(tr(language, TextKey::Reading).to_string()),
-                        LibraryScope::Read => Some(tr(language, TextKey::Read).to_string()),
-                        LibraryScope::NamedGroup(name) => Some(name.clone()),
-                        LibraryScope::Uncategorized => {
-                            Some(tr(language, TextKey::Uncategorized).to_string())
-                        }
-                    };
-                    if let Some(label) = active_group_label {
-                        ui.label(
-                            egui::RichText::new("›")
-                                .size(theme::FONT_SIZE_BODY)
-                                .color(theme::TEXT_SUBTLE),
-                        );
-                        ui.label(
-                            egui::RichText::new(&label)
-                                .size(theme::FONT_SIZE_BODY)
-                                .color(theme::TEXT_MAIN),
-                        );
-                        let close_id = ui.id().with("group_filter_clear");
-                        let close_rect = egui::Rect::from_center_size(
-                            ui.cursor().left_center() + egui::vec2(6.0, 0.0),
-                            egui::vec2(12.0, 12.0),
-                        );
-                        let close_resp = ui.interact(close_rect, close_id, egui::Sense::click());
-                        ui.painter().text(
-                            close_rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            icons::ICON_CLOSE.codepoint,
-                            egui::FontId::new(
-                                theme::FONT_SIZE_TINY,
-                                icons::ICON_CLOSE.font_family(),
-                            ),
-                            theme::TEXT_MAIN,
-                        );
-                        ui.advance_cursor_after_rect(close_rect);
-                        if close_resp.clicked() {
-                            state.filter.scope = LibraryScope::Any;
-                            state.mark_filter_dirty();
-                        }
-                        paint_quiet_hover_border(ui, &close_resp);
-                    }
-
-                    let blank_width = ui.available_width().max(0.0);
-                    if blank_width > 0.0 {
-                        let (_, blank_resp) = ui.allocate_exact_size(
-                            egui::vec2(blank_width, FILTER_INPUT_HEIGHT),
-                            egui::Sense::click(),
-                        );
-                        if blank_resp.clicked() && !breadcrumb_segment_clicked {
-                            path_blank_clicked = true;
-                        }
-                    }
-                } else {
-                    ui.label(
-                        egui::RichText::new(tr(language, TextKey::NoFolder))
-                            .size(theme::FONT_SIZE_BODY)
-                            .color(theme::TEXT_SUBTLE),
-                    );
-                    let blank_width = ui.available_width().max(0.0);
-                    if blank_width > 0.0 {
-                        let (_, blank_resp) = ui.allocate_exact_size(
-                            egui::vec2(blank_width, FILTER_INPUT_HEIGHT),
-                            egui::Sense::click(),
-                        );
-                        if blank_resp.clicked() {
-                            path_blank_clicked = true;
-                        }
-                    }
-                }
-            },
-        );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // 設定ボタン
@@ -509,6 +359,163 @@ pub fn show(
                     .color(theme::TEXT_SUBTLE),
             );
             ui.separator();
+
+            // パス領域は右側 UI の実配置後に残った幅だけを使う。
+            let path_width = ui.available_width().max(0.0);
+            let mut breadcrumb_segment_clicked = false;
+            ui.allocate_ui_with_layout(
+                egui::vec2(path_width, FILTER_INPUT_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    if state.is_path_editing {
+                        let textedit_id = ui.id().with("path_edit_buffer");
+                        let path_resp = ui.add_sized(
+                            [path_width, FILTER_INPUT_HEIGHT],
+                            egui::TextEdit::singleline(&mut state.path_edit_buffer)
+                                .id(textedit_id)
+                                .hint_text(tr(language, TextKey::EnterPathHint))
+                                .desired_width(f32::INFINITY)
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        path_edit_rect = Some(path_resp.rect);
+                        if !state.path_input_focused {
+                            path_resp.request_focus();
+                        }
+                        if state.path_edit_select_all_pending && path_resp.has_focus() {
+                            if let Some(mut text_edit_state) =
+                                egui::text_edit::TextEditState::load(ui.ctx(), textedit_id)
+                            {
+                                let ccursor_range = CCursorRange::two(
+                                    CCursor::new(0),
+                                    CCursor::new(state.path_edit_buffer.chars().count()),
+                                );
+                                text_edit_state.cursor.set_char_range(Some(ccursor_range));
+                                text_edit_state.store(ui.ctx(), textedit_id);
+                                state.path_edit_select_all_pending = false;
+                            }
+                        }
+                        state.path_input_focused = path_resp.has_focus();
+                        let lost_focus = path_resp.lost_focus();
+                        let mut enter_pressed = false;
+                        let mut esc_pressed = false;
+                        if path_resp.has_focus() {
+                            ui.input_mut(|i| {
+                                enter_pressed =
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+                                esc_pressed =
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
+                                i.consume_key(egui::Modifiers::CTRL, egui::Key::C);
+                                i.consume_key(egui::Modifiers::CTRL, egui::Key::V);
+                                i.consume_key(egui::Modifiers::CTRL, egui::Key::A);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Home);
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::End);
+                            });
+                        }
+                        if path_resp.has_focus() && enter_pressed {
+                            path_commit = Some(state.path_edit_buffer.trim().to_owned());
+                        } else if (path_resp.has_focus() && esc_pressed) || lost_focus {
+                            path_cancelled = true;
+                        }
+                    } else if let Some(current_dir) = state.current_dir.as_deref() {
+                        for (idx, (label, target)) in
+                            breadcrumb_segments(current_dir).into_iter().enumerate()
+                        {
+                            if idx > 0 {
+                                ui.label(">");
+                            }
+                            if ui.link(label).clicked() {
+                                breadcrumb_segment_clicked = true;
+                                breadcrumb_nav = Some(target);
+                            }
+                        }
+
+                        // グループフィルタ表示（is_path_editing == false のとき）
+                        let active_group_label = match &state.filter.scope {
+                            LibraryScope::Any => None,
+                            LibraryScope::Favorites => {
+                                Some(tr(language, TextKey::FavoritesScopeLabel).to_string())
+                            }
+                            LibraryScope::Unread => Some(tr(language, TextKey::Unread).to_string()),
+                            LibraryScope::Reading => {
+                                Some(tr(language, TextKey::Reading).to_string())
+                            }
+                            LibraryScope::Read => Some(tr(language, TextKey::Read).to_string()),
+                            LibraryScope::NamedGroup(name) => Some(name.clone()),
+                            LibraryScope::Uncategorized => {
+                                Some(tr(language, TextKey::Uncategorized).to_string())
+                            }
+                        };
+                        if let Some(label) = active_group_label {
+                            ui.label(
+                                egui::RichText::new("›")
+                                    .size(theme::FONT_SIZE_BODY)
+                                    .color(theme::TEXT_SUBTLE),
+                            );
+                            ui.label(
+                                egui::RichText::new(&label)
+                                    .size(theme::FONT_SIZE_BODY)
+                                    .color(theme::TEXT_MAIN),
+                            );
+                            let close_id = ui.id().with("group_filter_clear");
+                            let close_rect = egui::Rect::from_center_size(
+                                ui.cursor().left_center() + egui::vec2(6.0, 0.0),
+                                egui::vec2(12.0, 12.0),
+                            );
+                            let close_resp =
+                                ui.interact(close_rect, close_id, egui::Sense::click());
+                            ui.painter().text(
+                                close_rect.center(),
+                                egui::Align2::CENTER_CENTER,
+                                icons::ICON_CLOSE.codepoint,
+                                egui::FontId::new(
+                                    theme::FONT_SIZE_TINY,
+                                    icons::ICON_CLOSE.font_family(),
+                                ),
+                                theme::TEXT_MAIN,
+                            );
+                            ui.advance_cursor_after_rect(close_rect);
+                            if close_resp.clicked() {
+                                state.filter.scope = LibraryScope::Any;
+                                state.mark_filter_dirty();
+                            }
+                            paint_quiet_hover_border(ui, &close_resp);
+                        }
+
+                        let blank_width = ui.available_width().max(0.0);
+                        if blank_width > 0.0 {
+                            let (_, blank_resp) = ui.allocate_exact_size(
+                                egui::vec2(blank_width, FILTER_INPUT_HEIGHT),
+                                egui::Sense::click(),
+                            );
+                            if blank_resp.clicked() && !breadcrumb_segment_clicked {
+                                path_blank_clicked = true;
+                            }
+                        }
+                    } else {
+                        ui.label(
+                            egui::RichText::new(tr(language, TextKey::NoFolder))
+                                .size(theme::FONT_SIZE_BODY)
+                                .color(theme::TEXT_SUBTLE),
+                        );
+                        let blank_width = ui.available_width().max(0.0);
+                        if blank_width > 0.0 {
+                            let (_, blank_resp) = ui.allocate_exact_size(
+                                egui::vec2(blank_width, FILTER_INPUT_HEIGHT),
+                                egui::Sense::click(),
+                            );
+                            if blank_resp.clicked() {
+                                path_blank_clicked = true;
+                            }
+                        }
+                    }
+                },
+            );
         });
         ui.separator();
     });
