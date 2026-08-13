@@ -447,6 +447,7 @@ pub fn show(
                             }
                             LibraryScope::Read => Some(tr(language, TextKey::Read).to_string()),
                             LibraryScope::NamedGroup(name) => Some(name.clone()),
+                            LibraryScope::Extension(name) => Some(name.to_ascii_uppercase()),
                             LibraryScope::Uncategorized => {
                                 Some(tr(language, TextKey::Uncategorized).to_string())
                             }

@@ -698,6 +698,10 @@ impl App {
         self.library.worker.remove_book_cache(id.clone());
     }
 
+    pub(super) fn remove_worker_video_cache(&self, id: &BookId) {
+        self.library.worker.remove_video_cache(id.clone());
+    }
+
     pub(super) fn update_path_dependent_state(&mut self, old_path: &Path, new_path: Option<&Path>) {
         let old_norm = normalize_path_for_selection(old_path);
         let new_norm = new_path.map(normalize_path_for_selection);
@@ -957,15 +961,18 @@ impl App {
         self.library
             .rename_reading_hud_state_for_path(old_path, new_path);
         let favorite_store = self.library.favorite_store_handle();
-        let mut favorite_store = favorite_store.write();
-        if favorite_store.rename_path(old_path, new_path) && !favorite_store.save() {
-            tracing::warn!(
-                old_path = %old_path.display(),
-                new_path = %new_path.display(),
-                "favorite rename save failed"
-            );
-            *favorite_store = crate::infra::favorite_store::FavoriteStore::load();
+        {
+            let mut favorite_store = favorite_store.write();
+            if favorite_store.rename_path(old_path, new_path) && !favorite_store.save() {
+                tracing::warn!(
+                    old_path = %old_path.display(),
+                    new_path = %new_path.display(),
+                    "favorite rename save failed"
+                );
+                *favorite_store = crate::infra::favorite_store::FavoriteStore::load();
+            }
         }
+        self.library.refresh_favorite_index();
         if let Err(e) = crate::infra::kind_group_store::rename_override(
             &old_path.to_string_lossy(),
             &new_path.to_string_lossy(),
@@ -1163,6 +1170,8 @@ impl App {
             self.remove_worker_book_cache(&book_meta.id);
         } else if let Some(thumb_id) = deleted_cleanup.as_ref().and_then(|c| c.thumb_id.as_ref()) {
             self.remove_worker_book_cache(thumb_id);
+        } else if let Some(video_id) = deleted_cleanup.as_ref().and_then(|c| c.video_id.as_ref()) {
+            self.remove_worker_video_cache(video_id);
         }
         {
             let _artifact_guard = self.library.artifact_gate.write();
@@ -1181,6 +1190,11 @@ impl App {
                 self.remove_disk_thumbs_by_id(thumb_id);
                 self.remove_disk_page_maps_by_id(thumb_id);
                 self.remove_artifact_failures_by_id(thumb_id);
+            } else if let Some(video_id) =
+                deleted_cleanup.as_ref().and_then(|c| c.video_id.as_ref())
+            {
+                self.remove_disk_thumbs_by_id(video_id);
+                self.remove_artifact_failures_by_id(video_id);
             }
         }
         let _ = self.library.remove_deleted_path(deleted_path);
@@ -1621,6 +1635,7 @@ impl App {
                     self.open_in_explorer(path.as_path());
                 }
             }
+            LibraryAction::OpenVideo(idx) => self.open_video(*idx),
             LibraryAction::ClearBookSettings(targets) => {
                 self.begin_clear_book_settings(targets.clone())
             }
@@ -1657,6 +1672,7 @@ impl App {
                 &mut self.library,
                 ui_language,
                 interaction_blocked,
+                self.app_settings.folder_book_open_as_viewer,
                 library_external_tools,
                 library_external_busy,
             );
@@ -1674,17 +1690,7 @@ impl App {
             return;
         }
         match action {
-            LibraryAction::OpenArchive(idx) if !self.settings_open => {
-                let open_as_viewer = self.library.entries.get(idx).is_none_or(|entry| {
-                    !matches!(entry, LibraryEntry::FolderBook(_))
-                        || self.app_settings.folder_book_open_as_viewer
-                });
-                if open_as_viewer {
-                    self.open_viewer(idx, ctx)
-                } else if let Some(path) = self.entry_path_at(idx) {
-                    self.navigate_to_dir_with_history(path);
-                }
-            }
+            LibraryAction::OpenArchive(idx) if !self.settings_open => self.open_viewer(idx, ctx),
             LibraryAction::RunExternalTool {
                 tool_index,
                 targets,
@@ -1967,6 +1973,7 @@ impl App {
                             entry.title.to_string()
                         }
                         LibraryEntry::ImageFile(entry) => entry.title.to_string(),
+                        LibraryEntry::VideoFile(entry) => entry.title.to_string(),
                     })
                     .unwrap_or_else(|| "1".to_owned())
             } else {
@@ -1979,6 +1986,7 @@ impl App {
                             folder_count += 1
                         }
                         Some(LibraryEntry::ImageFile(_)) => file_count += 1,
+                        Some(LibraryEntry::VideoFile(_)) => file_count += 1,
                         None => {}
                     }
                 }
@@ -2410,16 +2418,22 @@ fn entry_properties_for(entry: &LibraryEntry) -> EntryProperties {
         .unwrap_or_else(|| path.display().to_string());
     let kind = match entry {
         LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) => String::from("DIR"),
-        LibraryEntry::Archive(_) | LibraryEntry::ImageFile(_) => format_entry_kind(path),
+        LibraryEntry::Archive(_) | LibraryEntry::ImageFile(_) | LibraryEntry::VideoFile(_) => {
+            format_entry_kind(path)
+        }
     };
     let size_bytes = match entry {
         LibraryEntry::Archive(entry) => Some(entry.size),
         LibraryEntry::ImageFile(entry) => Some(entry.size),
+        LibraryEntry::VideoFile(entry) => Some(entry.size),
         LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) => None,
     };
     let page_count = match entry {
         LibraryEntry::Archive(entry) => entry.page_count,
-        LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => None,
+        LibraryEntry::Folder(_)
+        | LibraryEntry::FolderBook(_)
+        | LibraryEntry::ImageFile(_)
+        | LibraryEntry::VideoFile(_) => None,
     };
 
     EntryProperties {

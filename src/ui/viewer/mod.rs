@@ -460,6 +460,18 @@ struct ToolbarApplyContext<'a> {
     action: &'a mut ViewerAction,
 }
 
+struct ViewerInputParams {
+    interaction_blocked: bool,
+    in_viewport_transition: bool,
+    is_fullscreen: bool,
+    capabilities: ViewerUiCapabilities,
+    page_range_delete_enabled: bool,
+    now: Instant,
+    display_w: u32,
+    display_h: u32,
+    max_tex_side: u32,
+}
+
 const ANIMATED_STREAM_FILL_LOW_WATERMARK: usize = 4;
 const ANIMATED_STREAM_FILL_HIGH_WATERMARK: usize = 16;
 
@@ -731,9 +743,6 @@ pub fn show(
     const SLIDER_H: f32 = 36.0;
     const LOADING_REPAINT_INTERVAL: Duration = Duration::from_millis(16);
     const FULLSCREEN_OVERLAY_AUTO_HIDE_DELAY: Duration = Duration::from_millis(1000);
-    const WHEEL_STEP: f32 = 12.0;
-    const WHEEL_COOLDOWN: Duration = Duration::from_millis(120);
-    let mut action = ViewerAction::None;
     let mut toolbar_events = ToolbarEvents::default();
     let ctx = ui.ctx().clone();
     let page_range_delete_enabled =
@@ -946,332 +955,25 @@ pub fn show(
         }
     }
 
-    // ── キーボード / ホイール ─────────────────────────────────────────────────
-    // スクロール入力は smooth_scroll_delta を正規ルートにする。
-    let boundary_preview_visible =
-        state.boundary_preview_visible(capabilities.allow_book_navigation, is_fullscreen);
-    if !in_viewport_transition && !interaction_blocked {
-        let shortcut_input_blocked = ctx.egui_wants_keyboard_input() || ctx.any_popup_open();
-        let boundary_preview_enabled =
-            boundary_preview_input_enabled(state, capabilities, is_fullscreen);
-        if shortcut_input_blocked {
-        } else {
-            let mut seen = HashSet::with_capacity(external_tools.len());
-            for tool in external_tools {
-                if !seen.insert(tool.key) {
-                    log::warn!(
-                        "[external-tool] duplicate shortcut ignored key={} tool={} tool_index={}",
-                        tool.shortcut,
-                        tool.name,
-                        tool.tool_index
-                    );
-                    continue;
-                }
-                if is_reserved_viewer_key(tool.key) {
-                    log::warn!(
-                        "[external-tool] shortcut ignored reserved key={} tool={}",
-                        tool.shortcut,
-                        tool.name
-                    );
-                    continue;
-                }
-                let pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, tool.key));
-                if pressed {
-                    log::info!(
-                        "[external-tool] shortcut consumed key={} tool={} path={}",
-                        tool.shortcut,
-                        tool.name,
-                        state.persistent.entry.path.display()
-                    );
-                    if matches!(
-                        external_tool_state,
-                        ExternalToolToolbarState::Running { .. }
-                    ) {
-                        log::warn!(
-                            "[external-tool] shortcut ignored busy before enqueue key={} tool={}",
-                            tool.shortcut,
-                            tool.name
-                        );
-                        break;
-                    }
-                    toolbar_events.external_tool_shortcut = Some((
-                        tool.tool_index,
-                        tool.shortcut,
-                        state.persistent.entry.path.as_ref().to_path_buf(),
-                    ));
-                    break;
-                }
-            }
-        }
-
-        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-        if let Some(until) = state.ui_runtime.wheel_cooldown_until {
-            if now < until {
-                state.ui_runtime.scroll_accum = 0.0;
-                if wheel.abs() > f32::EPSILON {
-                    tracing::trace!(
-                        wheel,
-                        cooldown_remaining_ms = until.saturating_duration_since(now).as_millis(),
-                        "viewer_ui: wheel input suppressed"
-                    );
-                }
-            } else {
-                state.ui_runtime.wheel_cooldown_until = None;
-            }
-        }
-        if state.ui_runtime.wheel_cooldown_until.is_none() {
-            if wheel.abs() > f32::EPSILON {
-                tracing::trace!(
-                    wheel,
-                    accum_before = state.ui_runtime.scroll_accum,
-                    "viewer_ui: wheel input"
-                );
-            }
-            state.ui_runtime.scroll_accum += wheel;
-            if state.ui_runtime.scroll_accum <= -WHEEL_STEP {
-                state.stop_slideshow();
-                let prev_nav_mode = state.ui_runtime.nav_mode;
-                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
-                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
-                state.register_nav_input(now);
-                let before = state.nav_target();
-                state.go_next(display_w, display_h, max_tex_side, &ctx, "WheelNext");
-                state.ui_runtime.scroll_accum = 0.0;
-                tracing::trace!(
-                    direction = "next",
-                    accum_after = state.ui_runtime.scroll_accum,
-                    target_before = before,
-                    target_after = state.nav_target(),
-                    "viewer_ui: wheel step applied"
-                );
-                let moved = state.nav_target() != before;
-                if !moved {
-                    state.ui_runtime.scroll_accum = 0.0;
-                    state.ui_runtime.nav_mode = prev_nav_mode;
-                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
-                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
-                } else {
-                    state.ui_runtime.wheel_cooldown_until = Some(now + WHEEL_COOLDOWN);
-                }
-                apply_boundary_preview_after_page_move(
-                    state,
-                    boundary_preview_enabled,
-                    moved,
-                    BoundaryPreviewDirection::Next,
-                );
-            } else if state.ui_runtime.scroll_accum >= WHEEL_STEP {
-                state.stop_slideshow();
-                let prev_nav_mode = state.ui_runtime.nav_mode;
-                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
-                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
-                state.register_nav_input(now);
-                let before = state.nav_target();
-                state.go_prev(display_w, display_h, max_tex_side, &ctx, "WheelPrev");
-                state.ui_runtime.scroll_accum = 0.0;
-                tracing::trace!(
-                    direction = "prev",
-                    accum_after = state.ui_runtime.scroll_accum,
-                    target_before = before,
-                    target_after = state.nav_target(),
-                    "viewer_ui: wheel step applied"
-                );
-                let moved = state.nav_target() != before;
-                if !moved {
-                    state.ui_runtime.scroll_accum = 0.0;
-                    state.ui_runtime.nav_mode = prev_nav_mode;
-                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
-                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
-                } else {
-                    state.ui_runtime.wheel_cooldown_until = Some(now + WHEEL_COOLDOWN);
-                }
-                apply_boundary_preview_after_page_move(
-                    state,
-                    boundary_preview_enabled,
-                    moved,
-                    BoundaryPreviewDirection::Previous,
-                );
-            }
-        }
-
-        let reading_direction = state.effective_reading_direction();
-
-        let (
-            delete,
-            mark_delete_range,
-            clear_delete_range,
-            next,
-            prev,
-            first,
-            last,
-            previous_book,
-            next_book,
-            boundary_preview_enter,
-            toggle_slideshow,
-            toggle_fullscreen_key,
-        ) = ctx.input_mut(|i| {
-            let left_side_input = i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)
-                || i.consume_key(egui::Modifiers::NONE, Key::A);
-            let right_side_input = i.consume_key(egui::Modifiers::NONE, Key::ArrowRight)
-                || i.consume_key(egui::Modifiers::NONE, Key::D);
-            let next_input = match reading_direction {
-                ReadingDirection::RightToLeft => left_side_input,
-                ReadingDirection::LeftToRight => right_side_input,
-            };
-            let prev_input = match reading_direction {
-                ReadingDirection::RightToLeft => right_side_input,
-                ReadingDirection::LeftToRight => left_side_input,
-            };
-            (
-                i.consume_key(egui::Modifiers::NONE, Key::Delete),
-                i.consume_key(egui::Modifiers::NONE, Key::M),
-                i.consume_key(egui::Modifiers::NONE, Key::Escape),
-                next_input || i.consume_key(egui::Modifiers::NONE, Key::PageDown),
-                prev_input || i.consume_key(egui::Modifiers::NONE, Key::PageUp),
-                i.consume_key(egui::Modifiers::NONE, Key::Home),
-                i.consume_key(egui::Modifiers::NONE, Key::End),
-                i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
-                    || i.consume_key(egui::Modifiers::NONE, Key::W),
-                i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
-                    || i.consume_key(egui::Modifiers::NONE, Key::S),
-                if boundary_preview_visible {
-                    i.consume_key(egui::Modifiers::NONE, Key::Enter)
-                } else {
-                    false
-                },
-                i.consume_key(egui::Modifiers::NONE, Key::Space),
-                i.consume_key(egui::Modifiers::NONE, Key::F11),
-            )
-        });
-        if toggle_slideshow {
-            state.toggle_slideshow(now);
-        }
-        let delete_range_selection = state.delete_range_selection();
-        let delete_range_has_any = delete_range_selection.has_any();
-        let delete_range_complete = delete_range_selection.is_complete();
-        if page_range_delete_enabled && mark_delete_range {
-            state.stop_slideshow();
-            let mark_page = match state.current_displayed_page_min_max() {
-                Some((min_page, _)) if !delete_range_has_any || delete_range_complete => min_page,
-                Some((_, max_page)) => max_page,
-                None => state.current_requested_page(),
-            };
-            state.delete_range_mark_current(mark_page);
-        } else if page_range_delete_enabled && clear_delete_range && delete_range_has_any {
-            state.stop_slideshow();
-            state.delete_range_clear();
-        } else if toggle_fullscreen_key {
-            state.stop_slideshow();
-            action = ViewerAction::ToggleFullscreen;
-        } else if capabilities.allow_delete && delete {
-            state.stop_slideshow();
-            action = if page_range_delete_enabled && delete_range_complete {
-                ViewerAction::RequestPageRangeDelete
-            } else {
-                ViewerAction::RequestDelete
-            };
-        } else {
-            if next {
-                state.stop_slideshow();
-                let prev_nav_mode = state.ui_runtime.nav_mode;
-                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
-                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
-                let before = state.nav_target();
-                state.register_nav_input(now);
-                state.go_next(display_w, display_h, max_tex_side, &ctx, "KeyLeft");
-                let moved = state.nav_target() != before;
-                if !moved {
-                    state.ui_runtime.nav_mode = prev_nav_mode;
-                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
-                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
-                }
-                apply_boundary_preview_after_page_move(
-                    state,
-                    boundary_preview_enabled,
-                    moved,
-                    BoundaryPreviewDirection::Next,
-                );
-            }
-            if prev {
-                state.stop_slideshow();
-                let prev_nav_mode = state.ui_runtime.nav_mode;
-                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
-                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
-                let before = state.nav_target();
-                state.register_nav_input(now);
-                state.go_prev(display_w, display_h, max_tex_side, &ctx, "KeyRight");
-                let moved = state.nav_target() != before;
-                if !moved {
-                    state.ui_runtime.nav_mode = prev_nav_mode;
-                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
-                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
-                }
-                apply_boundary_preview_after_page_move(
-                    state,
-                    boundary_preview_enabled,
-                    moved,
-                    BoundaryPreviewDirection::Previous,
-                );
-            }
-            if first {
-                state.stop_slideshow();
-                let prev_nav_mode = state.ui_runtime.nav_mode;
-                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
-                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
-                let before = state.nav_target();
-                state.register_nav_input(now);
-                state.go_first(display_w, display_h, max_tex_side, &ctx, "KeyHome");
-                let moved = state.nav_target() != before;
-                if !moved {
-                    state.ui_runtime.nav_mode = prev_nav_mode;
-                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
-                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
-                }
-                state.close_boundary_preview_on_successful_page_move(moved);
-            }
-            if last {
-                state.stop_slideshow();
-                let prev_nav_mode = state.ui_runtime.nav_mode;
-                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
-                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
-                let before = state.nav_target();
-                state.register_nav_input(now);
-                state.go_last(display_w, display_h, max_tex_side, &ctx, "KeyEnd");
-                let moved = state.nav_target() != before;
-                if !moved {
-                    state.ui_runtime.nav_mode = prev_nav_mode;
-                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
-                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
-                }
-                state.close_boundary_preview_on_successful_page_move(moved);
-            }
-            if capabilities.allow_book_navigation && previous_book {
-                state.stop_slideshow();
-                action = ViewerAction::PreviousBook;
-            }
-            if capabilities.allow_book_navigation && next_book {
-                state.stop_slideshow();
-                action = ViewerAction::NextBook;
-            }
-            if capabilities.allow_book_navigation && boundary_preview_enter {
-                state.stop_slideshow();
-                match state
-                    .boundary_preview_ready_view()
-                    .map(|view| view.direction)
-                {
-                    Some(BoundaryPreviewDirection::Previous) => {
-                        action = ViewerAction::PreviousBook;
-                    }
-                    Some(BoundaryPreviewDirection::Next) => {
-                        action = ViewerAction::NextBook;
-                    }
-                    None => {}
-                }
-            }
-        }
-    } else {
-        state.ui_runtime.scroll_accum = 0.0;
-        state.ui_runtime.wheel_cooldown_until = None;
-    }
+    let (boundary_preview_visible, mut action) = handle_keyboard_and_wheel_input(
+        ui,
+        &ctx,
+        state,
+        external_tools,
+        external_tool_state,
+        ViewerInputParams {
+            interaction_blocked,
+            in_viewport_transition,
+            is_fullscreen,
+            capabilities,
+            page_range_delete_enabled,
+            now,
+            display_w,
+            display_h,
+            max_tex_side,
+        },
+        &mut toolbar_events,
+    );
 
     let (used_rect, used_resp) =
         ui.allocate_exact_size(vec2(content.width(), img_h), egui::Sense::click());
@@ -1595,4 +1297,356 @@ pub fn show(
     }
 
     action
+}
+
+fn handle_keyboard_and_wheel_input(
+    ui: &mut egui::Ui,
+    ctx: &egui::Context,
+    state: &mut ViewerState,
+    external_tools: &[ExternalToolButtonModel],
+    external_tool_state: &ExternalToolToolbarState,
+    params: ViewerInputParams,
+    toolbar_events: &mut ToolbarEvents,
+) -> (bool, ViewerAction) {
+    let ViewerInputParams {
+        interaction_blocked,
+        in_viewport_transition,
+        is_fullscreen,
+        capabilities,
+        page_range_delete_enabled,
+        now,
+        display_w,
+        display_h,
+        max_tex_side,
+    } = params;
+    let mut action = ViewerAction::None;
+    const WHEEL_STEP: f32 = 12.0;
+    const WHEEL_COOLDOWN: Duration = Duration::from_millis(120);
+    // ── キーボード / ホイール ─────────────────────────────────────────────────
+    // スクロール入力は smooth_scroll_delta を正規ルートにする。
+    let boundary_preview_visible =
+        state.boundary_preview_visible(capabilities.allow_book_navigation, is_fullscreen);
+    if !in_viewport_transition && !interaction_blocked {
+        let shortcut_input_blocked = ctx.egui_wants_keyboard_input() || ctx.any_popup_open();
+        let boundary_preview_enabled =
+            boundary_preview_input_enabled(state, capabilities, is_fullscreen);
+        if shortcut_input_blocked {
+        } else {
+            let mut seen = HashSet::with_capacity(external_tools.len());
+            for tool in external_tools {
+                if !seen.insert(tool.key) {
+                    log::warn!(
+                        "[external-tool] duplicate shortcut ignored key={} tool={} tool_index={}",
+                        tool.shortcut,
+                        tool.name,
+                        tool.tool_index
+                    );
+                    continue;
+                }
+                if is_reserved_viewer_key(tool.key) {
+                    log::warn!(
+                        "[external-tool] shortcut ignored reserved key={} tool={}",
+                        tool.shortcut,
+                        tool.name
+                    );
+                    continue;
+                }
+                let pressed = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, tool.key));
+                if pressed {
+                    log::info!(
+                        "[external-tool] shortcut consumed key={} tool={} path={}",
+                        tool.shortcut,
+                        tool.name,
+                        state.persistent.entry.path.display()
+                    );
+                    if matches!(
+                        external_tool_state,
+                        ExternalToolToolbarState::Running { .. }
+                    ) {
+                        log::warn!(
+                            "[external-tool] shortcut ignored busy before enqueue key={} tool={}",
+                            tool.shortcut,
+                            tool.name
+                        );
+                        break;
+                    }
+                    toolbar_events.external_tool_shortcut = Some((
+                        tool.tool_index,
+                        tool.shortcut,
+                        state.persistent.entry.path.as_ref().to_path_buf(),
+                    ));
+                    break;
+                }
+            }
+        }
+
+        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+        if let Some(until) = state.ui_runtime.wheel_cooldown_until {
+            if now < until {
+                state.ui_runtime.scroll_accum = 0.0;
+                if wheel.abs() > f32::EPSILON {
+                    tracing::trace!(
+                        wheel,
+                        cooldown_remaining_ms = until.saturating_duration_since(now).as_millis(),
+                        "viewer_ui: wheel input suppressed"
+                    );
+                }
+            } else {
+                state.ui_runtime.wheel_cooldown_until = None;
+            }
+        }
+        if state.ui_runtime.wheel_cooldown_until.is_none() {
+            if wheel.abs() > f32::EPSILON {
+                tracing::trace!(
+                    wheel,
+                    accum_before = state.ui_runtime.scroll_accum,
+                    "viewer_ui: wheel input"
+                );
+            }
+            state.ui_runtime.scroll_accum += wheel;
+            if state.ui_runtime.scroll_accum <= -WHEEL_STEP {
+                state.stop_slideshow();
+                let prev_nav_mode = state.ui_runtime.nav_mode;
+                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
+                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
+                state.register_nav_input(now);
+                let before = state.nav_target();
+                state.go_next(display_w, display_h, max_tex_side, ctx, "WheelNext");
+                state.ui_runtime.scroll_accum = 0.0;
+                tracing::trace!(
+                    direction = "next",
+                    accum_after = state.ui_runtime.scroll_accum,
+                    target_before = before,
+                    target_after = state.nav_target(),
+                    "viewer_ui: wheel step applied"
+                );
+                let moved = state.nav_target() != before;
+                if !moved {
+                    state.ui_runtime.scroll_accum = 0.0;
+                    state.ui_runtime.nav_mode = prev_nav_mode;
+                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
+                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
+                } else {
+                    state.ui_runtime.wheel_cooldown_until = Some(now + WHEEL_COOLDOWN);
+                }
+                apply_boundary_preview_after_page_move(
+                    state,
+                    boundary_preview_enabled,
+                    moved,
+                    BoundaryPreviewDirection::Next,
+                );
+            } else if state.ui_runtime.scroll_accum >= WHEEL_STEP {
+                state.stop_slideshow();
+                let prev_nav_mode = state.ui_runtime.nav_mode;
+                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
+                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
+                state.register_nav_input(now);
+                let before = state.nav_target();
+                state.go_prev(display_w, display_h, max_tex_side, ctx, "WheelPrev");
+                state.ui_runtime.scroll_accum = 0.0;
+                tracing::trace!(
+                    direction = "prev",
+                    accum_after = state.ui_runtime.scroll_accum,
+                    target_before = before,
+                    target_after = state.nav_target(),
+                    "viewer_ui: wheel step applied"
+                );
+                let moved = state.nav_target() != before;
+                if !moved {
+                    state.ui_runtime.scroll_accum = 0.0;
+                    state.ui_runtime.nav_mode = prev_nav_mode;
+                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
+                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
+                } else {
+                    state.ui_runtime.wheel_cooldown_until = Some(now + WHEEL_COOLDOWN);
+                }
+                apply_boundary_preview_after_page_move(
+                    state,
+                    boundary_preview_enabled,
+                    moved,
+                    BoundaryPreviewDirection::Previous,
+                );
+            }
+        }
+
+        let reading_direction = state.effective_reading_direction();
+
+        let (
+            delete,
+            mark_delete_range,
+            clear_delete_range,
+            next,
+            prev,
+            first,
+            last,
+            previous_book,
+            next_book,
+            boundary_preview_enter,
+            toggle_slideshow,
+            toggle_fullscreen_key,
+        ) = ctx.input_mut(|i| {
+            let left_side_input = i.consume_key(egui::Modifiers::NONE, Key::ArrowLeft)
+                || i.consume_key(egui::Modifiers::NONE, Key::A);
+            let right_side_input = i.consume_key(egui::Modifiers::NONE, Key::ArrowRight)
+                || i.consume_key(egui::Modifiers::NONE, Key::D);
+            let next_input = match reading_direction {
+                ReadingDirection::RightToLeft => left_side_input,
+                ReadingDirection::LeftToRight => right_side_input,
+            };
+            let prev_input = match reading_direction {
+                ReadingDirection::RightToLeft => right_side_input,
+                ReadingDirection::LeftToRight => left_side_input,
+            };
+            (
+                i.consume_key(egui::Modifiers::NONE, Key::Delete),
+                i.consume_key(egui::Modifiers::NONE, Key::M),
+                i.consume_key(egui::Modifiers::NONE, Key::Escape),
+                next_input || i.consume_key(egui::Modifiers::NONE, Key::PageDown),
+                prev_input || i.consume_key(egui::Modifiers::NONE, Key::PageUp),
+                i.consume_key(egui::Modifiers::NONE, Key::Home),
+                i.consume_key(egui::Modifiers::NONE, Key::End),
+                i.consume_key(egui::Modifiers::NONE, Key::ArrowUp)
+                    || i.consume_key(egui::Modifiers::NONE, Key::W),
+                i.consume_key(egui::Modifiers::NONE, Key::ArrowDown)
+                    || i.consume_key(egui::Modifiers::NONE, Key::S),
+                if boundary_preview_visible {
+                    i.consume_key(egui::Modifiers::NONE, Key::Enter)
+                } else {
+                    false
+                },
+                i.consume_key(egui::Modifiers::NONE, Key::Space),
+                i.consume_key(egui::Modifiers::NONE, Key::F11),
+            )
+        });
+        if toggle_slideshow {
+            state.toggle_slideshow(now);
+        }
+        let delete_range_selection = state.delete_range_selection();
+        let delete_range_has_any = delete_range_selection.has_any();
+        let delete_range_complete = delete_range_selection.is_complete();
+        if page_range_delete_enabled && mark_delete_range {
+            state.stop_slideshow();
+            let mark_page = match state.current_displayed_page_min_max() {
+                Some((min_page, _)) if !delete_range_has_any || delete_range_complete => min_page,
+                Some((_, max_page)) => max_page,
+                None => state.current_requested_page(),
+            };
+            state.delete_range_mark_current(mark_page);
+        } else if page_range_delete_enabled && clear_delete_range && delete_range_has_any {
+            state.stop_slideshow();
+            state.delete_range_clear();
+        } else if toggle_fullscreen_key {
+            state.stop_slideshow();
+            action = ViewerAction::ToggleFullscreen;
+        } else if capabilities.allow_delete && delete {
+            state.stop_slideshow();
+            action = if page_range_delete_enabled && delete_range_complete {
+                ViewerAction::RequestPageRangeDelete
+            } else {
+                ViewerAction::RequestDelete
+            };
+        } else {
+            if next {
+                state.stop_slideshow();
+                let prev_nav_mode = state.ui_runtime.nav_mode;
+                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
+                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
+                let before = state.nav_target();
+                state.register_nav_input(now);
+                state.go_next(display_w, display_h, max_tex_side, ctx, "KeyLeft");
+                let moved = state.nav_target() != before;
+                if !moved {
+                    state.ui_runtime.nav_mode = prev_nav_mode;
+                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
+                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
+                }
+                apply_boundary_preview_after_page_move(
+                    state,
+                    boundary_preview_enabled,
+                    moved,
+                    BoundaryPreviewDirection::Next,
+                );
+            }
+            if prev {
+                state.stop_slideshow();
+                let prev_nav_mode = state.ui_runtime.nav_mode;
+                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
+                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
+                let before = state.nav_target();
+                state.register_nav_input(now);
+                state.go_prev(display_w, display_h, max_tex_side, ctx, "KeyRight");
+                let moved = state.nav_target() != before;
+                if !moved {
+                    state.ui_runtime.nav_mode = prev_nav_mode;
+                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
+                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
+                }
+                apply_boundary_preview_after_page_move(
+                    state,
+                    boundary_preview_enabled,
+                    moved,
+                    BoundaryPreviewDirection::Previous,
+                );
+            }
+            if first {
+                state.stop_slideshow();
+                let prev_nav_mode = state.ui_runtime.nav_mode;
+                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
+                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
+                let before = state.nav_target();
+                state.register_nav_input(now);
+                state.go_first(display_w, display_h, max_tex_side, ctx, "KeyHome");
+                let moved = state.nav_target() != before;
+                if !moved {
+                    state.ui_runtime.nav_mode = prev_nav_mode;
+                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
+                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
+                }
+                state.close_boundary_preview_on_successful_page_move(moved);
+            }
+            if last {
+                state.stop_slideshow();
+                let prev_nav_mode = state.ui_runtime.nav_mode;
+                let prev_last_nav_input_at = state.ui_runtime.last_nav_input_at;
+                let prev_nav_consecutive_count = state.ui_runtime.nav_consecutive_count;
+                let before = state.nav_target();
+                state.register_nav_input(now);
+                state.go_last(display_w, display_h, max_tex_side, ctx, "KeyEnd");
+                let moved = state.nav_target() != before;
+                if !moved {
+                    state.ui_runtime.nav_mode = prev_nav_mode;
+                    state.ui_runtime.last_nav_input_at = prev_last_nav_input_at;
+                    state.ui_runtime.nav_consecutive_count = prev_nav_consecutive_count;
+                }
+                state.close_boundary_preview_on_successful_page_move(moved);
+            }
+            if capabilities.allow_book_navigation && previous_book {
+                state.stop_slideshow();
+                action = ViewerAction::PreviousBook;
+            }
+            if capabilities.allow_book_navigation && next_book {
+                state.stop_slideshow();
+                action = ViewerAction::NextBook;
+            }
+            if capabilities.allow_book_navigation && boundary_preview_enter {
+                state.stop_slideshow();
+                match state
+                    .boundary_preview_ready_view()
+                    .map(|view| view.direction)
+                {
+                    Some(BoundaryPreviewDirection::Previous) => {
+                        action = ViewerAction::PreviousBook;
+                    }
+                    Some(BoundaryPreviewDirection::Next) => {
+                        action = ViewerAction::NextBook;
+                    }
+                    None => {}
+                }
+            }
+        }
+    } else {
+        state.ui_runtime.scroll_accum = 0.0;
+        state.ui_runtime.wheel_cooldown_until = None;
+    }
+    (boundary_preview_visible, action)
 }

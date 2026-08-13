@@ -469,7 +469,8 @@ impl App {
                     meta.path.as_ref().to_path_buf(),
                 ))
             }
-            crate::domain::archive::LibraryEntry::Folder(_) => None,
+            crate::domain::archive::LibraryEntry::Folder(_)
+            | crate::domain::archive::LibraryEntry::VideoFile(_) => None,
         }
     }
 

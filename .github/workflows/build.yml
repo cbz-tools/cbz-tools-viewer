@@ -14,9 +14,13 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 env:
+  CBZ_VCPKG_ROOT: C:\vcpkg
   VCPKG_ROOT: C:\vcpkg
+  VCPKG_FEED_URL: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+  VCPKG_BINARY_SOURCES: clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite
   PKG_CONFIG_PATH: /c/vcpkg/installed/x64-windows/lib/pkgconfig
   PKG_CONFIG_ALLOW_SYSTEM_CFLAGS: 1
 
@@ -62,19 +66,120 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      - name: Restore project vcpkg root after MSVC setup
+        shell: pwsh
+        run: |
+          if (!(Test-Path (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe"))) {
+            Write-Error "Project vcpkg executable was not found: $env:CBZ_VCPKG_ROOT"
+            exit 1
+          }
+          Add-Content $env:GITHUB_ENV "VCPKG_ROOT=$env:CBZ_VCPKG_ROOT"
+          Write-Host "VCPKG_ROOT restored to $env:CBZ_VCPKG_ROOT"
+      - name: Resolve vcpkg cache identity
+        id: vcpkg-cache
+        shell: pwsh
+        run: |
+          $commit = (& git -C $env:CBZ_VCPKG_ROOT rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
+            Write-Error "Could not determine vcpkg checkout commit"
+            exit 1
+          }
+          Add-Content $env:GITHUB_OUTPUT "commit=$commit"
+          Write-Host "vcpkg cache identity: $commit"
+      - name: Cache FFmpeg source provenance
+        id: ffmpeg-source-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            C:\vcpkg\buildtrees\ffmpeg\src
+            C:\vcpkg\buildtrees\ffmpeg\*.log
+            C:\vcpkg\buildtrees\ffmpeg\x64-windows.vcpkg_abi_info.txt
+          key: ${{ runner.os }}-ffmpeg-source-${{ steps.vcpkg-cache.outputs.commit }}-x64-windows-avcodec-avformat-avfilter-swresample-swscale
+      - name: Report FFmpeg source cache status
+        shell: pwsh
+        run: |
+          Write-Host "FFmpeg source provenance cache-hit: ${{ steps.ffmpeg-source-cache.outputs.cache-hit }}"
+      - name: Configure vcpkg GitHub Packages binary cache
+        shell: pwsh
+        env:
+          GH_PACKAGES_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $vcpkg = Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe"
+          $nugetOutput = @(& $vcpkg fetch nuget)
+          if ($LASTEXITCODE -ne 0 -or $nugetOutput.Count -eq 0) {
+            Write-Error "vcpkg could not fetch NuGet"
+            exit 1
+          }
+          $nuget = ($nugetOutput | Select-Object -Last 1).ToString().Trim()
+          if (!(Test-Path -LiteralPath $nuget -PathType Leaf)) {
+            Write-Error "vcpkg NuGet executable was not found: $nuget"
+            exit 1
+          }
+
+          & $nuget sources remove -Name GitHubPackages -NonInteractive 2>$null
+          & $nuget sources add `
+            -Source $env:VCPKG_FEED_URL `
+            -StorePasswordInClearText `
+            -Name GitHubPackages `
+            -UserName "${{ github.repository_owner }}" `
+            -Password $env:GH_PACKAGES_TOKEN `
+            -NonInteractive
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Could not add GitHub Packages NuGet source"
+            exit 1
+          }
+          & $nuget setapikey $env:GH_PACKAGES_TOKEN -Source $env:VCPKG_FEED_URL -NonInteractive
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Could not configure GitHub Packages NuGet API key"
+            exit 1
+          }
+          Write-Host "VCPKG_BINARY_SOURCES=$env:VCPKG_BINARY_SOURCES"
+      - name: Install LLVM for ff-sys bindgen
+        shell: pwsh
+        run: |
+          $llvmBin = "C:\Program Files\LLVM\bin"
+          if (!(Test-Path (Join-Path $llvmBin "libclang.dll"))) {
+            choco install llvm --yes --no-progress
+          }
+          if (!(Test-Path (Join-Path $llvmBin "libclang.dll"))) {
+            Write-Error "LLVM libclang.dll was not found at $llvmBin"
+            exit 1
+          }
+          Add-Content $env:GITHUB_ENV "LIBCLANG_PATH=$llvmBin"
+          Add-Content $env:GITHUB_PATH $llvmBin
       - name: Verify MSVC tools
         shell: pwsh
         run: |
           where.exe link
           where.exe cl
+          Write-Host "CBZ_VCPKG_ROOT=$env:CBZ_VCPKG_ROOT"
+          Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
       - name: Install dav1d (vcpkg)
         shell: pwsh
         run: |
-          C:\vcpkg\vcpkg.exe install dav1d:x64-windows
+          $start = Get-Date
+          & (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe") install dav1d:x64-windows
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $elapsed = (Get-Date) - $start
+          Write-Host ("dav1d vcpkg elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
+      - name: Install FFmpeg (vcpkg, dynamic LGPL build)
+        shell: pwsh
+        run: |
+          # ff-sys requires the x64-windows development files and links the
+          # FFmpeg libraries dynamically. Do not enable GPL or nonfree features.
+          $start = Get-Date
+          & (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe") install "ffmpeg[avcodec,avformat,avfilter,swresample,swscale]:x64-windows"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
+          $elapsed = (Get-Date) - $start
+          Write-Host ("FFmpeg vcpkg elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
       - name: Patch dav1d.pc for pkg-config
         shell: pwsh
         run: |
-          $src = "C:\vcpkg\installed\x64-windows\lib\pkgconfig\dav1d.pc"
+          $src = Join-Path $env:CBZ_VCPKG_ROOT "installed\x64-windows\lib\pkgconfig\dav1d.pc"
           $dst = Join-Path $env:RUNNER_TEMP "dav1d.pc"
           $dstUninstalled = Join-Path $env:RUNNER_TEMP "dav1d-uninstalled.pc"
 
@@ -98,18 +203,19 @@ jobs:
           Add-Content $env:GITHUB_ENV "PKG_CONFIG_PATH=$pkgConfigPath"
 
           Write-Host "PKG_CONFIG_PATH=$pkgConfigPath"
-      - name: Setup pkg-config from vcpkg msys2
+      - name: Setup pkg-config from vcpkg installed pkgconf
         shell: pwsh
         run: |
-          $pkg = Get-ChildItem "C:\vcpkg\downloads\tools\msys2" `
+          $pkgconfRoot = Join-Path $env:CBZ_VCPKG_ROOT "installed\x64-windows\tools\pkgconf"
+          $pkg = Get-ChildItem $pkgconfRoot `
             -Recurse `
-            -Filter pkg-config.exe `
+            -Filter pkgconf.exe `
+            -File `
             -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "\\mingw64\\bin\\pkg-config\.exe$" } |
-            Sort-Object FullName -Descending |
+            Sort-Object FullName |
             Select-Object -First 1
           if (-not $pkg) {
-            Write-Error "vcpkg MSYS2 pkg-config.exe not found under C:\vcpkg\downloads\tools\msys2"
+            Write-Error "vcpkg installed pkgconf.exe not found under $pkgconfRoot"
             exit 1
           }
           Add-Content $env:GITHUB_ENV "PKG_CONFIG=$($pkg.FullName)"
@@ -119,10 +225,20 @@ jobs:
         run: |
           Write-Host "PKG_CONFIG=$env:PKG_CONFIG"
           Write-Host "PKG_CONFIG_PATH=$env:PKG_CONFIG_PATH"
-          where.exe pkg-config
+          if (!(Test-Path -LiteralPath $env:PKG_CONFIG -PathType Leaf)) {
+            Write-Error "PKG_CONFIG executable does not exist: $env:PKG_CONFIG"
+            exit 1
+          }
           & $env:PKG_CONFIG --version
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
           & $env:PKG_CONFIG --libs --cflags dav1d
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
       - name: Verify bundled runtime DLL sources
+        shell: pwsh
         run: |
           if (!(Test-Path third_party/unrar/x64/UnRAR64.dll)) {
             Write-Error "third_party/unrar/x64/UnRAR64.dll is missing"
@@ -132,6 +248,34 @@ jobs:
             Write-Error "third_party/dav1d/dav1d.dll is missing"
             exit 1
           }
+          $ffmpegBin = Join-Path $env:CBZ_VCPKG_ROOT "installed\x64-windows\bin"
+          # avfilter remains a vcpkg/ff-sys link-time component, even though
+          # the release package runtime allowlist excludes its DLL.
+          $ffmpegLinkPrefixes = @("avcodec-", "avfilter-", "avformat-", "avutil-", "swresample-", "swscale-")
+          $missingFfmpegDll = $ffmpegLinkPrefixes | Where-Object {
+            -not (Get-ChildItem $ffmpegBin -Filter "$($_)*.dll" -File -ErrorAction SilentlyContinue)
+          }
+          $avcodecHeader = Join-Path $env:CBZ_VCPKG_ROOT "installed\x64-windows\include\libavcodec\avcodec.h"
+          if (!(Test-Path $avcodecHeader) -or
+              $missingFfmpegDll) {
+            Write-Error "FFmpeg x64-windows development/runtime files are missing"
+            exit 1
+          }
+          $ffmpegShare = Join-Path $env:CBZ_VCPKG_ROOT "installed\x64-windows\share\ffmpeg"
+          if (!(Test-Path (Join-Path $ffmpegShare "copyright")) -or
+              !(Test-Path (Join-Path $ffmpegShare "vcpkg.spdx.json"))) {
+            Write-Error "FFmpeg/vcpkg license notices are missing"
+            exit 1
+          }
+      - name: Package FFmpeg source bundle
+        if: github.event_name == 'push'
+        shell: pwsh
+        run: |
+          & .\scripts\package_ffmpeg_source.ps1 `
+            -Version "${{ github.ref_name }}" `
+            -VcpkgRoot $env:CBZ_VCPKG_ROOT `
+            -OutputDir "target/package" `
+            -Triplet "x64-windows"
       - name: cargo build --release
         shell: pwsh
         run: |
@@ -142,6 +286,7 @@ jobs:
           $elapsed = (Get-Date) - $start
           Write-Host ("cargo build elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
       - name: Verify runtime DLLs prepared (release)
+        shell: pwsh
         run: |
           if (!(Test-Path target/release/UnRAR64.dll)) {
             Write-Error "target/release/UnRAR64.dll was not prepared by build.rs"
@@ -149,6 +294,22 @@ jobs:
           }
           if (!(Test-Path target/release/dav1d.dll)) {
             Write-Error "target/release/dav1d.dll was not prepared by build.rs"
+            exit 1
+          }
+          $allowedFfmpegRegex = '^(avcodec|avformat|avutil|swresample|swscale)-\d+\.dll$'
+          $ffmpegDlls = @(Get-ChildItem target/release -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(av|sw).+\.dll$' })
+          $unexpectedFfmpegDlls = @($ffmpegDlls | Where-Object { $_.Name -notmatch $allowedFfmpegRegex })
+          if ($unexpectedFfmpegDlls.Count -gt 0) {
+            Write-Error "Unexpected FFmpeg runtime DLLs were prepared by build.rs: $($unexpectedFfmpegDlls.Name -join ', ')"
+            exit 1
+          }
+          $missingFfmpegDll = @('avcodec', 'avformat', 'avutil', 'swresample', 'swscale') | Where-Object {
+            @(Get-ChildItem target/release -Filter "$($_)-*.dll" -File -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -match $allowedFfmpegRegex }).Count -ne 1
+          }
+          if ($missingFfmpegDll) {
+            Write-Error "target/release FFmpeg runtime allowlist is incomplete or ambiguous: $($missingFfmpegDll -join ', ')"
             exit 1
           }
       - name: Resolve release package version
@@ -189,6 +350,7 @@ jobs:
           path: |
             target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
             target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip.sha256
+            target/package/ffmpeg-source-${{ env.CBZ_RELEASE_VERSION }}.zip
       - name: Upload release asset
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
@@ -197,3 +359,4 @@ jobs:
           files: |
             target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
             target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip.sha256
+            target/package/ffmpeg-source-${{ github.ref_name }}.zip

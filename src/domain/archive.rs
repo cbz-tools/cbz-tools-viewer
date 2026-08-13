@@ -50,13 +50,27 @@ pub struct BookMeta {
 
 #[derive(Clone, Debug)]
 pub struct FolderMeta {
+    pub id: BookId,
     pub path: Arc<Path>,
     pub title: Arc<str>,
     pub modified: SystemTime,
+    /// Exact `metadata.modified().ok()` value captured during the scan. `modified`
+    /// remains the display/sort value and therefore retains its UNIX_EPOCH fallback.
+    pub revision_modified: Option<SystemTime>,
 }
 
 #[derive(Clone, Debug)]
 pub struct ImageFileMeta {
+    pub id: BookId,
+    pub path: Arc<Path>,
+    pub title: Arc<str>,
+    pub size: u64,
+    pub modified: SystemTime,
+}
+
+#[derive(Clone, Debug)]
+pub struct VideoFileMeta {
+    pub id: BookId,
     pub path: Arc<Path>,
     pub title: Arc<str>,
     pub size: u64,
@@ -67,11 +81,13 @@ pub struct ImageFileMeta {
 /// Library の1件分の実体。
 ///
 /// `Archive` は書庫、`FolderBook` は直下に画像を持つフォルダ、`ImageFile` は
-/// 画像本への入口、`Folder` はナビゲーション対象外の通常フォルダ。
+/// 画像本への入口、`VideoFile` は OS 関連付けで開く動画ファイル、`Folder` は
+/// ナビゲーション対象外の通常フォルダ。
 pub enum LibraryEntry {
     Folder(FolderMeta),
     FolderBook(FolderMeta),
     ImageFile(ImageFileMeta),
+    VideoFile(VideoFileMeta),
     Archive(BookMeta),
 }
 
@@ -82,15 +98,31 @@ impl LibraryEntry {
         matches!(self, LibraryEntry::Archive(_) | LibraryEntry::FolderBook(_))
     }
 
-    /// サムネイル / navigation で本を同一視するための安定キー。
-    /// Folder は本ではないので None、ImageFile は親フォルダの画像本と分けるため
-    /// 自身の path をキーにする。
-    pub fn thumb_id(&self) -> Option<BookId> {
+    /// お気に入り対象の既存 BookId。path から新たに生成せず、スキャン済み
+    /// エントリが保持する ID だけを返す。
+    pub(crate) fn favorite_id_ref(&self) -> Option<&BookId> {
         match self {
-            LibraryEntry::Archive(entry) => Some(entry.id.clone()),
-            LibraryEntry::FolderBook(entry) => Some(BookId::from_path(entry.path.as_ref())),
-            LibraryEntry::ImageFile(entry) => Some(BookId::from_path(entry.path.as_ref())),
-            LibraryEntry::Folder(_) => None,
+            LibraryEntry::Archive(entry) => Some(&entry.id),
+            LibraryEntry::FolderBook(entry) => Some(&entry.id),
+            LibraryEntry::Folder(_) | LibraryEntry::ImageFile(_) | LibraryEntry::VideoFile(_) => {
+                None
+            }
+        }
+    }
+
+    /// サムネイル / navigation で本を同一視するための安定キー。
+    /// Folder と VideoFile は本やサムネイル対象ではないので None、ImageFile は
+    /// 親フォルダの画像本と分けるため自身の path をキーにする。
+    pub fn thumb_id(&self) -> Option<BookId> {
+        self.thumb_id_ref().cloned()
+    }
+
+    pub(crate) fn thumb_id_ref(&self) -> Option<&BookId> {
+        match self {
+            LibraryEntry::Archive(entry) => Some(&entry.id),
+            LibraryEntry::FolderBook(entry) => Some(&entry.id),
+            LibraryEntry::ImageFile(entry) => Some(&entry.id),
+            LibraryEntry::Folder(_) | LibraryEntry::VideoFile(_) => None,
         }
     }
 
@@ -99,6 +131,7 @@ impl LibraryEntry {
             LibraryEntry::Folder(entry) => entry.path.as_ref(),
             LibraryEntry::FolderBook(entry) => entry.path.as_ref(),
             LibraryEntry::ImageFile(entry) => entry.path.as_ref(),
+            LibraryEntry::VideoFile(entry) => entry.path.as_ref(),
             LibraryEntry::Archive(entry) => entry.path.as_ref(),
         }
     }
@@ -108,6 +141,7 @@ impl LibraryEntry {
             LibraryEntry::Folder(entry) => entry.title.as_ref(),
             LibraryEntry::FolderBook(entry) => entry.title.as_ref(),
             LibraryEntry::ImageFile(entry) => entry.title.as_ref(),
+            LibraryEntry::VideoFile(entry) => entry.title.as_ref(),
             LibraryEntry::Archive(entry) => entry.title.as_ref(),
         }
     }
@@ -117,6 +151,7 @@ impl LibraryEntry {
             LibraryEntry::Folder(entry) => entry.modified,
             LibraryEntry::FolderBook(entry) => entry.modified,
             LibraryEntry::ImageFile(entry) => entry.modified,
+            LibraryEntry::VideoFile(entry) => entry.modified,
             LibraryEntry::Archive(entry) => entry.modified,
         }
     }
@@ -124,6 +159,7 @@ impl LibraryEntry {
     pub fn size(&self) -> u64 {
         match self {
             LibraryEntry::ImageFile(entry) => entry.size,
+            LibraryEntry::VideoFile(entry) => entry.size,
             LibraryEntry::Archive(entry) => entry.size,
             LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) => 0,
         }
@@ -132,9 +168,10 @@ impl LibraryEntry {
     pub fn page_count(&self) -> Option<u32> {
         match self {
             LibraryEntry::Archive(entry) => entry.page_count,
-            LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => {
-                None
-            }
+            LibraryEntry::Folder(_)
+            | LibraryEntry::FolderBook(_)
+            | LibraryEntry::ImageFile(_)
+            | LibraryEntry::VideoFile(_) => None,
         }
     }
 }
@@ -217,7 +254,10 @@ pub fn plan_cbz_rebuild_for_library_entry(
 
     let input_path = match entry {
         LibraryEntry::Archive(entry) => entry.path.as_ref().to_path_buf(),
-        LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => {
+        LibraryEntry::Folder(_)
+        | LibraryEntry::FolderBook(_)
+        | LibraryEntry::ImageFile(_)
+        | LibraryEntry::VideoFile(_) => {
             return Err(CbzRebuildPlanError::UnsupportedLibraryEntryKind);
         }
     };

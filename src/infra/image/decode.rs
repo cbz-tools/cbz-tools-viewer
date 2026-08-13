@@ -73,8 +73,25 @@ impl WebpAnimFrameSource {
         self.decoder.info().canvas
     }
 
+    pub fn frame_durations(&self) -> Result<Vec<u32>> {
+        Ok(self
+            .decoder
+            .frame_durations()?
+            .into_iter()
+            .map(|duration| {
+                u32::try_from(duration.as_millis())
+                    .unwrap_or(u32::MAX)
+                    .max(MIN_FRAME_DELAY_MS)
+            })
+            .collect())
+    }
+
     pub fn has_more_frames(&self) -> bool {
         self.decoder.has_more_frames()
+    }
+
+    pub fn reset(&mut self) {
+        self.decoder.reset();
     }
 
     pub fn next_frame(&mut self) -> Result<Option<FrameData>> {

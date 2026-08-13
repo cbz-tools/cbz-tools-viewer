@@ -445,12 +445,14 @@ fn reading_session_book_path(path: &Path) -> PathBuf {
 }
 
 pub(crate) fn book_settings_path(path: &Path) -> PathBuf {
+    book_settings_path_ref(path).to_path_buf()
+}
+
+pub(crate) fn book_settings_path_ref(path: &Path) -> &Path {
     if is_supported_image_path(path) {
-        path.parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.to_path_buf())
+        path.parent().unwrap_or(path)
     } else {
-        path.to_path_buf()
+        path
     }
 }
 

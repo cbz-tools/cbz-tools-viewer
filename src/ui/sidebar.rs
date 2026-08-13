@@ -96,6 +96,42 @@ fn sidebar_data_selectable_label(ui: &mut egui::Ui, selected: bool, label: &str)
     resp
 }
 
+fn collapsible_section_header(ui: &mut egui::Ui, label: &str, collapsed: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        label.to_owned(),
+        egui::FontId::proportional(theme::FONT_SIZE_LARGE),
+        theme::TEXT_MAIN,
+    );
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width().max(0.0), galley.size().y),
+        egui::Sense::click(),
+    );
+    ui.painter()
+        .galley(rect.left_top(), galley, theme::TEXT_MAIN);
+
+    let triangle_center = rect.right_center() - egui::vec2(8.0, 0.0);
+    let triangle = if collapsed {
+        vec![
+            triangle_center + egui::vec2(-4.0, -5.0),
+            triangle_center + egui::vec2(-4.0, 5.0),
+            triangle_center + egui::vec2(4.5, 0.0),
+        ]
+    } else {
+        vec![
+            triangle_center + egui::vec2(-5.0, -4.0),
+            triangle_center + egui::vec2(5.0, -4.0),
+            triangle_center + egui::vec2(0.0, 4.5),
+        ]
+    };
+    ui.painter().add(egui::Shape::convex_polygon(
+        triangle,
+        theme::TEXT_SUBTLE,
+        egui::Stroke::NONE,
+    ));
+
+    response
+}
+
 fn paint_reading_status_icon(
     ui: &egui::Ui,
     rect: egui::Rect,
@@ -442,6 +478,16 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
     ui.separator();
     let mut remove_idx: Option<usize> = None;
     let favorite_drag_id = ui.id().with("library_favorite_drag");
+    let extensions_collapsed_id = ui.id().with("library_extensions_collapsed");
+    let groups_collapsed_id = ui.id().with("library_groups_collapsed");
+    let mut extensions_collapsed = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(extensions_collapsed_id))
+        .unwrap_or(false);
+    let mut groups_collapsed = ui
+        .ctx()
+        .data(|data| data.get_temp::<bool>(groups_collapsed_id))
+        .unwrap_or(false);
     let mut favorite_drag_source = ui
         .ctx()
         .data(|data| data.get_temp::<usize>(favorite_drag_id));
@@ -636,6 +682,53 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
 
             ui.separator();
 
+            if collapsible_section_header(
+                ui,
+                tr(language, TextKey::Extensions),
+                extensions_collapsed,
+            )
+            .clicked()
+            {
+                extensions_collapsed = !extensions_collapsed;
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(extensions_collapsed_id, extensions_collapsed));
+            }
+
+            if !extensions_collapsed {
+                let mut extensions_snapshot: Vec<(String, usize)> = state
+                    .extension_counts()
+                    .iter()
+                    .map(|(extension, count)| (extension.clone(), *count))
+                    .collect();
+                extensions_snapshot.sort_by(|(left, _), (right, _)| left.cmp(right));
+                for (extension, count) in extensions_snapshot {
+                    let label = format!("{extension} ({count})");
+                    let is_selected = matches!(
+                        &state.filter.scope,
+                        LibraryScope::Extension(selected) if selected.eq_ignore_ascii_case(&extension)
+                    );
+                    if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
+                        state.filter.scope = if is_selected {
+                            LibraryScope::Any
+                        } else {
+                            LibraryScope::Extension(extension)
+                        };
+                        state.mark_filter_dirty();
+                        state.reset_context_menu_cache = true;
+                    }
+                }
+            }
+
+            ui.separator();
+
+            if collapsible_section_header(ui, tr(language, TextKey::Groups), groups_collapsed)
+                .clicked()
+            {
+                groups_collapsed = !groups_collapsed;
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(groups_collapsed_id, groups_collapsed));
+            }
+
             if let Some(err) = state.kind_config_error() {
                 ui.colored_label(
                     egui::Color32::YELLOW,
@@ -645,118 +738,114 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                 return;
             }
 
-            ui.label(
-                egui::RichText::new(tr(language, TextKey::Groups))
-                    .size(theme::FONT_SIZE_LARGE)
-                    .color(theme::TEXT_MAIN),
-            );
+            if !groups_collapsed {
+                let groups_snapshot: HashMap<String, Vec<String>> = state
+                    .kind_groups()
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.children.clone()))
+                    .collect();
+                let parent_counts_snapshot = state.parent_group_counts().clone();
+                let leaf_counts_snapshot = state.leaf_group_counts().clone();
 
-            let groups_snapshot: HashMap<String, Vec<String>> = state
-                .kind_groups()
-                .iter()
-                .map(|(k, v)| (k.clone(), v.children.clone()))
-                .collect();
-            let parent_counts_snapshot = state.parent_group_counts().clone();
-            let leaf_counts_snapshot = state.leaf_group_counts().clone();
+                let child_groups: std::collections::HashSet<&str> = groups_snapshot
+                    .values()
+                    .flat_map(|children| children.iter().map(|s| s.as_str()))
+                    .collect();
 
-            let child_groups: std::collections::HashSet<&str> = groups_snapshot
-                .values()
-                .flat_map(|children| children.iter().map(|s| s.as_str()))
-                .collect();
-
-            let mut all_top_level: Vec<String> = groups_snapshot
-                .keys()
-                .cloned()
-                .chain(leaf_counts_snapshot.keys().filter_map(|g| {
-                    if !child_groups.contains(g.as_str())
-                        && !groups_snapshot.contains_key(g.as_str())
-                    {
-                        Some(g.clone())
-                    } else {
-                        None
-                    }
-                }))
-                .collect();
-            all_top_level.sort();
-            all_top_level.dedup();
-
-            for group_name in &all_top_level {
-                if let Some(children) = groups_snapshot.get(group_name.as_str()) {
-                    let count = parent_counts_snapshot
-                        .get(group_name.as_str())
-                        .copied()
-                        .unwrap_or(0);
-                    let label = format!("{group_name} ({count})");
-                    let is_selected = matches!(
-                        &state.filter.scope,
-                        LibraryScope::NamedGroup(n) if n == group_name
-                    );
-                    if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
-                        state.filter.scope = if is_selected {
-                            LibraryScope::Any
+                let mut all_top_level: Vec<String> = groups_snapshot
+                    .keys()
+                    .cloned()
+                    .chain(leaf_counts_snapshot.keys().filter_map(|g| {
+                        if !child_groups.contains(g.as_str())
+                            && !groups_snapshot.contains_key(g.as_str())
+                        {
+                            Some(g.clone())
                         } else {
-                            LibraryScope::NamedGroup(group_name.clone())
-                        };
-                        state.mark_filter_dirty();
-                        state.reset_context_menu_cache = true;
-                    }
+                            None
+                        }
+                    }))
+                    .collect();
+                all_top_level.sort();
+                all_top_level.dedup();
 
-                    let mut sorted_children = children.clone();
-                    sorted_children.sort();
-                    for child in &sorted_children {
-                        let count = leaf_counts_snapshot.get(child).copied().unwrap_or(0);
-                        let label = format!("  └ {child} ({count})");
+                for group_name in &all_top_level {
+                    if let Some(children) = groups_snapshot.get(group_name.as_str()) {
+                        let count = parent_counts_snapshot
+                            .get(group_name.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        let label = format!("{group_name} ({count})");
                         let is_selected = matches!(
                             &state.filter.scope,
-                            LibraryScope::NamedGroup(n) if n == child
+                            LibraryScope::NamedGroup(n) if n == group_name
                         );
                         if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
                             state.filter.scope = if is_selected {
                                 LibraryScope::Any
                             } else {
-                                LibraryScope::NamedGroup(child.clone())
+                                LibraryScope::NamedGroup(group_name.clone())
+                            };
+                            state.mark_filter_dirty();
+                            state.reset_context_menu_cache = true;
+                        }
+
+                        let mut sorted_children = children.clone();
+                        sorted_children.sort();
+                        for child in &sorted_children {
+                            let count = leaf_counts_snapshot.get(child).copied().unwrap_or(0);
+                            let label = format!("  └ {child} ({count})");
+                            let is_selected = matches!(
+                                &state.filter.scope,
+                                LibraryScope::NamedGroup(n) if n == child
+                            );
+                            if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
+                                state.filter.scope = if is_selected {
+                                    LibraryScope::Any
+                                } else {
+                                    LibraryScope::NamedGroup(child.clone())
+                                };
+                                state.mark_filter_dirty();
+                                state.reset_context_menu_cache = true;
+                            }
+                        }
+                    } else {
+                        let count = leaf_counts_snapshot
+                            .get(group_name.as_str())
+                            .copied()
+                            .unwrap_or(0);
+                        let label = format!("{group_name} ({count})");
+                        let is_selected = matches!(
+                            &state.filter.scope,
+                            LibraryScope::NamedGroup(n) if n == group_name
+                        );
+                        if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
+                            state.filter.scope = if is_selected {
+                                LibraryScope::Any
+                            } else {
+                                LibraryScope::NamedGroup(group_name.clone())
                             };
                             state.mark_filter_dirty();
                             state.reset_context_menu_cache = true;
                         }
                     }
-                } else {
-                    let count = leaf_counts_snapshot
-                        .get(group_name.as_str())
-                        .copied()
-                        .unwrap_or(0);
-                    let label = format!("{group_name} ({count})");
-                    let is_selected = matches!(
-                        &state.filter.scope,
-                        LibraryScope::NamedGroup(n) if n == group_name
+                }
+
+                let uncategorized_count = state.uncategorized_count();
+                if uncategorized_count > 0 {
+                    let label = format!(
+                        "{} ({uncategorized_count})",
+                        tr(language, TextKey::Uncategorized)
                     );
+                    let is_selected = state.filter.scope == LibraryScope::Uncategorized;
                     if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
                         state.filter.scope = if is_selected {
                             LibraryScope::Any
                         } else {
-                            LibraryScope::NamedGroup(group_name.clone())
+                            LibraryScope::Uncategorized
                         };
                         state.mark_filter_dirty();
                         state.reset_context_menu_cache = true;
                     }
-                }
-            }
-
-            let uncategorized_count = state.uncategorized_count();
-            if uncategorized_count > 0 {
-                let label = format!(
-                    "{} ({uncategorized_count})",
-                    tr(language, TextKey::Uncategorized)
-                );
-                let is_selected = state.filter.scope == LibraryScope::Uncategorized;
-                if sidebar_data_selectable_label(ui, is_selected, &label).clicked() {
-                    state.filter.scope = if is_selected {
-                        LibraryScope::Any
-                    } else {
-                        LibraryScope::Uncategorized
-                    };
-                    state.mark_filter_dirty();
-                    state.reset_context_menu_cache = true;
                 }
             }
         });

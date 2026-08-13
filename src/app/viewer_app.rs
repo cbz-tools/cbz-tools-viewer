@@ -910,7 +910,7 @@ impl ViewerApp {
             id: BookId::from_path(path),
             path: Arc::from(path),
             title: Arc::from(title),
-            size: metadata.len(),
+            size: if metadata.is_dir() { 0 } else { metadata.len() },
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             page_count: None,
         })
@@ -2385,7 +2385,12 @@ fn book_meta_from_path(path: &Path) -> BookMeta {
     .map(|n| n.to_string_lossy().into_owned())
     .unwrap_or_else(|| path.to_string_lossy().into_owned());
     let (size, modified) = std::fs::metadata(path)
-        .map(|m| (m.len(), m.modified().unwrap_or(SystemTime::UNIX_EPOCH)))
+        .map(|m| {
+            (
+                if m.is_dir() { 0 } else { m.len() },
+                m.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            )
+        })
         .unwrap_or((0, SystemTime::UNIX_EPOCH));
     BookMeta {
         id: crate::domain::archive::BookId::from_path(path),

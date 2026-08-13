@@ -5,6 +5,9 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::SystemTime;
 
 use eframe::egui::{
     self, Color32, CornerRadius, Key, Popup, PopupCloseBehavior, Rect, Sense, Stroke, Vec2, pos2,
@@ -21,7 +24,11 @@ use super::{
     common::paint_favorite_star,
     i18n::{TextKey, tr},
     icons,
-    library::{BookViewState, ReadingHudState},
+    library::{
+        BookViewState, LibraryAction, ReadingHudState, VideoViewState,
+        animated_preview_target_bucket_from_normalized_x,
+        static_preview_page_index_from_normalized_x, video_preview_scene_index_from_normalized_x,
+    },
     theme,
 };
 
@@ -81,16 +88,61 @@ pub struct GridResult {
     pub context_action: Option<(usize, ContextAction)>,
     /// 選択中ファイルの外部ドラッグ開始
     pub drag_started: Option<usize>,
+    /// 今フレームに実際に hover されている preview 対象セル
+    pub hovered_preview: Option<HoveredPreviewCell>,
+}
+
+#[derive(Clone)]
+pub struct HoveredPreviewCell {
+    pub book_id: BookId,
+    pub path: Arc<Path>,
+    pub size: u64,
+    pub modified: Option<SystemTime>,
+    pub kind: HoveredPreviewKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HoveredPreviewKind {
+    Video {
+        mode: VideoPreviewMode,
+        scrub_scene_index: Option<u64>,
+    },
+    Static {
+        page_index: u32,
+        page_count: usize,
+    },
+    Animated {
+        mode: AnimatedPreviewMode,
+        target_bucket: Option<u16>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnimatedPreviewMode {
+    #[default]
+    Auto,
+    TimeScrub,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum VideoPreviewMode {
+    #[default]
+    Auto,
+    Scrub,
 }
 
 pub struct GridViewContext<'a> {
     pub entries: &'a [LibraryEntry],
     pub book_states: &'a HashMap<BookId, BookViewState>,
+    pub video_states: &'a HashMap<BookId, VideoViewState>,
+    pub resolve_open_action: &'a dyn Fn(usize) -> LibraryAction,
+    pub preview_texture: Option<(&'a BookId, &'a egui::TextureHandle)>,
     pub selected_idx: Option<usize>,
     pub selected_set: &'a HashSet<usize>,
     pub is_favorite: &'a dyn Fn(&LibraryEntry) -> bool,
     pub reading_hud_state: &'a dyn Fn(&LibraryEntry) -> ReadingHudState,
     pub has_page_map_failure: &'a dyn Fn(&LibraryEntry) -> bool,
+    pub static_page_count: &'a dyn Fn(&LibraryEntry) -> Option<usize>,
     pub interaction_enabled: bool,
     pub external_tools: &'a [ExternalToolMenuItem],
     pub external_tool_busy: bool,
@@ -140,12 +192,16 @@ struct GridLayout {
 }
 
 struct ThumbCellContext<'a> {
+    idx: usize,
     entry: &'a LibraryEntry,
     thumb_state: ThumbCellState<'a>,
+    preview_texture: Option<(&'a BookId, &'a egui::TextureHandle)>,
+    static_page_count: &'a dyn Fn(&LibraryEntry) -> Option<usize>,
     thumb_size: Vec2,
     interaction_enabled: bool,
     popup_keys: PopupKeyInput,
     can_start_external_drag: bool,
+    resolve_open_action: &'a dyn Fn(usize) -> LibraryAction,
 }
 
 #[derive(Clone, Copy)]
@@ -156,10 +212,10 @@ struct ThumbCellSelectionState {
 }
 
 struct ThumbCellMenuRenderState<'a> {
-    open_enabled: bool,
     rename_enabled: bool,
     show_open_menu_item: bool,
     show_rename_menu_item: bool,
+    show_copy_menu_item: bool,
     show_open_in_explorer: bool,
     show_context_header: bool,
     context_header: &'a str,
@@ -188,11 +244,15 @@ pub fn show_grid(
     let GridViewContext {
         entries,
         book_states,
+        video_states,
+        resolve_open_action,
+        preview_texture,
         selected_idx,
         selected_set,
         is_favorite,
         reading_hud_state,
         has_page_map_failure,
+        static_page_count,
         interaction_enabled,
         external_tools,
         external_tool_busy,
@@ -256,7 +316,7 @@ pub fn show_grid(
                 KeyboardSelection::Plain(idx) | KeyboardSelection::Shift(idx) => *idx,
             })
             .or(selected_idx);
-        idx.filter(|idx| is_entry_openable(entries, book_states, *idx))
+        idx.filter(|idx| is_entry_openable(resolve_open_action, *idx))
     } else {
         None
     };
@@ -271,6 +331,7 @@ pub fn show_grid(
     let mut any_context_menu_open = false;
     let mut visible_start: Option<usize> = None;
     let mut visible_end: Option<usize> = None;
+    let mut hovered_preview: Option<HoveredPreviewCell> = None;
 
     let mut sa = egui::ScrollArea::vertical()
         .auto_shrink([false; 2])
@@ -281,7 +342,6 @@ pub fn show_grid(
 
     let cell_menu_context = CellMenuContext {
         entries,
-        book_states,
         selected_idx,
         selected_set,
         interaction_enabled,
@@ -306,16 +366,20 @@ pub fn show_grid(
                         let reading_state = reading_hud_state(entry);
                         let page_map_failed = has_page_map_failure(entry);
 
-                        let thumb_state = thumb_cell_state(entry, book_states);
+                        let thumb_state = thumb_cell_state(entry, book_states, video_states);
                         let action = draw_thumb_cell(
                             ui,
                             ThumbCellContext {
+                                idx,
                                 entry,
                                 thumb_state,
+                                preview_texture,
+                                static_page_count,
                                 thumb_size,
                                 interaction_enabled,
                                 popup_keys,
                                 can_start_external_drag: menu_state.can_start_external_drag,
+                                resolve_open_action,
                             },
                             ThumbCellSelectionState {
                                 is_selected: is_primary,
@@ -323,10 +387,10 @@ pub fn show_grid(
                                 is_multi_selection: menu_state.is_multi_selection,
                             },
                             ThumbCellMenuRenderState {
-                                open_enabled: menu_state.open_enabled,
                                 rename_enabled: menu_state.rename_enabled,
                                 show_open_menu_item: menu_state.show_open_menu_item,
                                 show_rename_menu_item: menu_state.show_rename_menu_item,
+                                show_copy_menu_item: menu_state.show_copy_menu_item,
                                 show_open_in_explorer: menu_state.show_open_in_explorer,
                                 show_context_header: menu_state.show_context_header,
                                 context_header: &menu_state.context_header,
@@ -365,6 +429,9 @@ pub fn show_grid(
                         }
                         if action.drag_started {
                             drag_started = Some(idx);
+                        }
+                        if hovered_preview.is_none() {
+                            hovered_preview = action.hovered_preview.clone();
                         }
                         if action.context_menu_open {
                             any_context_menu_open = true;
@@ -406,6 +473,7 @@ pub fn show_grid(
                 .map(|(start, end)| start..=end),
             ctx_action,
             drag_started,
+            hovered_preview,
         },
     )
 }
@@ -420,23 +488,30 @@ enum ThumbCellState<'a> {
     Failed,
 }
 
-impl ThumbCellState<'_> {
-    fn is_ready(self) -> bool {
-        matches!(self, ThumbCellState::Ready(_))
-    }
-}
-
 fn thumb_cell_state<'a>(
     entry: &LibraryEntry,
     book_states: &'a HashMap<BookId, BookViewState>,
+    video_states: &'a HashMap<BookId, VideoViewState>,
 ) -> ThumbCellState<'a> {
     match entry {
         LibraryEntry::Folder(_) => ThumbCellState::Folder,
-        LibraryEntry::Archive(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => {
-            let Some(book_id) = entry.thumb_id() else {
+        LibraryEntry::VideoFile(entry) => {
+            let Some(state) = video_states.get(&entry.id) else {
                 return ThumbCellState::Loading;
             };
-            let Some(state) = book_states.get(&book_id) else {
+            if let Some(tex) = state.texture.as_ref() {
+                ThumbCellState::Ready(tex)
+            } else if state.thumb_failed {
+                ThumbCellState::Failed
+            } else {
+                ThumbCellState::Loading
+            }
+        }
+        LibraryEntry::Archive(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => {
+            let Some(book_id) = entry.thumb_id_ref() else {
+                return ThumbCellState::Loading;
+            };
+            let Some(state) = book_states.get(book_id) else {
                 return ThumbCellState::Loading;
             };
             if let Some(tex) = state.texture.as_ref() {
@@ -450,22 +525,8 @@ fn thumb_cell_state<'a>(
     }
 }
 
-fn is_entry_openable(
-    entries: &[LibraryEntry],
-    book_states: &HashMap<BookId, BookViewState>,
-    idx: usize,
-) -> bool {
-    entries
-        .get(idx)
-        .map(|entry| match entry {
-            LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => {
-                true
-            }
-            LibraryEntry::Archive(entry) => book_states
-                .get(&entry.id)
-                .is_some_and(|state| state.thumb_ready && !state.thumb_failed),
-        })
-        .unwrap_or(false)
+fn is_entry_openable(resolve_open_action: &dyn Fn(usize) -> LibraryAction, idx: usize) -> bool {
+    !matches!(resolve_open_action(idx), LibraryAction::None)
 }
 
 struct CellAction {
@@ -487,6 +548,7 @@ struct CellAction {
     ctx_external_tool: Option<usize>,
     filter_token: Option<String>,
     context_menu_open: bool,
+    hovered_preview: Option<HoveredPreviewCell>,
 }
 
 struct CellMenuState {
@@ -496,9 +558,9 @@ struct CellMenuState {
     can_start_external_drag: bool,
     show_token_menu_frame: bool,
     is_multi_selection: bool,
-    open_enabled: bool,
     show_open_menu_item: bool,
     show_rename_menu_item: bool,
+    show_copy_menu_item: bool,
     show_open_in_explorer: bool,
     show_context_header: bool,
     context_header: String,
@@ -506,7 +568,6 @@ struct CellMenuState {
 
 struct CellMenuContext<'a> {
     entries: &'a [LibraryEntry],
-    book_states: &'a HashMap<BookId, BookViewState>,
     selected_idx: Option<usize>,
     selected_set: &'a HashSet<usize>,
     interaction_enabled: bool,
@@ -550,6 +611,7 @@ struct GridResultParts {
     visible_range: Option<std::ops::RangeInclusive<usize>>,
     ctx_action: Option<(usize, ContextAction)>,
     drag_started: Option<usize>,
+    hovered_preview: Option<HoveredPreviewCell>,
 }
 
 #[derive(Default)]
@@ -569,9 +631,11 @@ struct CellContextMenuActions {
 }
 
 struct ContextMenuRenderContext<'a> {
+    idx: usize,
     entry: &'a LibraryEntry,
     language: UiLanguage,
     popup_keys: PopupKeyInput,
+    resolve_open_action: &'a dyn Fn(usize) -> LibraryAction,
 }
 
 struct OpenSectionState {
@@ -585,6 +649,13 @@ struct FavoriteGroupSectionState {
     is_multi_selection: bool,
     is_favorite: bool,
     book_target_count: usize,
+}
+
+struct RenameCopyDeleteSectionState {
+    is_multi_selection: bool,
+    show_rename_menu_item: bool,
+    show_copy_menu_item: bool,
+    rename_enabled: bool,
 }
 
 fn build_cell_menu_state(
@@ -604,9 +675,9 @@ fn build_cell_menu_state(
     } else {
         true
     };
-    let can_start_external_drag =
-        context.interaction_enabled && cell_in_selection && selection_count >= 1;
     let is_archive = matches!(entry, LibraryEntry::Archive(_));
+    let can_start_external_drag =
+        context.interaction_enabled && cell_in_selection && selection_count >= 1 && is_archive;
     let show_token_menu_frame = context.interaction_enabled
         && if cell_in_selection {
             selection_count == 1
@@ -653,10 +724,9 @@ fn build_cell_menu_state(
         can_start_external_drag,
         show_token_menu_frame,
         is_multi_selection,
-        open_enabled: !is_multi_selection
-            && is_entry_openable(context.entries, context.book_states, idx),
         show_open_menu_item: !is_multi_selection,
         show_rename_menu_item: !is_multi_selection && is_archive,
+        show_copy_menu_item: book_target_count >= 1,
         show_open_in_explorer: !is_multi_selection,
         show_context_header,
         context_header,
@@ -836,6 +906,7 @@ fn assemble_grid_result(
         visible_range: parts.visible_range,
         context_action: parts.ctx_action,
         drag_started: parts.drag_started,
+        hovered_preview: parts.hovered_preview,
     }
 }
 
@@ -854,6 +925,109 @@ fn draw_thumb_cell(
     };
     let cell_size = grid_cell_size(cell.thumb_size, render_state.hud_mode);
     let (rect, resp) = ui.allocate_exact_size(cell_size, sense);
+    let hovered_preview = if resp.hovered() {
+        match cell.entry {
+            LibraryEntry::VideoFile(entry) => {
+                let (mode, scrub_scene_index) = resp
+                    .hover_pos()
+                    .map(|pointer_pos| {
+                        let mode = if title_overlay_rect(rect, render_state.hud_font_size)
+                            .contains(pointer_pos)
+                        {
+                            VideoPreviewMode::Scrub
+                        } else {
+                            VideoPreviewMode::Auto
+                        };
+                        let scrub_scene_index = (mode == VideoPreviewMode::Scrub).then(|| {
+                            let normalized_x = if rect.width() > 0.0 {
+                                (pointer_pos.x - rect.min.x) / rect.width()
+                            } else {
+                                0.0
+                            };
+                            video_preview_scene_index_from_normalized_x(normalized_x)
+                        });
+                        (mode, scrub_scene_index)
+                    })
+                    .unwrap_or((VideoPreviewMode::Auto, None));
+                Some(HoveredPreviewCell {
+                    book_id: entry.id.clone(),
+                    path: Arc::clone(&entry.path),
+                    size: entry.size,
+                    modified: Some(entry.modified),
+                    kind: HoveredPreviewKind::Video {
+                        mode,
+                        scrub_scene_index,
+                    },
+                })
+            }
+            LibraryEntry::Archive(entry) => {
+                let kind = book_preview_kind_from_hover(
+                    &resp,
+                    rect,
+                    render_state.hud_font_size,
+                    cell.entry,
+                    cell.static_page_count,
+                );
+                Some(HoveredPreviewCell {
+                    book_id: entry.id.clone(),
+                    path: Arc::clone(&entry.path),
+                    size: entry.size,
+                    modified: Some(entry.modified),
+                    kind,
+                })
+            }
+            LibraryEntry::FolderBook(entry) => Some(HoveredPreviewCell {
+                book_id: entry.id.clone(),
+                path: Arc::clone(&entry.path),
+                size: 0,
+                modified: entry.revision_modified,
+                kind: book_preview_kind_from_hover(
+                    &resp,
+                    rect,
+                    render_state.hud_font_size,
+                    cell.entry,
+                    cell.static_page_count,
+                ),
+            }),
+            LibraryEntry::ImageFile(entry) => {
+                let pointer_pos = resp.hover_pos();
+                let scrub_rect = title_overlay_rect(rect, render_state.hud_font_size);
+                let in_title_hud =
+                    pointer_pos.is_some_and(|pointer_pos| scrub_rect.contains(pointer_pos));
+                let target_bucket = pointer_pos.filter(|_| in_title_hud).map(|pointer_pos| {
+                    animated_preview_target_bucket_from_normalized_x(normalized_x_from_pointer(
+                        scrub_rect,
+                        pointer_pos,
+                    ))
+                });
+                Some(HoveredPreviewCell {
+                    book_id: entry.id.clone(),
+                    path: Arc::clone(&entry.path),
+                    size: entry.size,
+                    modified: Some(entry.modified),
+                    kind: HoveredPreviewKind::Animated {
+                        mode: if target_bucket.is_some() {
+                            AnimatedPreviewMode::TimeScrub
+                        } else {
+                            AnimatedPreviewMode::Auto
+                        },
+                        target_bucket,
+                    },
+                })
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let thumb_state = if let (Some(hovered), Some((preview_id, texture))) =
+        (hovered_preview.as_ref(), cell.preview_texture)
+        && hovered.book_id == *preview_id
+    {
+        ThumbCellState::Ready(texture)
+    } else {
+        cell.thumb_state
+    };
 
     // ── コンテキストメニュー ──────────────────────────────────────────────────
     let mut menu_actions = CellContextMenuActions::default();
@@ -861,9 +1035,11 @@ fn draw_thumb_cell(
 
     if cell.interaction_enabled {
         let menu_context = ContextMenuRenderContext {
+            idx: cell.idx,
             entry: cell.entry,
             language: render_state.language,
             popup_keys: cell.popup_keys,
+            resolve_open_action: cell.resolve_open_action,
         };
         Popup::context_menu(&resp)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -886,6 +1062,11 @@ fn draw_thumb_cell(
                     .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
                     .inner_margin(egui::Margin::symmetric(10, 8))
                     .show(ui, |ui| {
+                        let open_enabled = !selection.is_multi_selection
+                            && is_entry_openable(
+                                menu_context.resolve_open_action,
+                                menu_context.idx,
+                            );
                         render_context_menu_header(
                             ui,
                             &menu_context,
@@ -904,7 +1085,7 @@ fn draw_thumb_cell(
                             &menu_context,
                             OpenSectionState {
                                 show_open_menu_item: menu.show_open_menu_item,
-                                open_enabled: menu.open_enabled,
+                                open_enabled,
                                 show_open_in_explorer: menu.show_open_in_explorer,
                             },
                             &mut section_state,
@@ -931,9 +1112,12 @@ fn draw_thumb_cell(
                         );
                         render_context_menu_rename_copy_delete_section(
                             ui,
-                            selection.is_multi_selection,
-                            menu.show_rename_menu_item,
-                            menu.rename_enabled,
+                            RenameCopyDeleteSectionState {
+                                is_multi_selection: selection.is_multi_selection,
+                                show_rename_menu_item: menu.show_rename_menu_item,
+                                show_copy_menu_item: menu.show_copy_menu_item,
+                                rename_enabled: menu.rename_enabled,
+                            },
                             &mut section_state,
                             &mut menu_actions,
                             render_state.language,
@@ -956,15 +1140,14 @@ fn draw_thumb_cell(
 
     if !ui.is_rect_visible(rect) {
         let click_state = read_cell_click_state(ui, &resp);
-        return build_cell_action(
-            cell.entry,
-            cell.thumb_state,
+        let mut action = build_cell_action(
             cell.can_start_external_drag,
             click_state,
             menu_actions,
             context_menu_open,
-            true,
         );
+        action.hovered_preview = hovered_preview;
+        return action;
     }
 
     let painter = ui.painter();
@@ -982,13 +1165,8 @@ fn draw_thumb_cell(
     let selection_rounding = CornerRadius::same(5);
     let selected_or_in_set = selection.is_selected || selection.is_in_set;
 
-    let folder_cell = render_thumb_cell_visual(
-        painter,
-        thumb_rect,
-        cell.entry,
-        cell.thumb_state,
-        render_state,
-    );
+    let folder_cell =
+        render_thumb_cell_visual(painter, thumb_rect, cell.entry, thumb_state, render_state);
 
     // ── HUD ──────────────────────────────────────────────────────────────────
     if !folder_cell {
@@ -1010,15 +1188,66 @@ fn draw_thumb_cell(
     // ── クリック判定 ─────────────────────────────────────────────────────────
     let click_state = read_cell_click_state(ui, &resp);
 
-    build_cell_action(
-        cell.entry,
-        cell.thumb_state,
+    let mut action = build_cell_action(
         cell.can_start_external_drag,
         click_state,
         menu_actions,
         context_menu_open,
-        false,
-    )
+    );
+    action.hovered_preview = hovered_preview;
+    action
+}
+
+fn normalized_x_from_pointer(rect: Rect, pointer_pos: egui::Pos2) -> f32 {
+    if rect.width() > 0.0 {
+        (pointer_pos.x - rect.min.x) / rect.width()
+    } else {
+        0.0
+    }
+}
+
+fn book_preview_kind_from_hover(
+    response: &egui::Response,
+    rect: Rect,
+    hud_font_size: f32,
+    entry: &LibraryEntry,
+    static_page_count: &dyn Fn(&LibraryEntry) -> Option<usize>,
+) -> HoveredPreviewKind {
+    let pointer_pos = response.hover_pos();
+    let scrub_rect = title_overlay_rect(rect, hud_font_size);
+    let in_title_hud = pointer_pos.is_some_and(|pointer_pos| scrub_rect.contains(pointer_pos));
+    let page_count = in_title_hud.then(|| static_page_count(entry)).flatten();
+    let normalized_x = pointer_pos
+        .map(|pointer_pos| normalized_x_from_pointer(scrub_rect, pointer_pos))
+        .unwrap_or_default();
+    book_preview_kind(in_title_hud, normalized_x, page_count)
+}
+
+fn book_preview_kind(
+    in_title_hud: bool,
+    normalized_x: f32,
+    page_count: Option<usize>,
+) -> HoveredPreviewKind {
+    match (in_title_hud, page_count) {
+        (true, Some(page_count @ 2..)) => {
+            let page_index = static_preview_page_index_from_normalized_x(normalized_x, page_count)
+                .unwrap_or_default();
+            HoveredPreviewKind::Static {
+                page_index,
+                page_count,
+            }
+        }
+        (true, Some(1)) => HoveredPreviewKind::Animated {
+            mode: AnimatedPreviewMode::TimeScrub,
+            target_bucket: Some(animated_preview_target_bucket_from_normalized_x(
+                normalized_x,
+            )),
+        },
+        _ => HoveredPreviewKind::Animated {
+            mode: AnimatedPreviewMode::Auto,
+            target_bucket: None,
+        },
+    }
 }
 
 // ── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -1077,7 +1306,9 @@ fn render_context_menu_open_section(
     begin_context_menu_section(ui, section_state);
     let open_icon = match context.entry {
         LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) => icons::ICON_FOLDER_OPEN,
-        LibraryEntry::Archive(_) | LibraryEntry::ImageFile(_) => icons::ICON_FILE_OPEN,
+        LibraryEntry::Archive(_) | LibraryEntry::ImageFile(_) | LibraryEntry::VideoFile(_) => {
+            icons::ICON_FILE_OPEN
+        }
     };
     if context_menu_item(
         ui,
@@ -1203,13 +1434,18 @@ fn render_context_menu_clear_settings_section(
 
 fn render_context_menu_rename_copy_delete_section(
     ui: &mut egui::Ui,
-    is_multi_selection: bool,
-    show_rename_menu_item: bool,
-    rename_enabled: bool,
+    state: RenameCopyDeleteSectionState,
     section_state: &mut ContextMenuSectionState,
     menu_actions: &mut CellContextMenuActions,
     language: UiLanguage,
 ) {
+    let RenameCopyDeleteSectionState {
+        is_multi_selection,
+        show_rename_menu_item,
+        show_copy_menu_item,
+        rename_enabled,
+    } = state;
+
     begin_context_menu_section(ui, section_state);
     if !is_multi_selection && show_rename_menu_item {
         if context_menu_item(
@@ -1231,14 +1467,16 @@ fn render_context_menu_rename_copy_delete_section(
             );
         }
     }
-    if context_menu_item(
-        ui,
-        icons::ICON_CONTENT_COPY,
-        tr(language, TextKey::Copy),
-        Some("Ctrl+C"),
-        true,
-        false,
-    ) {
+    if show_copy_menu_item
+        && context_menu_item(
+            ui,
+            icons::ICON_CONTENT_COPY,
+            tr(language, TextKey::Copy),
+            Some("Ctrl+C"),
+            true,
+            false,
+        )
+    {
         menu_actions.copy = true;
         ui.close();
     }
@@ -1306,13 +1544,10 @@ fn read_cell_click_state(ui: &egui::Ui, resp: &egui::Response) -> CellClickState
 }
 
 fn build_cell_action(
-    entry: &LibraryEntry,
-    thumb_state: ThumbCellState<'_>,
     can_start_external_drag: bool,
     click_state: CellClickState,
     menu_actions: CellContextMenuActions,
     context_menu_open: bool,
-    allow_image_file_double_click: bool,
 ) -> CellAction {
     CellAction {
         plain_click: click_state.clicked
@@ -1323,12 +1558,7 @@ fn build_cell_action(
         shift_click: click_state.clicked
             && click_state.modifiers.shift
             && !click_state.double_click,
-        double_click: (click_state.double_click
-            && (thumb_state.is_ready()
-                || matches!(entry, LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_))))
-            || (allow_image_file_double_click
-                && click_state.double_click
-                && matches!(entry, LibraryEntry::ImageFile(_))),
+        double_click: click_state.double_click,
         drag_started: click_state.drag_started && can_start_external_drag,
         ctx_open: menu_actions.open,
         ctx_move_to_folder: menu_actions.move_to_folder,
@@ -1343,6 +1573,7 @@ fn build_cell_action(
         ctx_external_tool: menu_actions.external_tool,
         filter_token: menu_actions.filter_token,
         context_menu_open,
+        hovered_preview: None,
     }
 }
 
@@ -1420,10 +1651,15 @@ fn render_thumb_cell_visual(
             false
         }
         ThumbCellState::Failed => {
+            let icon = if matches!(entry, LibraryEntry::VideoFile(_)) {
+                icons::ICON_PLAY_ARROW
+            } else {
+                icons::ICON_BROKEN_IMAGE
+            };
             draw_status_icon(
                 painter,
                 thumb_rect,
-                icons::ICON_BROKEN_IMAGE,
+                icon,
                 status_icon_size(thumb_rect),
                 theme::TEXT_SUBTLE,
             );
@@ -1569,14 +1805,18 @@ fn draw_multi_line_title_overlay(
     palette: HudPalette,
 ) {
     let font = hud_font(font_size);
-    let line_h = (font_size + 2.0).max(14.0);
-    let label_h = line_h * 3.0 + 6.0;
-    let label_rect = Rect::from_min_max(
-        pos2(thumb_rect.min.x, thumb_rect.max.y - label_h),
-        thumb_rect.max,
-    );
+    let label_rect = title_overlay_rect(thumb_rect, font_size);
     draw_title_overlay_background(painter, label_rect, palette);
     draw_title_lines_left(painter, label_rect, title, 3, font, palette.foreground);
+}
+
+fn title_overlay_rect(thumb_rect: Rect, font_size: f32) -> Rect {
+    let line_h = (font_size + 2.0).max(14.0);
+    let label_h = line_h * 3.0 + 6.0;
+    Rect::from_min_max(
+        pos2(thumb_rect.min.x, thumb_rect.max.y - label_h),
+        thumb_rect.max,
+    )
 }
 
 fn draw_title_overlay_background(painter: &egui::Painter, label_rect: Rect, palette: HudPalette) {
@@ -1733,6 +1973,7 @@ enum ThumbHudBadge {
     Archive { size: u64, ext: String },
     FolderBook,
     ImageFile,
+    Video { size: u64, ext: String },
 }
 
 fn thumb_hud_badge(entry: &LibraryEntry) -> Option<ThumbHudBadge> {
@@ -1748,6 +1989,15 @@ fn thumb_hud_badge(entry: &LibraryEntry) -> Option<ThumbHudBadge> {
         }),
         LibraryEntry::FolderBook(_) => Some(ThumbHudBadge::FolderBook),
         LibraryEntry::ImageFile(_) => Some(ThumbHudBadge::ImageFile),
+        LibraryEntry::VideoFile(entry) => Some(ThumbHudBadge::Video {
+            size: entry.size,
+            ext: entry
+                .path
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_ascii_uppercase())
+                .filter(|ext| !ext.is_empty())
+                .unwrap_or_else(|| "VIDEO".to_string()),
+        }),
         LibraryEntry::Folder(_) => None,
     }
 }
@@ -1763,6 +2013,7 @@ fn badge_text_lines(badge: ThumbHudBadge) -> Vec<String> {
         ThumbHudBadge::Archive { size, ext } => vec![format_file_size(size), ext],
         ThumbHudBadge::FolderBook => vec!["DIR".to_string()],
         ThumbHudBadge::ImageFile => vec!["IMAGE".to_string()],
+        ThumbHudBadge::Video { size, ext } => vec![format_file_size(size), ext],
     }
 }
 
@@ -2444,5 +2695,6 @@ fn entry_title(entry: &LibraryEntry) -> &str {
         LibraryEntry::Folder(FolderMeta { title, .. })
         | LibraryEntry::FolderBook(FolderMeta { title, .. }) => title.as_ref(),
         LibraryEntry::ImageFile(entry) => entry.title.as_ref(),
+        LibraryEntry::VideoFile(entry) => entry.title.as_ref(),
     }
 }

@@ -94,6 +94,13 @@ SLOW Page Map
 リトライサムネイル生成に Page Map 生成を混ぜない。
 SLOW Page Map を thumbnail retry queue と混ぜない。
 
+当時の実装では、リトライサムネイル生成の処理scopeを `ThumbnailOnly` とし、
+Page Map cache lookupやFAST / SLOW Page Mapの開始を行わない構成としていた。
+
+> **現在仕様:** 専用のサムネイル retry は廃止し、Library の3秒周期差分scanが
+> `size` / `modified` の変化を検知したsource revisionについてthumbnail stateを
+> 無効化し、通常生成へ戻す。以下のretry構成に関する記述は過去の設計・実験履歴として残す。
+
 ---
 
 ## 4. コンテナ形式
@@ -749,7 +756,7 @@ Page Map は読書体験を改善するための補助データである。
 Page Mapがなくても読める
 Page Map生成失敗でLibrary UXを壊さない
 SLOW Page MapをViewer読書中に起動しない
-thumbnail retryとSLOW Page Mapを混ぜない
+過去のretry設計ではthumbnail retryとSLOW Page Mapを混ぜない
 形式ごとの読書順を守る
 ```
 

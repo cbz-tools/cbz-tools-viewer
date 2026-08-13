@@ -2,7 +2,9 @@
 
 # cbz-tools-viewer
 
-CBZ Viewer is a Windows comic book viewer. It opens CBZ, ZIP, RAR, CBR, and EPUB image books, as well as folders that contain images directly under them.
+CBZ Viewer is a Windows comic book viewer. It opens CBZ, ZIP, RAR, CBR, and EPUB image books, as well as folders that contain images directly under them. The Library also lists supported video files.
+
+Selecting a video file opens it with the associated Windows application. CBZ Viewer does not play video.
 
 The executable is `cbz-viewer.exe`.
 
@@ -38,6 +40,13 @@ The demo manga assets are also licensed under the MIT License.
 * Predictive loading and caching help keep page turns responsive, even in large books.
 * Adjacent book preloading prepares nearby pages from the next and previous books in the background, reducing the delay when moving between books.
 * Animated WebP streaming playback, including spread view.
+* In the Library, thumbnails, automatic previews, and scrubbing are available depending on the item type. The support matrix is shown below.
+
+| Library item | Thumbnail | Auto preview | Scrub |
+| --- | --- | --- | --- |
+| Video | Yes | Yes | Yes |
+| Image book | Yes | — | Yes |
+| Animated WebP | Yes | Yes | Yes |
 
 ---
 

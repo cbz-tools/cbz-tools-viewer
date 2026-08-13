@@ -21,9 +21,10 @@ impl App {
     pub(super) fn book_entry_ref(entry: &LibraryEntry) -> Option<&BookMeta> {
         match entry {
             LibraryEntry::Archive(entry) => Some(entry),
-            LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_) | LibraryEntry::ImageFile(_) => {
-                None
-            }
+            LibraryEntry::Folder(_)
+            | LibraryEntry::FolderBook(_)
+            | LibraryEntry::ImageFile(_)
+            | LibraryEntry::VideoFile(_) => None,
         }
     }
 
@@ -32,17 +33,20 @@ impl App {
             // Viewer の本移動列に入るのは Archive と FolderBook だけ。
             LibraryEntry::Archive(entry) => Some(entry.path.as_ref().to_path_buf()),
             LibraryEntry::FolderBook(entry) => Some(entry.path.as_ref().to_path_buf()),
-            LibraryEntry::Folder(_) | LibraryEntry::ImageFile(_) => None,
+            LibraryEntry::Folder(_) | LibraryEntry::ImageFile(_) | LibraryEntry::VideoFile(_) => {
+                None
+            }
         }
     }
 
     pub(super) fn library_navigation_book_id(entry: &LibraryEntry) -> Option<BookId> {
         match entry {
-            // FolderBook は Directory でも `BookId` 相当の安定キーが必要なので、
-            // path から同じハッシュを作って navigation / thumb で共通利用する。
+            // FolderBook is assigned its stable key when it is scanned.
             LibraryEntry::Archive(entry) => Some(entry.id.clone()),
-            LibraryEntry::FolderBook(entry) => Some(BookId::from_path(entry.path.as_ref())),
-            LibraryEntry::Folder(_) | LibraryEntry::ImageFile(_) => None,
+            LibraryEntry::FolderBook(entry) => Some(entry.id.clone()),
+            LibraryEntry::Folder(_) | LibraryEntry::ImageFile(_) | LibraryEntry::VideoFile(_) => {
+                None
+            }
         }
     }
 
@@ -57,6 +61,7 @@ impl App {
                 entry.path.as_ref().to_path_buf()
             }
             LibraryEntry::ImageFile(entry) => entry.path.as_ref().to_path_buf(),
+            LibraryEntry::VideoFile(entry) => entry.path.as_ref().to_path_buf(),
         })
     }
 
@@ -100,6 +105,9 @@ impl App {
                 paths_equivalent_for_selection(entry.path.as_ref(), path.as_path())
             }
             LibraryEntry::ImageFile(entry) => {
+                paths_equivalent_for_selection(entry.path.as_ref(), path.as_path())
+            }
+            LibraryEntry::VideoFile(entry) => {
                 paths_equivalent_for_selection(entry.path.as_ref(), path.as_path())
             }
         });

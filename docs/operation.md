@@ -70,6 +70,38 @@ Changes are applied immediately.
 | Ctrl+A | Select all |
 | Ctrl+C | Copy path |
 
+### Video thumbnail preview
+
+For video files, hovering over the thumbnail starts a preview after a short delay.
+
+* Hover outside the filename HUD area to play an automatic preview from 10% to 90% of the video.
+* Hover over the filename HUD area and move left or right to scrub through the same 10% to 90% range.
+* When the card HUD is hidden, the same bottom area is still used for scrubbing.
+* Moving between the preview area and scrub area switches modes immediately.
+* Moving the pointer away restores the normal thumbnail.
+
+### Animated WebP thumbnail preview
+
+After a short hover delay, an Archive or image-file thumbnail plays in place when its thumbnail source is an animated WebP. For archives, only the first image is played.
+
+* Hover outside the filename HUD area to play the animated WebP automatically.
+* Hover over the filename HUD area and move left or right to immediately show the still frame at that point in the animation.
+* A one-page book whose page is an animated WebP uses the same time scrub. Multi-page books use page scrubbing instead.
+* When the card HUD is hidden, the same bottom area is still used for scrubbing.
+* Moving between the preview area and scrub area switches modes immediately.
+* Moving the pointer away restores the normal thumbnail.
+
+### Static-image thumbnail scrubbing
+
+For multi-page image books with an available Page Map, Static Scrub can be used on Archive, FolderBook, EPUB image book, and RAR/CBR entries. Multi-page books use the page axis even when a page is an animated WebP.
+
+* Move left or right in the filename HUD area to scrub through all pages.
+* The page at the pointed position is shown in the thumbnail.
+* There is no automatic preview.
+* When the card HUD is hidden, the same bottom area is still used for scrubbing.
+* Moving the pointer outside the scrub area restores the normal thumbnail.
+* Static Scrub is not used for image books without a Page Map.
+
 ### Search
 
 Use the search box to filter by book title.
@@ -83,6 +115,10 @@ You can show only books that are marked as favorites.
 You can filter books by Unread / Reading / Read. Counts are shown.
 
 Reading status updates automatically from Viewer progress. Closing a book before the end marks it as Reading, and closing it after showing the last page marks it as Read.
+
+### Extensions
+
+You can filter Library items by file extension. Counts are shown, and the filter can be combined with the search box.
 
 ### Groups
 

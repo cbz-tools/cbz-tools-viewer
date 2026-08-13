@@ -1,4 +1,3 @@
-#![cfg_attr(test, allow(dead_code))]
 //! Viewer ページローダー。
 //!
 //! 最新勝ちの request queue、reader cache、frame cache、animation stream をまとめて持つ。

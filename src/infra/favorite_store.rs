@@ -75,6 +75,14 @@ impl FavoriteStore {
             .any(|entry| entry.normalized_path == normalized_path)
     }
 
+    /// 現在の正規化済みパスを、短命な読み取りスナップショットとして返す。
+    pub(crate) fn normalized_paths_snapshot(&self) -> HashSet<String> {
+        self.entries
+            .iter()
+            .map(|entry| entry.normalized_path.clone())
+            .collect()
+    }
+
     /// 対象が存在すれば削除、存在しなければ追加する。
     pub fn toggle(&mut self, path: &Path) -> FavoriteState {
         let normalized_path = normalize_path_for_selection(path);

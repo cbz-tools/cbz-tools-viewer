@@ -40,6 +40,12 @@ impl DiskCache {
         std::fs::read(self.thumb_path(id, file_size, modified)).ok()
     }
 
+    /// 指定した file_size / modified のサムネキャッシュが存在するか確認する。
+    /// キャッシュ内容の読み込みやデコードは行わない。
+    pub fn has_thumb(&self, id: &BookId, file_size: u64, modified: Option<SystemTime>) -> bool {
+        self.thumb_path(id, file_size, modified).is_file()
+    }
+
     /// サムネキャッシュをすべて削除する（設定変更・手動クリア用）
     pub fn clear_all(&self) -> Result<()> {
         if self.root.exists() {

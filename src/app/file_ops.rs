@@ -57,6 +57,26 @@ impl App {
         }
     }
 
+    pub(super) fn open_video(&self, idx: usize) {
+        let Some(LibraryEntry::VideoFile(entry)) = self.library.entries.get(idx) else {
+            return;
+        };
+        let path = entry.path.as_ref();
+        tracing::debug!(path = %path.display(), "video OS open request");
+        #[cfg(windows)]
+        {
+            if open_with_default_app(path) {
+                tracing::debug!(path = %path.display(), "video OS open success");
+            } else {
+                tracing::debug!(path = %path.display(), "video OS open failure");
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            tracing::debug!(path = %path.display(), "video OS open failure: unsupported platform");
+        }
+    }
+
     pub(super) fn begin_rename(&mut self, idx: usize) {
         if let Some(entry) = self.book_entry_at(idx) {
             let stem = entry
@@ -147,6 +167,14 @@ impl App {
             .collect();
         let mut had_failure = false;
         for path in &targets {
+            if self.library.entries.iter().any(|entry| {
+                matches!(
+                    entry,
+                    LibraryEntry::VideoFile(video) if video.path.as_ref() == path.as_path()
+                )
+            }) {
+                tracing::debug!(path = %path.display(), "video delete");
+            }
             let result = if path.is_dir() {
                 std::fs::remove_dir_all(path)
             } else {
@@ -358,6 +386,27 @@ fn open_with_shell_execute(path: &Path) {
             "open-in-explorer failed"
         );
     }
+}
+
+#[cfg(windows)]
+fn open_with_default_app(path: &Path) -> bool {
+    let file = utf16z(path.as_os_str());
+
+    // SAFETY:
+    // 文字列バッファはこの呼び出し中ずっと生存し、NUL 終端済み。
+    // `ShellExecuteW` の失敗は戻り値で判定し、所有権移動も発生しない。
+    let result = unsafe {
+        ShellExecuteW(
+            Some(HWND(std::ptr::null_mut())),
+            PCWSTR::null(),
+            PCWSTR(file.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+
+    result.0 as usize > 32
 }
 
 #[cfg(windows)]

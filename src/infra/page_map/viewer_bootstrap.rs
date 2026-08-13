@@ -26,11 +26,20 @@ pub fn try_load_existing_viewer_page_map_for_spad(path: &Path) -> Option<Arc<Boo
         return None;
     }
     let metadata = std::fs::metadata(path).ok()?;
-    let revision = SourceRevision::from_file_state(metadata.len(), metadata.modified().ok());
+    let revision = current_source_revision_from_metadata(path, &metadata);
     let id = crate::domain::archive::BookId::from_path(path);
+    try_load_existing_viewer_page_map_for_revision(&id, &revision)
+}
+
+/// Cache-only Page Map lookup for a caller that already has an authoritative
+/// source snapshot. This deliberately does not inspect the source path.
+pub fn try_load_existing_viewer_page_map_for_revision(
+    id: &crate::domain::archive::BookId,
+    revision: &SourceRevision,
+) -> Option<Arc<BookPageMap>> {
     let cache = open_existing_page_map_cache()?;
     cache
-        .get_existing_page_map_for_revision(&id, &revision)
+        .get_existing_page_map_for_revision(id, revision)
         .map(Arc::new)
 }
 
@@ -481,13 +490,27 @@ fn clear_page_map_failure(
 }
 
 fn source_revision_for_entry(entry: &BookMeta) -> SourceRevision {
-    SourceRevision::from_file_state(entry.size, Some(entry.modified))
+    let size = if matches!(
+        book_source_kind(entry.path.as_ref()),
+        BookSourceKind::Folder
+    ) {
+        0
+    } else {
+        entry.size
+    };
+    SourceRevision::from_file_state(size, Some(entry.modified))
 }
 
 fn current_source_revision(path: &Path) -> Option<SourceRevision> {
     let meta = std::fs::metadata(path).ok()?;
-    Some(SourceRevision::from_file_state(
-        meta.len(),
-        meta.modified().ok(),
-    ))
+    Some(current_source_revision_from_metadata(path, &meta))
+}
+
+fn current_source_revision_from_metadata(path: &Path, meta: &std::fs::Metadata) -> SourceRevision {
+    let size = if matches!(book_source_kind(path), BookSourceKind::Folder) {
+        0
+    } else {
+        meta.len()
+    };
+    SourceRevision::from_file_state(size, meta.modified().ok())
 }
