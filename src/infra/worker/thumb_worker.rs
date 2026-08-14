@@ -273,6 +273,7 @@ pub struct ThumbWorker {
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
     lanes: Arc<ThumbnailLaneState>,
+    display_mailbox: Arc<DisplayThumbMailbox>,
     preview_control: Arc<PreviewControl>,
     animated_result: Arc<Mutex<Option<WorkerMsg>>>,
 }
@@ -302,6 +303,88 @@ enum VideoReq {
     ClearCache,
     RemoveCache(BookId),
     Shutdown,
+}
+
+struct DisplayThumbMailbox {
+    state: Mutex<DisplayThumbMailboxState>,
+    wake: Notify,
+    lanes: Arc<ThumbnailLaneState>,
+}
+
+struct DisplayThumbMailboxState {
+    pending: Vec<(ThumbTask, u64)>,
+    closed: bool,
+}
+
+impl DisplayThumbMailbox {
+    fn new(lanes: Arc<ThumbnailLaneState>) -> Self {
+        Self {
+            state: Mutex::new(DisplayThumbMailboxState {
+                pending: Vec::new(),
+                closed: false,
+            }),
+            wake: Notify::new(),
+            lanes,
+        }
+    }
+
+    fn replace(&self, tasks: Vec<(ThumbTask, u64)>) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return;
+        }
+        for _ in 0..state.pending.len() {
+            self.lanes.retire_request_pending(ThumbnailLane::Image);
+        }
+        for _ in 0..tasks.len() {
+            self.lanes.mark_request_pending(ThumbnailLane::Image);
+        }
+        state.pending = tasks;
+        drop(state);
+        self.wake.notify_waiters();
+    }
+
+    fn clear(&self) {
+        self.replace(Vec::new());
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return;
+        }
+        for _ in 0..state.pending.len() {
+            self.lanes.retire_request_pending(ThumbnailLane::Image);
+        }
+        state.pending.clear();
+        state.closed = true;
+        drop(state);
+        self.wake.notify_waiters();
+    }
+
+    fn take_next(&self) -> Option<(ThumbTask, u64)> {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let task = state.pending.first().cloned();
+        if task.is_some() {
+            state.pending.remove(0);
+            self.lanes.retire_request_pending(ThumbnailLane::Image);
+        }
+        drop(state);
+        if task.is_some() {
+            self.wake.notify_waiters();
+        }
+        task
+    }
+
+    fn has_pending(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        !state.pending.is_empty()
+    }
+
+    fn is_closed(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state.closed
+    }
 }
 
 enum PreviewCommand {
@@ -480,6 +563,7 @@ impl ThumbWorker {
         let generation = Arc::new(AtomicU64::new(0));
         let artifact_generation = Arc::new(AtomicU64::new(0));
         let lanes = Arc::new(ThumbnailLaneState::new(base_goal));
+        let display_mailbox = Arc::new(DisplayThumbMailbox::new(Arc::clone(&lanes)));
         let preview_control = Arc::new(PreviewControl::new());
         let animated_result = Arc::new(Mutex::new(None));
         let normal_resp_tx = resp_tx.clone();
@@ -493,6 +577,7 @@ impl ThumbWorker {
                 let artifact_generation = Arc::clone(&artifact_generation);
                 let artifact_gate = Arc::clone(&artifact_gate);
                 let lanes = Arc::clone(&lanes);
+                let display_mailbox = Arc::clone(&display_mailbox);
                 let req_tx = req_tx.clone();
                 move || {
                     worker_main(WorkerMainContext {
@@ -505,6 +590,7 @@ impl ThumbWorker {
                         artifact_generation,
                         artifact_gate,
                         lanes,
+                        display_mailbox,
                         base_goal,
                     })
                 }
@@ -535,6 +621,7 @@ impl ThumbWorker {
             generation,
             artifact_generation,
             lanes,
+            display_mailbox,
             preview_control,
             animated_result,
         }
@@ -546,6 +633,12 @@ impl ThumbWorker {
         if self.req_tx.send(WorkerReq::Task(task, generation)).is_err() {
             self.lanes.retire_request_pending(ThumbnailLane::Image);
         }
+    }
+
+    pub fn replace_display_tasks(&self, tasks: Vec<ThumbTask>) {
+        let generation = self.generation.load(Ordering::Relaxed);
+        self.display_mailbox
+            .replace(tasks.into_iter().map(|task| (task, generation)).collect());
     }
 
     pub fn request_page_map(&self, task: ThumbTask) {
@@ -653,6 +746,7 @@ impl ThumbWorker {
     pub fn clear_pending_tasks(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.stop_preview();
+        self.display_mailbox.clear();
         let _ = self.req_tx.send(WorkerReq::ClearPending);
     }
 
@@ -660,6 +754,7 @@ impl ThumbWorker {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.artifact_generation.fetch_add(1, Ordering::SeqCst);
         self.stop_preview();
+        self.display_mailbox.clear();
         let _ = self.req_tx.send(WorkerReq::ClearCaches);
         let _ = self.video_req_tx.send(VideoReq::ClearCache);
     }
@@ -679,6 +774,7 @@ impl ThumbWorker {
     pub fn shutdown(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         clear_animated_preview_result(&self.animated_result);
+        self.display_mailbox.close();
         let _ = self.req_tx.send(WorkerReq::Shutdown);
         let _ = self.video_req_tx.send(VideoReq::Shutdown);
         self.preview_control.shutdown();
@@ -723,6 +819,7 @@ struct WorkerMainContext {
     artifact_generation: Arc<AtomicU64>,
     artifact_gate: Arc<RwLock<()>>,
     lanes: Arc<ThumbnailLaneState>,
+    display_mailbox: Arc<DisplayThumbMailbox>,
     base_goal: usize,
 }
 
@@ -737,6 +834,7 @@ fn worker_main(context: WorkerMainContext) {
         artifact_generation,
         artifact_gate,
         lanes,
+        display_mailbox,
         base_goal,
     } = context;
 
@@ -852,16 +950,19 @@ fn worker_main(context: WorkerMainContext) {
             let thumbnail_sem = Arc::clone(&thumbnail_sem);
             let prune_sem = Arc::clone(&prune_sem);
             let generation = Arc::clone(&generation);
+            let display_mailbox = Arc::clone(&display_mailbox);
             async move {
                 while let Some(req) = req_rx.recv().await {
                     match req {
                         WorkerReq::ClearPending => {
+                            display_mailbox.clear();
                             shared.lanes.reset_transient();
                             shared.clear_in_flight();
                             shared.page_map_coordinator.clear_all();
                             continue;
                         }
                         WorkerReq::ClearCaches => {
+                            display_mailbox.clear();
                             shared.lanes.reset_transient();
                             shared.mem_cache.clear();
                             shared.clear_in_flight();
@@ -939,6 +1040,7 @@ fn worker_main(context: WorkerMainContext) {
                             continue;
                         }
                         WorkerReq::Shutdown => {
+                            display_mailbox.close();
                             shared.lanes.reset_transient();
                             break;
                         }
@@ -967,24 +1069,27 @@ fn worker_main(context: WorkerMainContext) {
                             if task_gen != generation.load(Ordering::Relaxed) {
                                 continue;
                             }
+                            let Some((permit, image_running)) = acquire_thumbnail_permit(
+                                Arc::clone(&thumbnail_sem),
+                                Arc::clone(&shared.lanes),
+                                ThumbnailLane::Image,
+                                Some(Arc::clone(&display_mailbox)),
+                                false,
+                            )
+                            .await
+                            else {
+                                tracing::error!("thumbnail semaphore closed");
+                                break;
+                            };
                             let Some(flight) = shared.begin_task(&task) else {
+                                drop(permit);
+                                drop(image_running);
                                 tracing::debug!(
                                     id = %task.book_id.0.to_hex(),
                                     width = task.target_width,
                                     "duplicate thumb task skipped"
                                 );
                                 continue;
-                            };
-                            let Some((permit, image_running)) = acquire_thumbnail_permit(
-                                Arc::clone(&thumbnail_sem),
-                                Arc::clone(&shared.lanes),
-                                ThumbnailLane::Image,
-                            )
-                            .await
-                            else {
-                                drop(flight);
-                                tracing::error!("thumbnail semaphore closed");
-                                break;
                             };
                             let tx = resp_tx.clone();
                             let repaint = repaint.clone();
@@ -1028,8 +1133,108 @@ fn worker_main(context: WorkerMainContext) {
             }
         });
 
-        let _ = tokio::join!(normal_loop, video_loop);
+        let display_loop = tokio::spawn({
+            let shared = Arc::clone(&shared);
+            let tx = resp_tx.clone();
+            let repaint = repaint.clone();
+            let generation = Arc::clone(&generation);
+            let thumbnail_sem = Arc::clone(&thumbnail_sem);
+            let display_mailbox = Arc::clone(&display_mailbox);
+            async move {
+                display_worker_loop(
+                    display_mailbox,
+                    shared,
+                    tx,
+                    repaint,
+                    generation,
+                    thumbnail_sem,
+                )
+                .await;
+            }
+        });
+
+        let _ = tokio::join!(normal_loop, video_loop, display_loop);
     });
+}
+
+async fn display_worker_loop(
+    display_mailbox: Arc<DisplayThumbMailbox>,
+    shared: Arc<WorkerShared>,
+    resp_tx: std::sync::mpsc::Sender<WorkerMsg>,
+    repaint: RepaintNotifier,
+    generation: Arc<AtomicU64>,
+    thumbnail_sem: Arc<Semaphore>,
+) {
+    loop {
+        let notified = display_mailbox.wake.notified();
+        if !display_mailbox.has_pending() {
+            if display_mailbox.is_closed() {
+                return;
+            }
+            notified.await;
+            continue;
+        }
+
+        let Some((permit, image_running)) = acquire_thumbnail_permit(
+            Arc::clone(&thumbnail_sem),
+            Arc::clone(&shared.lanes),
+            ThumbnailLane::Image,
+            Some(Arc::clone(&display_mailbox)),
+            true,
+        )
+        .await
+        else {
+            if display_mailbox.is_closed() {
+                return;
+            }
+            continue;
+        };
+
+        let Some((task, task_gen)) = display_mailbox.take_next() else {
+            drop(permit);
+            drop(image_running);
+            continue;
+        };
+        if display_mailbox.is_closed() || task_gen != generation.load(Ordering::Relaxed) {
+            drop(permit);
+            drop(image_running);
+            continue;
+        }
+        let Some(flight) = shared.begin_task(&task) else {
+            drop(permit);
+            drop(image_running);
+            tracing::debug!(
+                id = %task.book_id.0.to_hex(),
+                width = task.target_width,
+                "display thumb duplicate task skipped"
+            );
+            continue;
+        };
+        let tx = resp_tx.clone();
+        let repaint = repaint.clone();
+        let generation = Arc::clone(&generation);
+        tokio::spawn({
+            let shared = Arc::clone(&shared);
+            async move {
+                run_thumb_task(
+                    task,
+                    ThumbTaskRuntime {
+                        shared,
+                        tx,
+                        repaint,
+                        generation,
+                    },
+                    permit,
+                    Some(NORMAL_TIMEOUT),
+                    "display",
+                    task_gen,
+                    flight,
+                )
+                .await;
+                drop(image_running);
+            }
+        });
+    }
 }
 
 // ── タスク実行（normal / slow 共通）──────────────────────────────────────────
@@ -2478,6 +2683,8 @@ async fn video_worker_loop(
             Arc::clone(&thumbnail_sem),
             Arc::clone(&shared.lanes),
             ThumbnailLane::Video,
+            None,
+            false,
         )
         .await
         else {
@@ -3303,10 +3510,44 @@ async fn acquire_thumbnail_permit(
     semaphore: Arc<Semaphore>,
     lanes: Arc<ThumbnailLaneState>,
     lane: ThumbnailLane,
+    display_mailbox: Option<Arc<DisplayThumbMailbox>>,
+    display_only: bool,
 ) -> Option<(tokio::sync::OwnedSemaphorePermit, LaneRunningGuard)> {
     lanes.mark_waiting(lane);
     loop {
         let notified = lanes.wake.notified();
+        if let Some(display_mailbox) = display_mailbox.as_ref() {
+            let display_notified = display_mailbox.wake.notified();
+            let has_display_work = display_mailbox.has_pending();
+            if display_only && !has_display_work {
+                lanes.cancel_waiting(lane);
+                return None;
+            }
+            if !display_only && has_display_work {
+                display_notified.await;
+                continue;
+            }
+            if lanes.may_start(lane) {
+                match Arc::clone(&semaphore).try_acquire_owned() {
+                    Ok(permit) => {
+                        if let Some(running) = lanes.try_started(lane) {
+                            return Some((permit, running));
+                        }
+                        drop(permit);
+                    }
+                    Err(tokio::sync::TryAcquireError::Closed) => {
+                        lanes.cancel_waiting(lane);
+                        return None;
+                    }
+                    Err(tokio::sync::TryAcquireError::NoPermits) => {}
+                }
+            }
+            tokio::select! {
+                _ = notified => {}
+                _ = display_notified => {}
+            }
+            continue;
+        }
         if lanes.may_start(lane) {
             match Arc::clone(&semaphore).try_acquire_owned() {
                 Ok(permit) => {
@@ -3608,7 +3849,6 @@ struct ThumbTaskKey {
     target_width: u16,
     expected_size: u64,
     expected_modified: Option<SystemTime>,
-    bypass_cache: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -3632,7 +3872,6 @@ impl ThumbTaskKey {
             target_width: task.target_width,
             expected_size: task.expected_size,
             expected_modified: task.expected_modified,
-            bypass_cache: task.bypass_cache,
         }
     }
 }

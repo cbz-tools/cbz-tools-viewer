@@ -280,6 +280,8 @@ pub struct LibraryState {
     /// its normal thumbnail tasks. The worker still owns Page Map validity and
     /// coordinator/revision/generation admission.
     pending_page_map_tasks: Vec<(u64, ThumbTask)>,
+    /// Last visible display-thumbnail task identity sequence sent to the worker.
+    last_display_set: Option<Vec<DisplayThumbKey>>,
 
     // ── サムネイルサイズ（AppSettings から更新） ─────────────────────────────
     /// サムネイル幅（px）
@@ -342,6 +344,27 @@ pub(crate) struct VideoViewState {
     pub requested_size: Option<u64>,
     pub requested_modified: Option<SystemTime>,
     pub requested_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayThumbKey {
+    book_id: BookId,
+    expected_size: u64,
+    expected_modified: Option<SystemTime>,
+    target_width: u16,
+    bypass_cache: bool,
+}
+
+impl From<&ThumbTask> for DisplayThumbKey {
+    fn from(task: &ThumbTask) -> Self {
+        Self {
+            book_id: task.book_id.clone(),
+            expected_size: task.expected_size,
+            expected_modified: task.expected_modified,
+            target_width: task.target_width,
+            bypass_cache: task.bypass_cache,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1853,6 +1876,7 @@ impl LibraryState {
 
     pub fn clear_books(&mut self) {
         self.invalidate_preview();
+        self.last_display_set = None;
         self.book_states.clear();
         self.video_states.clear();
         self.recompute_group_counts();
@@ -1988,6 +2012,7 @@ impl LibraryState {
             page_map_failure_revisions: HashMap::new(),
             page_map_failure_checked_revisions: HashMap::new(),
             pending_page_map_tasks: Vec::new(),
+            last_display_set: None,
             thumb_w: theme::THUMB_W,
             thumb_h: theme::THUMB_H,
             wheel_scroll_multiplier: 2.0,
@@ -2788,6 +2813,7 @@ impl LibraryState {
 
     fn rebuild_entries(&mut self) {
         self.invalidate_preview();
+        self.last_display_set = None;
         self.prune_page_map_failure_states();
         let selected_paths_before = self.selected_paths_snapshot();
         let selected_path_before = self
@@ -3883,29 +3909,73 @@ impl LibraryState {
         }
     }
 
+    fn clear_display_tasks_if_needed(&mut self) {
+        if self
+            .last_display_set
+            .as_ref()
+            .is_some_and(|display_keys| display_keys.is_empty())
+        {
+            return;
+        }
+        self.last_display_set = Some(Vec::new());
+        self.worker.replace_display_tasks(Vec::new());
+    }
+
     fn ensure_visible_thumb_textures(&mut self, visible_range: &std::ops::RangeInclusive<usize>) {
         let visible_entries: Vec<LibraryEntry> = visible_range
             .clone()
             .filter_map(|idx| self.entries.get(idx).cloned())
             .collect();
+        let mut display_tasks = Vec::new();
+        let mut display_keys = Vec::new();
         for entry in &visible_entries {
-            let should_request = match entry {
+            match entry {
                 LibraryEntry::VideoFile(video) => {
-                    self.video_state(&video.id).is_some_and(|state| {
-                        state.texture.is_none() && !state.thumb_failed && !state.thumb_requested
-                    })
+                    let should_request = match self.video_state(&video.id) {
+                        None => true,
+                        Some(state) => {
+                            state.texture.is_none() && !state.thumb_failed && !state.thumb_requested
+                        }
+                    };
+                    if should_request {
+                        self.request_thumb_for_entry(entry, false);
+                    }
                 }
-                _ => entry
-                    .thumb_id_ref()
-                    .and_then(|book_id| self.book_state(book_id))
-                    .is_some_and(|state| {
-                        state.texture.is_none() && !state.thumb_failed && !state.thumb_requested
-                    }),
-            };
-            if should_request {
-                self.request_thumb_for_entry(entry, false);
+                _ => {
+                    if let Some(task) = self.display_thumb_task_for_entry(entry) {
+                        display_keys.push(DisplayThumbKey::from(&task));
+                        display_tasks.push(task);
+                    }
+                }
             }
         }
+        let should_replace_display_tasks = self.last_display_set.as_ref() != Some(&display_keys);
+        self.last_display_set = Some(display_keys);
+        if should_replace_display_tasks {
+            self.worker.replace_display_tasks(display_tasks);
+        }
+    }
+
+    fn display_thumb_task_for_entry(&self, entry: &LibraryEntry) -> Option<ThumbTask> {
+        let book_id = entry.thumb_id_ref()?;
+        let snapshot = self.source_snapshots.get(book_id)?;
+        let path = Arc::clone(&snapshot.path);
+        let expected_size = snapshot.size;
+        let expected_modified = snapshot.modified;
+        let target_width = crate::domain::app_settings::AppSettings::storage_width();
+        let state = self.book_state(book_id)?;
+        if state.texture.is_some() || state.thumb_failed {
+            return None;
+        }
+        let bypass_cache = state.force_reload;
+        Some(ThumbTask {
+            book_id: book_id.clone(),
+            path,
+            target_width,
+            expected_size,
+            expected_modified,
+            bypass_cache,
+        })
     }
 
     // ── 選択ユーティリティ ────────────────────────────────────────────────────
@@ -4222,6 +4292,7 @@ pub fn show(
     }
 
     if state.show_empty_library_message(ui, language) {
+        state.clear_display_tasks_if_needed();
         if state.preview.target.is_some() {
             state.invalidate_preview();
         }
@@ -4323,6 +4394,8 @@ pub fn show(
         state.evict_thumb_textures_outside_keep_indices(&keep_indices);
         state.ensure_visible_thumb_textures(&visible_range);
         state.flush_pending_page_map_tasks(&visible_range);
+    } else {
+        state.clear_display_tasks_if_needed();
     }
 
     // ── 選択状態を更新 ────────────────────────────────────────────────────────
