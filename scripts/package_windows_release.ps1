@@ -48,7 +48,6 @@ New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 Copy-File (Join-Path $Workspace "target/release/cbz-viewer.exe") (Join-Path $stageDir "cbz-viewer.exe")
 Copy-File (Join-Path $Workspace "target/release/dav1d.dll") (Join-Path $stageDir "dav1d.dll")
-Copy-File (Join-Path $Workspace "target/release/UnRAR64.dll") (Join-Path $stageDir "UnRAR64.dll")
 
 $runtimeDir = Join-Path $Workspace "target/release"
 $allowedFfmpegRegex = '^(avcodec|avformat|avutil|swresample|swscale)-\d+\.dll$'
@@ -83,7 +82,6 @@ Copy-File (Join-Path $Workspace "README.ja.md") (Join-Path $stageDir "README.ja.
 Copy-File (Join-Path $Workspace "THIRDPARTY_LICENSES.md") (Join-Path $stageDir "THIRDPARTY_LICENSES.md")
 Copy-File (Join-Path $Workspace "LICENSE") (Join-Path $stageDir "LICENSE")
 Copy-File (Join-Path $Workspace "third_party/dav1d/LICENSE") (Join-Path $stageDir "third_party/dav1d/LICENSE")
-Copy-File (Join-Path $Workspace "third_party/unrar/LICENSE.txt") (Join-Path $stageDir "third_party/unrar/LICENSE.txt")
 Copy-File (Join-Path $ffmpegShareDir "copyright") (Join-Path $stageDir "third_party/ffmpeg/copyright")
 Copy-File (Join-Path $ffmpegShareDir "vcpkg.spdx.json") (Join-Path $stageDir "third_party/ffmpeg/vcpkg.spdx.json")
 

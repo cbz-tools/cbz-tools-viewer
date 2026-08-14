@@ -240,10 +240,6 @@ jobs:
       - name: Verify bundled runtime DLL sources
         shell: pwsh
         run: |
-          if (!(Test-Path third_party/unrar/x64/UnRAR64.dll)) {
-            Write-Error "third_party/unrar/x64/UnRAR64.dll is missing"
-            exit 1
-          }
           if (!(Test-Path third_party/dav1d/dav1d.dll)) {
             Write-Error "third_party/dav1d/dav1d.dll is missing"
             exit 1
@@ -288,10 +284,6 @@ jobs:
       - name: Verify runtime DLLs prepared (release)
         shell: pwsh
         run: |
-          if (!(Test-Path target/release/UnRAR64.dll)) {
-            Write-Error "target/release/UnRAR64.dll was not prepared by build.rs"
-            exit 1
-          }
           if (!(Test-Path target/release/dav1d.dll)) {
             Write-Error "target/release/dav1d.dll was not prepared by build.rs"
             exit 1

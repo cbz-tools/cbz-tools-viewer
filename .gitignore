@@ -2,7 +2,6 @@
 /dll
 .tmp_sync_latest/
 AGENTS.md
-/UnRAR64.dll
 /dav1d.dll
 *.log
 __pycache__/

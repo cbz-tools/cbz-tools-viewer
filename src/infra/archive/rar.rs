@@ -120,7 +120,6 @@ pub(crate) fn write_cbz_rebuild_keep_entries<W: Write + Seek>(
 fn open_impl(path: &Path) -> Result<RarReader> {
     use unrar::Archive;
 
-    ensure_unrar_dll_for_current_target()?;
     let started = Instant::now();
 
     let path_str = path
@@ -130,26 +129,7 @@ fn open_impl(path: &Path) -> Result<RarReader> {
     let archive = match Archive::new(path_str).open_for_listing() {
         Ok(archive) => archive,
         Err(e) => {
-            #[cfg(windows)]
-            {
-                let dll_name = expected_unrar_dll_name();
-                let dll_path = Path::new(dll_name);
-                tracing::warn!(
-                    path = %path.display(),
-                    code = ?e.code,
-                    dll_path = %dll_path.display(),
-                    dll_exists = dll_path.exists(),
-                    "rar_reader: open failed"
-                );
-            }
-            #[cfg(not(windows))]
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    code = ?e.code,
-                    "rar_reader: open failed"
-                );
-            }
+            tracing::warn!(path = %path.display(), code = ?e.code, "rar_reader: open failed");
             return Err(anyhow::anyhow!("{}", format_rar_open_error(path, e.code)));
         }
     };
@@ -221,8 +201,6 @@ fn open_impl(path: &Path) -> Result<RarReader> {
 fn list_cbz_rebuild_entries_impl(path: &Path) -> Result<Vec<CbzRebuildArchiveEntry>> {
     use unrar::Archive;
 
-    ensure_unrar_dll_for_current_target()?;
-
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 パス: {}", path.display()))?;
@@ -252,8 +230,6 @@ fn list_cbz_rebuild_entries_impl(path: &Path) -> Result<Vec<CbzRebuildArchiveEnt
 fn read_entry_impl(path: &Path, target: &str) -> Result<Bytes> {
     use unrar::Archive;
 
-    ensure_unrar_dll_for_current_target()?;
-
     let path_str = path
         .to_str()
         .ok_or_else(|| anyhow::anyhow!("non-UTF8 パス"))?;
@@ -261,26 +237,11 @@ fn read_entry_impl(path: &Path, target: &str) -> Result<Bytes> {
     let mut archive = match Archive::new(path_str).open_for_processing() {
         Ok(archive) => archive,
         Err(e) => {
-            #[cfg(windows)]
-            {
-                let dll_name = expected_unrar_dll_name();
-                let dll_path = Path::new(dll_name);
-                tracing::warn!(
-                    path = %path.display(),
-                    code = ?e.code,
-                    dll_path = %dll_path.display(),
-                    dll_exists = dll_path.exists(),
-                    "rar_reader: open_for_processing failed"
-                );
-            }
-            #[cfg(not(windows))]
-            {
-                tracing::warn!(
-                    path = %path.display(),
-                    code = ?e.code,
-                    "rar_reader: open_for_processing failed"
-                );
-            }
+            tracing::warn!(
+                path = %path.display(),
+                code = ?e.code,
+                "rar_reader: open_for_processing failed"
+            );
             return Err(anyhow::anyhow!("{}", format_rar_open_error(path, e.code)));
         }
     };
@@ -344,71 +305,12 @@ fn format_rar_open_error(path: &Path, code: unrar::error::Code) -> String {
             path.display(),
             code
         ),
-        // DLL なし/ロード失敗を unrar 側で厳密には区別できないため、open failure として扱う。
-        Code::EOpen => format!(
-            "RAR open failure (possible DLL missing/load failure): path={} code={:?}",
-            path.display(),
-            code
-        ),
         _ => format!(
             "RAR archive open failure: path={} code={:?}",
             path.display(),
             code
         ),
     }
-}
-
-#[cfg(all(feature = "rar", windows))]
-fn expected_unrar_dll_name() -> &'static str {
-    #[cfg(target_pointer_width = "64")]
-    {
-        "UnRAR64.dll"
-    }
-    #[cfg(target_pointer_width = "32")]
-    {
-        "UnRAR.dll"
-    }
-}
-
-#[cfg(all(feature = "rar", windows))]
-fn ensure_unrar_dll_for_current_target() -> Result<()> {
-    let dll_name = expected_unrar_dll_name();
-    let current_exe = std::env::current_exe().ok();
-    let exe_dir_dll_path = current_exe
-        .as_ref()
-        .and_then(|path| path.parent().map(|dir| dir.join(dll_name)));
-    let cwd_dll_path = Path::new(dll_name).to_path_buf();
-    let resolved_dll_path = exe_dir_dll_path
-        .as_ref()
-        .filter(|path| path.exists())
-        .cloned()
-        .or_else(|| cwd_dll_path.exists().then_some(cwd_dll_path.clone()));
-    tracing::debug!(
-        current_exe = ?current_exe.as_ref().map(|p| p.display().to_string()),
-        exe_dir_dll_path = ?exe_dir_dll_path.as_ref().map(|p| p.display().to_string()),
-        cwd_dll_path = %cwd_dll_path.display(),
-        resolved_dll_path = ?resolved_dll_path.as_ref().map(|p| p.display().to_string()),
-        exists = resolved_dll_path.is_some(),
-        "rar_reader: dll check"
-    );
-    if resolved_dll_path.is_some() {
-        Ok(())
-    } else {
-        anyhow::bail!(
-            "RAR open failure (DLL missing): expected '{}' next to the executable (fallback: current working directory '{}') for this build target (pointer width {})",
-            exe_dir_dll_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| format!("<unknown-exe-dir>\\{dll_name}")),
-            cwd_dll_path.display(),
-            std::mem::size_of::<usize>() * 8
-        )
-    }
-}
-
-#[cfg(all(feature = "rar", not(windows)))]
-fn ensure_unrar_dll_for_current_target() -> Result<()> {
-    Ok(())
 }
 
 #[cfg(feature = "rar")]

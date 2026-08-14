@@ -9,24 +9,12 @@ fn main() {
         return;
     }
 
-    let pointer_width = env::var("CARGO_CFG_TARGET_POINTER_WIDTH").unwrap_or_default();
-    let source = source_dll_path(&pointer_width);
-    let dll_name = expected_dll_name(&pointer_width);
-
-    println!("cargo:rerun-if-changed={}", source.display());
-    println!("cargo:rerun-if-changed=third_party/unrar/LICENSE.txt");
     println!("cargo:rerun-if-changed=third_party/dav1d/dav1d.dll");
     println!("cargo:rerun-if-changed=third_party/dav1d/LICENSE");
     println!("cargo:rerun-if-env-changed=VCPKG_ROOT");
     println!("cargo:rerun-if-env-changed=CARGO_TARGET_DIR");
     println!("cargo:rerun-if-changed=assets/viewer_icon.ico");
     println!("cargo:rerun-if-changed=assets/viewer_icon.png");
-
-    let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-    let target_profile_destination = Path::new("target").join(profile).join(dll_name);
-    if let Err(err) = copy_dll(&source, &target_profile_destination) {
-        panic!("failed to copy UnRAR DLL to target profile root: {err}");
-    }
 
     embed_windows_icon();
     maybe_copy_ffmpeg_runtime_dlls();
@@ -38,22 +26,6 @@ fn embed_windows_icon() {
     res.set_icon("assets/viewer_icon.ico");
     if let Err(err) = res.compile() {
         panic!("failed to embed Windows icon resource: {err}");
-    }
-}
-
-fn source_dll_path(pointer_width: &str) -> PathBuf {
-    match pointer_width {
-        "64" => PathBuf::from("third_party/unrar/x64/UnRAR64.dll"),
-        "32" => PathBuf::from("third_party/unrar/x86/UnRAR.dll"),
-        other => panic!("unsupported target pointer width: {other}"),
-    }
-}
-
-fn expected_dll_name(pointer_width: &str) -> &'static str {
-    match pointer_width {
-        "64" => "UnRAR64.dll",
-        "32" => "UnRAR.dll",
-        _ => "UnRAR.dll",
     }
 }
 
