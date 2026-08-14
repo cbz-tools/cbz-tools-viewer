@@ -169,10 +169,29 @@ jobs:
         run: |
           # ff-sys requires the x64-windows development files and links the
           # FFmpeg libraries dynamically. Do not enable GPL or nonfree features.
+          $sourceCacheHit = "${{ steps.ffmpeg-source-cache.outputs.cache-hit }}" -eq "true"
+          $sourceCacheHitLabel = if ($sourceCacheHit) { "true" } else { "false" }
+          Write-Host "FFmpeg source provenance cache-hit: $sourceCacheHitLabel"
+
+          if ($sourceCacheHit) {
+            Write-Host "FFmpeg install mode: binary cache allowed"
+          } else {
+            Write-Host "FFmpeg install mode: local build for source provenance"
+          }
+
           $start = Get-Date
-          & (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe") install "ffmpeg[avcodec,avformat,avfilter,swresample,swscale]:x64-windows"
-          if ($LASTEXITCODE -ne 0) {
-            exit $LASTEXITCODE
+          $previousBinarySources = $env:VCPKG_BINARY_SOURCES
+          try {
+            if (!$sourceCacheHit) {
+              $env:VCPKG_BINARY_SOURCES = "clear"
+            }
+            & (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe") install "ffmpeg[avcodec,avformat,avfilter,swresample,swscale]:x64-windows"
+            $vcpkgExitCode = $LASTEXITCODE
+          } finally {
+            $env:VCPKG_BINARY_SOURCES = $previousBinarySources
+          }
+          if ($vcpkgExitCode -ne 0) {
+            exit $vcpkgExitCode
           }
           $elapsed = (Get-Date) - $start
           Write-Host ("FFmpeg vcpkg elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
