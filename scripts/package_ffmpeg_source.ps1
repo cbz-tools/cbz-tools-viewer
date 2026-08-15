@@ -37,70 +37,60 @@ function Copy-DirectoryContents {
   }
 }
 
-function Get-LastLogValue {
+function Get-ManifestVersion {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$Text,
+    [object]$Manifest,
 
     [Parameter(Mandatory = $true)]
-    [string]$Pattern
+    [string]$ManifestPath
   )
 
-  $matches = [regex]::Matches($Text, $Pattern)
-  if ($matches.Count -eq 0) {
-    return $null
+  foreach ($field in @("version", "version-string", "version-semver")) {
+    if ($Manifest.PSObject.Properties.Name -contains $field) {
+      $value = [string]$Manifest.$field
+      if (![string]::IsNullOrWhiteSpace($value)) {
+        return $value
+      }
+    }
   }
-  return $matches[$matches.Count - 1].Groups["value"].Value.Trim()
+
+  throw "The FFmpeg port version is missing from $ManifestPath"
+}
+
+function Get-PortValue {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$PortFileText,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+
+  $pattern = '(?m)^\s*' + [regex]::Escape($Name) + '\s+(?<value>"[^"]+"|\S+)'
+  $match = [regex]::Match($PortFileText, $pattern)
+  if (!$match.Success) {
+    throw "The FFmpeg portfile does not contain $Name metadata"
+  }
+  return $match.Groups["value"].Value.Trim('"')
 }
 
 $vcpkgRoot = Get-FullPath $VcpkgRoot
 $outputDir = Get-FullPath $OutputDir
 $vcpkgExe = Join-Path $vcpkgRoot "vcpkg.exe"
-$buildtreesRoot = Get-FullPath (Join-Path $vcpkgRoot "buildtrees/ffmpeg")
-$buildtreeSourceRoot = Get-FullPath (Join-Path $buildtreesRoot "src")
 $portDir = Get-FullPath (Join-Path $vcpkgRoot "ports/ffmpeg")
+$installedRoot = Get-FullPath (Join-Path $vcpkgRoot "installed/$Triplet")
 $bundleName = "ffmpeg-source-$Version"
 $zipPath = Join-Path $outputDir "$bundleName.zip"
 $stageDir = Join-Path $outputDir ".ffmpeg-source-stage-$Version"
+$workDir = Join-Path $outputDir ".ffmpeg-source-work-$Version"
 
 try {
   if (!(Test-Path -LiteralPath $vcpkgExe -PathType Leaf)) {
     throw "vcpkg executable was not found: $vcpkgExe"
   }
-  if (!(Test-Path -LiteralPath $buildtreesRoot -PathType Container)) {
-    throw "FFmpeg buildtrees directory was not found: $buildtreesRoot"
-  }
   if (!(Test-Path -LiteralPath $portDir -PathType Container)) {
     throw "FFmpeg vcpkg port directory was not found: $portDir"
-  }
-
-  if (Test-Path -LiteralPath $stageDir) {
-    Remove-Item -LiteralPath $stageDir -Recurse -Force
-  }
-  if (Test-Path -LiteralPath $zipPath) {
-    Remove-Item -LiteralPath $zipPath -Force
-  }
-  New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
-
-  $logFiles = @(Get-ChildItem -LiteralPath $buildtreesRoot -Recurse -File -Filter "*.log")
-  if ($logFiles.Count -eq 0) {
-    throw "No FFmpeg vcpkg build logs were found under $buildtreesRoot"
-  }
-  $logText = [string]::Join(
-    [Environment]::NewLine,
-    @($logFiles | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw })
-  )
-
-  $sourceMatches = [regex]::Matches($logText, "(?m)^-- Using source at (?<path>[^\r\n]+)")
-  if ($sourceMatches.Count -eq 0) {
-    throw "The vcpkg FFmpeg logs did not identify the source directory"
-  }
-  $sourcePathText = $sourceMatches[$sourceMatches.Count - 1].Groups["path"].Value.Trim()
-  $sourcePath = Get-FullPath ($sourcePathText.Replace('/', '\'))
-  $sourceRootPrefix = $buildtreeSourceRoot.TrimEnd('\') + '\'
-  if (!(Test-Path -LiteralPath $sourcePath -PathType Container) -or
-      !$sourcePath.StartsWith($sourceRootPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
-    throw "The vcpkg FFmpeg source path is not a source directory under $buildtreeSourceRoot`: $sourcePath"
   }
 
   $portFilePath = Join-Path $portDir "portfile.cmake"
@@ -110,65 +100,181 @@ try {
     throw "The FFmpeg portfile or vcpkg manifest is missing from $portDir"
   }
 
+  if (Test-Path -LiteralPath $stageDir) {
+    Remove-Item -LiteralPath $stageDir -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $workDir) {
+    Remove-Item -LiteralPath $workDir -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $zipPath) {
+    Remove-Item -LiteralPath $zipPath -Force
+  }
+  New-Item -ItemType Directory -Force -Path $outputDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $workDir | Out-Null
+
   $portFileText = Get-Content -LiteralPath $portFilePath -Raw
   $portManifest = Get-Content -LiteralPath $portManifestPath -Raw | ConvertFrom-Json
-  $portVersion = [string]$portManifest.version
-  if ([string]::IsNullOrWhiteSpace($portVersion)) {
-    throw "The FFmpeg port version is missing from $portManifestPath"
-  }
-  $portVersionSuffix = ""
+  $portVersion = Get-ManifestVersion $portManifest $portManifestPath
+  $portVersionNumber = 0
   if ($portManifest.PSObject.Properties.Name -contains "port-version") {
-    $portVersionSuffix = " (port-version $($portManifest.'port-version'))"
+    $portVersionNumber = [int]$portManifest.'port-version'
   }
 
-  $repoMatch = [regex]::Match($portFileText, "(?m)^\s*REPO\s+(?<value>[^\s\)]+)")
-  $refMatch = [regex]::Match($portFileText, '(?m)^\s*REF\s+"(?<value>[^"]+)"')
-  $sha512Match = [regex]::Match($portFileText, "(?m)^\s*SHA512\s+(?<value>[0-9a-fA-F]+)")
-  if (!$repoMatch.Success -or !$refMatch.Success -or !$sha512Match.Success) {
-    throw "The FFmpeg portfile does not contain complete upstream source identity metadata"
-  }
-  $sourceRef = $refMatch.Groups["value"].Value.Replace('${VERSION}', $portVersion)
-  $sourceSha512 = $sha512Match.Groups["value"].Value
+  $repo = Get-PortValue $portFileText "REPO"
+  $sourceRef = Get-PortValue $portFileText "REF"
+  $sourceRef = $sourceRef.Replace('${VERSION}', $portVersion)
+  $sourceSha512 = Get-PortValue $portFileText "SHA512"
 
-  $portPatchMatches = [regex]::Matches(
+  $patchBlockMatch = [regex]::Match(
     $portFileText,
-    "(?m)^\s+(?<patch>\d[^ \t\r\n]+\.patch)(?:\s+#.*)?\s*$"
+    '(?ms)^\s*PATCHES\s*(?<value>.*?)(?=^\s*\))'
   )
-  $portPatches = @($portPatchMatches | ForEach-Object { $_.Groups["patch"].Value } | Select-Object -Unique)
-  if ($portPatches.Count -eq 0) {
-    throw "No FFmpeg port patches were found in $portFilePath"
+  if (!$patchBlockMatch.Success) {
+    throw "The FFmpeg portfile does not contain a PATCHES block"
+  }
+  $patches = @(
+    [regex]::Matches(
+      $patchBlockMatch.Groups["value"].Value,
+      '(?m)^\s*(?<patch>"?[^"\s#]+\.patch"?)(?:\s+#.*)?\s*$'
+    ) | ForEach-Object { $_.Groups["patch"].Value.Trim('"') }
+  )
+  if ($patches.Count -eq 0) {
+    throw "The FFmpeg portfile PATCHES block is empty"
   }
 
-  $appliedPatchMatches = [regex]::Matches($logText, "-- Applying patch (?<patch>[^\r\n]+)")
-  $appliedPatches = @($appliedPatchMatches | ForEach-Object { $_.Groups["patch"].Value.Trim() } | Select-Object -Unique)
-  $missingPatches = @($portPatches | Where-Object { $_ -notin $appliedPatches })
-  if ($missingPatches.Count -gt 0) {
-    throw "The vcpkg logs do not confirm application of FFmpeg port patches: $($missingPatches -join ', ')"
+  $sourceUrl = "https://github.com/$repo/archive/$sourceRef.tar.gz"
+  $archivePath = Join-Path $workDir "ffmpeg-source.tar.gz"
+  $extractDir = Join-Path $workDir "extracted"
+  Invoke-WebRequest -Uri $sourceUrl -OutFile $archivePath
+
+  $actualSha512 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA512).Hash.ToLowerInvariant()
+  if ($actualSha512 -ne $sourceSha512.ToLowerInvariant()) {
+    throw "The FFmpeg source archive SHA512 does not match the portfile: expected $sourceSha512, got $actualSha512"
   }
 
-  $abiInfoCandidates = @(
-    (Join-Path $buildtreesRoot "$Triplet.vcpkg_abi_info.txt"),
-    (Join-Path $vcpkgRoot "installed/$Triplet/share/ffmpeg/vcpkg_abi_info.txt")
-  )
-  $abiInfoPath = $abiInfoCandidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
-  if (!$abiInfoPath) {
-    throw "The vcpkg FFmpeg ABI info file was not found"
+  New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
+  & tar.exe -xzf $archivePath -C $extractDir
+  if ($LASTEXITCODE -ne 0) {
+    throw "The FFmpeg source archive could not be extracted"
+  }
+  $archiveRoots = @(Get-ChildItem -LiteralPath $extractDir -Directory -Force)
+  if ($archiveRoots.Count -ne 1) {
+    throw "The FFmpeg source archive did not contain exactly one source directory"
+  }
+  $sourceRoot = Get-FullPath $archiveRoots[0].FullName
+
+  $previousGitConfigNoSystem = $env:GIT_CONFIG_NOSYSTEM
+  $env:GIT_CONFIG_NOSYSTEM = "1"
+  try {
+    Push-Location $sourceRoot
+    try {
+      & git init --quiet
+      if ($LASTEXITCODE -ne 0) {
+        throw "Could not initialize the extracted FFmpeg source tree for patch application"
+      }
+
+      foreach ($patch in $patches) {
+        $patchPath = Get-FullPath (Join-Path $portDir $patch)
+        if (!(Test-Path -LiteralPath $patchPath -PathType Leaf)) {
+          throw "The FFmpeg port patch was not found: $patchPath"
+        }
+        & git -c core.longpaths=true -c core.autocrlf=false -c core.filemode=true --work-tree=. --git-dir=.git apply $patchPath --ignore-whitespace --whitespace=nowarn --verbose
+        if ($LASTEXITCODE -ne 0) {
+          throw "The FFmpeg port patch could not be applied: $patch"
+        }
+      }
+    }
+    finally {
+      Pop-Location
+    }
+  }
+  finally {
+    if ($null -eq $previousGitConfigNoSystem) {
+      Remove-Item Env:GIT_CONFIG_NOSYSTEM -ErrorAction SilentlyContinue
+    }
+    else {
+      $env:GIT_CONFIG_NOSYSTEM = $previousGitConfigNoSystem
+    }
+  }
+
+  $gitMetadataDir = Join-Path $sourceRoot ".git"
+  if (Test-Path -LiteralPath $gitMetadataDir) {
+    Remove-Item -LiteralPath $gitMetadataDir -Recurse -Force
+  }
+
+  $abiInfoPath = Get-FullPath (Join-Path $vcpkgRoot "installed/$Triplet/share/ffmpeg/vcpkg_abi_info.txt")
+  if (!(Test-Path -LiteralPath $abiInfoPath -PathType Leaf)) {
+    throw "The vcpkg FFmpeg ABI info file was not found: $abiInfoPath"
   }
   $abiInfoText = Get-Content -LiteralPath $abiInfoPath -Raw
-  $featuresMatch = [regex]::Match($abiInfoText, "(?m)^features (?<value>[^\r\n]+)")
+  $featuresMatch = [regex]::Match($abiInfoText, '(?m)^features\s+(?<value>[^\r\n]+)')
   if (!$featuresMatch.Success) {
-    throw "The vcpkg FFmpeg ABI info does not contain the resolved feature set"
+    throw "The vcpkg FFmpeg ABI info does not contain resolved features"
   }
   $features = $featuresMatch.Groups["value"].Value.Trim()
 
-  $commonOptions = Get-LastLogValue $logText "(?m)^-- Building Options: (?<value>[^\r\n]+)"
-  $releaseOptions = Get-LastLogValue $logText "(?m)^-- Building Release Options: (?<value>[^\r\n]+)"
-  if ([string]::IsNullOrWhiteSpace($commonOptions) -or [string]::IsNullOrWhiteSpace($releaseOptions)) {
-    throw "The vcpkg FFmpeg logs do not contain the common and release configure options"
+  $includeDir = Join-Path $installedRoot "include"
+  $libDir = Join-Path $installedRoot "lib"
+  $binDir = Join-Path $installedRoot "bin"
+  $avcodecHeader = Join-Path $includeDir "libavcodec/avcodec.h"
+  $avcodecLibrary = Join-Path $libDir "avcodec.lib"
+  if (!(Test-Path -LiteralPath $avcodecHeader -PathType Leaf) -or
+      !(Test-Path -LiteralPath $avcodecLibrary -PathType Leaf)) {
+    throw "The installed FFmpeg avcodec development files were not found"
   }
-  if ($commonOptions -notmatch "--disable-static" -or $commonOptions -notmatch "--enable-shared") {
-    throw "The vcpkg FFmpeg build was not verified as dynamic/shared"
+
+  $probeSource = Join-Path $workDir "avcodec_configuration_probe.c"
+  $probeExe = Join-Path $workDir "avcodec_configuration_probe.exe"
+  @'
+#include <stdio.h>
+#include <libavcodec/avcodec.h>
+
+int main(void) {
+    const char *configuration = avcodec_configuration();
+    if (configuration == NULL) {
+        return 2;
+    }
+    puts(configuration);
+    return 0;
+}
+'@ | Set-Content -LiteralPath $probeSource -Encoding ascii
+
+  $clCommand = Get-Command cl.exe -ErrorAction SilentlyContinue
+  if (!$clCommand) {
+    throw "MSVC cl.exe was not found for the FFmpeg configuration probe"
   }
+  & $clCommand.Source /nologo "/I$includeDir" $probeSource /link "/LIBPATH:$libDir" avcodec.lib "/OUT:$probeExe"
+  if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $probeExe -PathType Leaf)) {
+    throw "The avcodec configuration probe could not be compiled"
+  }
+
+  $previousPath = $env:PATH
+  try {
+    $env:PATH = "$binDir;$previousPath"
+    $configurationLines = @(& $probeExe 2>&1)
+    $probeExitCode = $LASTEXITCODE
+  }
+  finally {
+    $env:PATH = $previousPath
+  }
+  if ($probeExitCode -ne 0) {
+    throw "The avcodec configuration probe failed: $($configurationLines -join ' ')"
+  }
+  $configuration = ($configurationLines -join ' ').Trim()
+  if ($configuration -notmatch '(^|\s)--disable-static(?=\s|$)' -or
+      $configuration -notmatch '(^|\s)--enable-shared(?=\s|$)') {
+    throw "The installed FFmpeg was not verified as dynamic/shared: $configuration"
+  }
+  if ($configuration -match '(^|\s)--enable-(?:gpl|nonfree)(?=\s|$)') {
+    throw "The installed FFmpeg configuration enables GPL or nonfree features: $configuration"
+  }
+
+  $avcodecDlls = @(Get-ChildItem -LiteralPath $binDir -Filter "avcodec-*.dll" -File -ErrorAction SilentlyContinue)
+  if ($avcodecDlls.Count -ne 1) {
+    throw "The installed FFmpeg avcodec DLL was not uniquely identified under $binDir"
+  }
+  $avcodecDll = $avcodecDlls[0]
+  $avcodecSha256 = (Get-FileHash -LiteralPath $avcodecDll.FullName -Algorithm SHA256).Hash
 
   $gitOutput = @(& git -C $vcpkgRoot rev-parse HEAD 2>$null)
   if ($LASTEXITCODE -ne 0 -or $gitOutput.Count -eq 0) {
@@ -181,35 +287,33 @@ try {
   }
   $vcpkgVersion = ($vcpkgVersionOutput | Select-Object -First 1).ToString().Trim()
 
-  $sourceRelativePath = [System.IO.Path]::GetRelativePath($buildtreesRoot, $sourcePath).Replace('\', '/')
-  $sourceIdentity = Split-Path -Leaf $sourcePath
   $sourceDestination = Join-Path $stageDir "ffmpeg-source"
   $portDestination = Join-Path $stageDir "vcpkg-port"
   New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
-  Copy-DirectoryContents $sourcePath $sourceDestination
+  Copy-DirectoryContents $sourceRoot $sourceDestination
   Copy-DirectoryContents $portDir $portDestination
 
   $buildInfo = @(
-    "CBZ Viewer release/tag: $Version",
-    "vcpkg commit/baseline: $vcpkgCommit (C:/vcpkg checkout HEAD; no separate project manifest baseline)",
+    "Public CBZ Viewer release/tag: $Version",
+    "vcpkg commit: $vcpkgCommit",
     "vcpkg version: $vcpkgVersion",
     "triplet: $Triplet",
-    "FFmpeg port/version: ffmpeg $portVersion$portVersionSuffix",
-    "FFmpeg features (vcpkg ABI info): $features",
-    "dynamic/static configuration: dynamic/shared (verified by --disable-static --enable-shared)",
-    "FFmpeg upstream repository: $($repoMatch.Groups['value'].Value)",
+    "FFmpeg port/version: ffmpeg $portVersion (port-version $portVersionNumber)",
+    "resolved features (vcpkg ABI info): $features",
+    "FFmpeg upstream repo: $repo",
     "FFmpeg upstream ref: $sourceRef",
-    "FFmpeg source archive SHA512 (vcpkg port): $sourceSha512",
-    "source directory or source identity: $sourceRelativePath ($sourceIdentity)",
-    "source state: vcpkg buildtree source after the portfile PATCHES were applied",
-    "source bundle policy: only the source directory is copied; vcpkg buildtrees logs/build outputs are not bundled",
-    "vcpkg port contents: complete ports/ffmpeg directory, including portfile, vcpkg.json, templates, usage, and patch files",
-    "FFmpeg configure options (common): $commonOptions",
-    "FFmpeg configure options (release): $releaseOptions",
+    "FFmpeg source archive URL: $sourceUrl",
+    "FFmpeg source SHA512 (expected): $sourceSha512",
+    "FFmpeg source SHA512 (verified): $actualSha512",
+    "avcodec DLL filename: $($avcodecDll.Name)",
+    "avcodec DLL SHA256: $avcodecSha256",
+    "avcodec_configuration result: $configuration",
+    "source state: GitHub archive with all listed vcpkg FFmpeg patches applied",
+    "vcpkg port contents: complete ports/ffmpeg directory",
     "",
-    "Applied vcpkg FFmpeg patches (verified in build logs):"
+    "Applied vcpkg FFmpeg patches (portfile order):"
   )
-  $buildInfo += $appliedPatches
+  $buildInfo += @($patches | ForEach-Object { "- $_" })
   $buildInfo | Set-Content -LiteralPath (Join-Path $stageDir "BUILD_INFO.txt") -Encoding utf8
 
   Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -227,5 +331,8 @@ try {
 finally {
   if (Test-Path -LiteralPath $stageDir) {
     Remove-Item -LiteralPath $stageDir -Recurse -Force
+  }
+  if (Test-Path -LiteralPath $workDir) {
+    Remove-Item -LiteralPath $workDir -Recurse -Force
   }
 }

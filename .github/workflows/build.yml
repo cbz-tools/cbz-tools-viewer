@@ -75,30 +75,6 @@ jobs:
           }
           Add-Content $env:GITHUB_ENV "VCPKG_ROOT=$env:CBZ_VCPKG_ROOT"
           Write-Host "VCPKG_ROOT restored to $env:CBZ_VCPKG_ROOT"
-      - name: Resolve vcpkg cache identity
-        id: vcpkg-cache
-        shell: pwsh
-        run: |
-          $commit = (& git -C $env:CBZ_VCPKG_ROOT rev-parse HEAD).Trim()
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($commit)) {
-            Write-Error "Could not determine vcpkg checkout commit"
-            exit 1
-          }
-          Add-Content $env:GITHUB_OUTPUT "commit=$commit"
-          Write-Host "vcpkg cache identity: $commit"
-      - name: Cache FFmpeg source provenance
-        id: ffmpeg-source-cache
-        uses: actions/cache@v4
-        with:
-          path: |
-            C:\vcpkg\buildtrees\ffmpeg\src
-            C:\vcpkg\buildtrees\ffmpeg\*.log
-            C:\vcpkg\buildtrees\ffmpeg\x64-windows.vcpkg_abi_info.txt
-          key: ${{ runner.os }}-ffmpeg-source-${{ steps.vcpkg-cache.outputs.commit }}-x64-windows-avcodec-avformat-avfilter-swresample-swscale
-      - name: Report FFmpeg source cache status
-        shell: pwsh
-        run: |
-          Write-Host "FFmpeg source provenance cache-hit: ${{ steps.ffmpeg-source-cache.outputs.cache-hit }}"
       - name: Configure vcpkg GitHub Packages binary cache
         shell: pwsh
         env:
@@ -169,29 +145,10 @@ jobs:
         run: |
           # ff-sys requires the x64-windows development files and links the
           # FFmpeg libraries dynamically. Do not enable GPL or nonfree features.
-          $sourceCacheHit = "${{ steps.ffmpeg-source-cache.outputs.cache-hit }}" -eq "true"
-          $sourceCacheHitLabel = if ($sourceCacheHit) { "true" } else { "false" }
-          Write-Host "FFmpeg source provenance cache-hit: $sourceCacheHitLabel"
-
-          if ($sourceCacheHit) {
-            Write-Host "FFmpeg install mode: binary cache allowed"
-          } else {
-            Write-Host "FFmpeg install mode: local build for source provenance"
-          }
-
           $start = Get-Date
-          $previousBinarySources = $env:VCPKG_BINARY_SOURCES
-          try {
-            if (!$sourceCacheHit) {
-              $env:VCPKG_BINARY_SOURCES = "clear"
-            }
-            & (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe") install "ffmpeg[avcodec,avformat,avfilter,swresample,swscale]:x64-windows"
-            $vcpkgExitCode = $LASTEXITCODE
-          } finally {
-            $env:VCPKG_BINARY_SOURCES = $previousBinarySources
-          }
-          if ($vcpkgExitCode -ne 0) {
-            exit $vcpkgExitCode
+          & (Join-Path $env:CBZ_VCPKG_ROOT "vcpkg.exe") install "ffmpeg[avcodec,avformat,avfilter,swresample,swscale]:x64-windows"
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
           }
           $elapsed = (Get-Date) - $start
           Write-Host ("FFmpeg vcpkg elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
