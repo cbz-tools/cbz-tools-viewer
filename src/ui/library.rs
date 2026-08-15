@@ -4323,7 +4323,7 @@ pub fn show(
             let gap = theme::GRID_GAP;
             let cell_size = egui::vec2(state.thumb_w, state.thumb_h);
             let avail_w = ui.available_width();
-            let cols = ((avail_w + gap) / (cell_size.x + gap)).floor().max(1.0) as usize;
+            let cols = virtual_grid::grid_column_count(avail_w, cell_size.x);
             let row_h = cell_size.y + gap;
             let selected_row = selected_idx / cols;
             let selected_y_top = selected_row as f32 * row_h;

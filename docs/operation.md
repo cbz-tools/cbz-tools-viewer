@@ -69,6 +69,19 @@ Changes are applied immediately.
 | F2 | Rename |
 | Ctrl+A | Select all |
 | Ctrl+C | Copy path |
+| Ctrl+Wheel Up | Increase thumbnail display size by one step |
+| Ctrl+Wheel Down | Decrease thumbnail display size by one step |
+
+### Thumbnail display size
+
+The thumbnail display width can be changed from 120 to 660 px in 20 px steps. The default is 200 px.
+
+* Change it from the card-size setting under Library > List.
+* On the Library grid, Ctrl+Wheel Up / Down increases or decreases the size by 20 px per wheel notch.
+* Values changed with Ctrl+Wheel are saved to settings and restored on the next launch.
+* Normal wheel input continues to scroll the Library vertically.
+* Thumbnail width itself is not stretched to fill the available row width. Extra horizontal space is distributed evenly across the left edge, right edge, and gaps between columns.
+* The existing minimum inter-column gap is always preserved. A partially filled final row keeps the same column positions as the rows above it.
 
 ### Video thumbnail preview
 

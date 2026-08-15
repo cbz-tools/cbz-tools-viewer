@@ -191,6 +191,8 @@ struct GridLayout {
     rows: usize,
     row_h: f32,
     visible_rows: usize,
+    side_margin: f32,
+    actual_gap: f32,
 }
 
 struct ThumbCellContext<'a> {
@@ -270,10 +272,9 @@ pub fn show_grid(
         hud_font_size,
         reset_context_menu_cache,
     } = config;
-    let gap = theme::GRID_GAP;
     let (popup_open_state_id, popup_input_blocked, popup_keys) =
         take_popup_key_input(ui, reset_context_menu_cache);
-    let layout = build_grid_layout(ui, entries.len(), thumb_size, hud_mode, gap);
+    let layout = build_grid_layout(ui, entries.len(), thumb_size, hud_mode);
     let nav_input = take_grid_navigation_input(
         ui,
         interaction_enabled,
@@ -355,7 +356,8 @@ pub fn show_grid(
     let scroll_out = sa.show_rows(ui, layout.row_h, layout.rows, |ui, row_range| {
         for row in row_range {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(layout.side_margin);
                 for col in 0..layout.cols {
                     let idx = row * layout.cols + col;
                     if let Some(entry) = entries.get(idx) {
@@ -445,7 +447,11 @@ pub fn show_grid(
                             ctx_action = context_action_from_cell_action(idx, &action);
                         }
                     }
+                    if col + 1 < layout.cols {
+                        ui.add_space(layout.actual_gap);
+                    }
                 }
+                ui.add_space(layout.side_margin);
             });
         }
     });
@@ -821,13 +827,16 @@ fn build_grid_layout(
     entry_count: usize,
     thumb_size: Vec2,
     hud_mode: LibraryHudMode,
-    gap: f32,
 ) -> GridLayout {
     let cell_size = grid_cell_size(thumb_size, hud_mode);
     let avail = ui.available_width();
-    let cols = ((avail + gap) / (cell_size.x + gap)).floor().max(1.0) as usize;
+    let cols = grid_column_count(avail, cell_size.x);
+    let base_width = cell_size.x * cols as f32 + theme::GRID_GAP * cols.saturating_sub(1) as f32;
+    let extra = (avail - base_width).max(0.0);
+    let side_margin = extra / (cols + 1) as f32;
+    let actual_gap = theme::GRID_GAP + side_margin;
     let rows = entry_count.div_ceil(cols);
-    let row_h = cell_size.y + gap;
+    let row_h = cell_size.y + theme::GRID_GAP;
     let visible_rows = (ui.available_height() / row_h).floor().max(1.0) as usize;
 
     GridLayout {
@@ -835,7 +844,15 @@ fn build_grid_layout(
         rows,
         row_h,
         visible_rows,
+        side_margin,
+        actual_gap,
     }
+}
+
+pub(crate) fn grid_column_count(available_width: f32, cell_width: f32) -> usize {
+    ((available_width.max(0.0) + theme::GRID_GAP) / (cell_width + theme::GRID_GAP))
+        .floor()
+        .max(1.0) as usize
 }
 
 fn take_grid_navigation_input(

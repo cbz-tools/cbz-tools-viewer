@@ -17,6 +17,9 @@
 
 ### Changed
 
+- Expanded the Library thumbnail display range to 120–660 px in 20 px steps, added persistent Ctrl+Wheel resizing, and distributed extra row width evenly across both side margins and inter-column gaps while preserving the existing minimum gap and virtual-grid column positions.
+- Increased normal Library thumbnail generation and storage width from 320 px to 500 px, while keeping the display size independent from the cached thumbnail size.
+- Changed Library runtime previews for video, animated WebP, and static page scrubbing to decode at the current thumbnail display width instead of the fixed thumbnail storage width; preview results remain runtime-only and are not written to the thumbnail disk cache.
 - Added revision-aware failure caching for Page Map and thumbnail generation, avoiding repeated work for unchanged sources after a terminal failure, and pruning obsolete thumbnail, Page Map, and failure-cache revisions for displayed books.
 - Added revision-aware video-thumbnail cache and artifact lifecycle handling, including source-change refresh, terminal-failure suppression, and cleanup alignment for deletion and cache clear.
 - Migrated the project from Rust 2021 to Rust 2024, pinned the toolchain and CI to Rust 1.97.0, and adopted Cargo resolver 3.

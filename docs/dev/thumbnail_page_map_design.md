@@ -108,6 +108,55 @@ FAST Page Map 生成に成功すれば、Viewer はその本を開いたとき�
 
 つまり、通常サムネイル生成では、サムネイルが主、FAST Page Map は付随処理である。
 
+通常サムネイルの生成・保存幅は `THUMB_STORAGE_WIDTH = 500` とする。Image / Video の通常
+Thumbnail は `AppSettings::storage_width()` を経由して500px幅で生成し、Memory / Disk Cache の
+通常Thumbnail成果物として扱う。表示サイズとは分離し、表示幅を変更しても通常Thumbnailの
+保存幅は変えない。
+
+Library のサムネイル表示幅は `AppSettings.thumb_display_w` を正本とし、次の範囲へclampする。
+
+```text
+THUMB_DISPLAY_MIN     = 120
+THUMB_DISPLAY_DEFAULT = 200
+THUMB_DISPLAY_MAX     = 660
+THUMB_DISPLAY_STEP    = 20
+```
+
+有効な表示幅は `120, 140, 160, ... 620, 640, 660` である。高さは従来のサムネイル比率
+`180:260` を維持し、表示幅から算出する。Library Settings のカードサイズと Library grid 上の
+Ctrl+Wheel は同じ `thumb_display_w` を更新する。Ctrl+Wheel 1ノッチは `±20px` とし、変更後は
+即時反映してsettingsへ保存する。通常Wheelは縦スクロールのまま維持し、Ctrl+Wheel時だけ
+サムネイルサイズ変更へ振り向ける。
+
+通常Thumbnailの表示は500px保存成果物を使用する。したがって表示幅 `<= 500px` では500px
+Thumbnailを縮小表示し、表示幅 `> 500px` では現行仕様として500px Thumbnailを拡大表示する。
+500pxを超える表示幅に対して元sourceから高解像度Thumbnailを直接decodeするruntime-only経路は
+現行仕様には存在しない。Previewは後述のとおり通常Thumbnailとは別経路で表示幅へ追従する。
+
+Library grid の横方向レイアウトは、表示中の `thumb_w / thumb_h` を変更せず、余った横幅だけを
+余白へ配分する。列数は `theme::GRID_GAP` を最低列間gapとして確保できる最大値を使う。
+
+```text
+cols * cell_width + (cols - 1) * GRID_GAP <= available_width
+```
+
+最低1列を保証する。基準幅を差し引いた余剰 `extra` は、左右端2箇所と `cols - 1` 個の列間、
+合計 `cols + 1` 箇所へ同量ずつ配る。
+
+```text
+base_width  = cols * cell_width + (cols - 1) * GRID_GAP
+extra       = max(0, available_width - base_width)
+side_margin = extra / (cols + 1)
+actual_gap  = GRID_GAP + side_margin
+```
+
+このため左右端余白は同じになり、`actual_gap >= GRID_GAP` を常に満たす。最終行のitem数が
+`cols` 未満でも、その行だけ再均等配置せず、通常の `col 0, col 1, ...` の列位置を維持する。
+縦方向のVirtual Grid、`visible_start / visible_end / visible_range`、Texture要求、Preview、selection、
+hit-test のindex契約は変更しない。描画・hover・click・double click・selection・context menu・
+Preview・drag/drop は従来どおり同じcell Rectを使用する。`scroll_selected_into_view` 側の列数も
+同じ共通列数算出を使用し、Ctrl+Wheel後の次frameで列数と横余白を再計算する。
+
 VideoFile の通常サムネイルは代表フレーム 5% の1枚を維持する。Library の Hover Preview は
 runtime-only の表示補助であり、Thumbnail、Page Map、artifact、failure-cache のいずれの
 成果物・製品機能にも含めない。
@@ -133,6 +182,22 @@ thumbnail body の Hover Auto Preview と filename HUD の time Scrub を使い�
 
 これらの Preview は single Preview worker と最新要求を優先する経路で処理する runtime-only
 の表示補助であり、Preview 結果を Thumbnail、Disk Cache、Page Map の成果物へ保存・反映しない。
+
+Preview task の `target_width` は通常Thumbnailの固定保存幅500pxではなく、現在の
+`AppSettings::clamped_display_w()` を使用する。Library `show()` へ `preview_target_width` として渡し、
+Video Auto / Video Scrub / Animated WebP Auto / Animated WebP time Scrub / Static Book page Scrub の
+各runtime Previewで共通して現在表示幅へ追従する。
+
+```text
+表示120px -> Preview decode 120px
+表示200px -> Preview decode 200px
+表示500px -> Preview decode 500px
+表示660px -> Preview decode 660px
+```
+
+サムネイル表示サイズを変更した場合、以後のPreview要求は新しい表示幅をtargetにする。Previewは
+引き続きruntime-onlyであり、500pxの通常Thumbnail Disk Cacheを上書きせず、Preview結果の
+Disk Cache保存、cache version変更、Thumbnail artifactへの昇格は行わない。
 
 ---
 
