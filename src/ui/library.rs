@@ -4385,26 +4385,7 @@ pub fn show(
     }
 
     // スクロール復元・追従
-    if state.scroll_selected_into_view_pending {
-        state.scroll_selected_into_view_pending = false;
-        if let Some(selected_idx) = state.selected_idx {
-            let gap = theme::GRID_GAP;
-            let cell_size = egui::vec2(state.thumb_w, state.thumb_h);
-            let avail_w = ui.available_width();
-            let cols = virtual_grid::grid_column_count(avail_w, cell_size.x);
-            let row_h = cell_size.y + gap;
-            let selected_row = selected_idx / cols;
-            let selected_y_top = selected_row as f32 * row_h;
-            let selected_y_bottom = selected_y_top + row_h;
-            let current_offset = state.scroll_y.max(0.0);
-            let visible_h = ui.available_height().max(row_h);
-            if selected_y_top < current_offset {
-                state.scroll_to_pending = Some(selected_y_top);
-            } else if selected_y_bottom > current_offset + visible_h {
-                state.scroll_to_pending = Some((selected_y_bottom - visible_h).max(0.0));
-            }
-        }
-    }
+    let scroll_selected_into_view = std::mem::take(&mut state.scroll_selected_into_view_pending);
 
     let restore_scroll = if state.scroll_restore_pending {
         state.scroll_restore_pending = false;
@@ -4461,6 +4442,7 @@ pub fn show(
         },
         virtual_grid::GridViewConfig {
             restore_scroll,
+            scroll_selected_into_view,
             thumb_size,
             wheel_scroll_multiplier: state.wheel_scroll_multiplier,
             hud_mode: state.hud_mode,

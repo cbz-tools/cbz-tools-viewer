@@ -153,6 +153,7 @@ pub struct GridViewContext<'a> {
 
 pub struct GridViewConfig {
     pub restore_scroll: Option<f32>,
+    pub scroll_selected_into_view: bool,
     pub thumb_size: Vec2,
     pub wheel_scroll_multiplier: f32,
     pub hud_mode: LibraryHudMode,
@@ -264,6 +265,7 @@ pub fn show_grid(
     } = context;
     let GridViewConfig {
         restore_scroll,
+        scroll_selected_into_view,
         thumb_size,
         wheel_scroll_multiplier,
         hud_mode,
@@ -274,7 +276,6 @@ pub fn show_grid(
     } = config;
     let (popup_open_state_id, popup_input_blocked, popup_keys) =
         take_popup_key_input(ui, reset_context_menu_cache);
-    let layout = build_grid_layout(ui, entries.len(), thumb_size, hud_mode);
     let nav_input = take_grid_navigation_input(
         ui,
         interaction_enabled,
@@ -294,26 +295,200 @@ pub fn show_grid(
         || nav_input.home
         || nav_input.end;
 
-    let key_selected: Option<KeyboardSelection> = if any_nav && count > 0 {
-        let sel = selected_idx.unwrap_or(0);
-        let new_sel = if nav_input.right { (sel + 1).min(count - 1) }
-            else if nav_input.left  { sel.saturating_sub(1) }
-            else if nav_input.down  { (sel + layout.cols).min(count - 1) }
-            else if nav_input.up    { sel.saturating_sub(layout.cols) }
-            else if nav_input.pgdn  { (sel + layout.cols * layout.visible_rows).min(count - 1) }
-            else if nav_input.pgup  { sel.saturating_sub(layout.cols * layout.visible_rows) }
-            else if nav_input.end   { count - 1 }
-            else                    { 0 }  // home
-        ;
-        Some(if nav_input.shift {
-            KeyboardSelection::Shift(new_sel)
-        } else {
-            KeyboardSelection::Plain(new_sel)
-        })
-    } else {
-        None
+    // ── グリッド描画 ──────────────────────────────────────────────────────────
+    let mut click_selected: Option<usize> = None;
+    let mut click_ctrl: Option<usize> = None;
+    let mut click_shift: Option<usize> = None;
+    let mut click_opened: Option<usize> = None;
+    let mut ctx_action: Option<(usize, ContextAction)> = None;
+    let mut drag_started: Option<usize> = None;
+    let mut any_context_menu_open = false;
+    let mut visible_start: Option<usize> = None;
+    let mut visible_end: Option<usize> = None;
+    let mut hovered_preview: Option<HoveredPreviewCell> = None;
+    let mut grid_layout = None;
+    let mut key_selected = None;
+
+    let cell_menu_context = CellMenuContext {
+        entries,
+        selected_idx,
+        selected_set,
+        interaction_enabled,
+        language,
     };
 
+    let scroll_out = ui
+        .scope(|ui| {
+            ui.style_mut().spacing.scroll.floating = false;
+
+            let mut sa = egui::ScrollArea::vertical()
+                .auto_shrink([false; 2])
+                .wheel_scroll_multiplier(vec2(1.0, wheel_scroll_multiplier.max(0.0)));
+            if let Some(y) = restore_scroll {
+                sa = sa.vertical_scroll_offset(y);
+            }
+
+            sa.show_viewport(ui, |ui, viewport| {
+                let layout = build_grid_layout(ui, entries.len(), thumb_size, hud_mode);
+                let spacing = ui.spacing().item_spacing;
+                let row_height_with_spacing = layout.row_h + spacing.y;
+                ui.set_height((row_height_with_spacing * layout.rows as f32 - spacing.y).max(0.0));
+
+                let mut min_row = (viewport.min.y / row_height_with_spacing).floor() as usize;
+                let mut max_row = (viewport.max.y / row_height_with_spacing).ceil() as usize + 1;
+                if max_row > layout.rows {
+                    let diff = max_row.saturating_sub(min_row);
+                    max_row = layout.rows;
+                    min_row = layout.rows.saturating_sub(diff);
+                }
+
+                let y_min = ui.max_rect().top() + min_row as f32 * row_height_with_spacing;
+                let y_max = ui.max_rect().top() + max_row as f32 * row_height_with_spacing;
+                let rect = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), y_min..=y_max);
+                grid_layout = Some(layout);
+
+                key_selected = if any_nav && count > 0 {
+                    let sel = selected_idx.unwrap_or(0);
+                    let new_sel = if nav_input.right {
+                        (sel + 1).min(count - 1)
+                    } else if nav_input.left {
+                        sel.saturating_sub(1)
+                    } else if nav_input.down {
+                        (sel + layout.cols).min(count - 1)
+                    } else if nav_input.up {
+                        sel.saturating_sub(layout.cols)
+                    } else if nav_input.pgdn {
+                        (sel + layout.cols * layout.visible_rows).min(count - 1)
+                    } else if nav_input.pgup {
+                        sel.saturating_sub(layout.cols * layout.visible_rows)
+                    } else if nav_input.end {
+                        count - 1
+                    } else {
+                        0
+                    };
+                    Some(if nav_input.shift {
+                        KeyboardSelection::Shift(new_sel)
+                    } else {
+                        KeyboardSelection::Plain(new_sel)
+                    })
+                } else {
+                    None
+                };
+
+                ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |viewport_ui| {
+                    viewport_ui.skip_ahead_auto_ids(min_row);
+                    for row in min_row..max_row {
+                        viewport_ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 0.0;
+                            ui.add_space(layout.side_margin);
+                            for col in 0..layout.cols {
+                                let idx = row * layout.cols + col;
+                                if let Some(entry) = entries.get(idx) {
+                                    visible_start =
+                                        Some(visible_start.map_or(idx, |start| start.min(idx)));
+                                    visible_end = Some(visible_end.map_or(idx, |end| end.max(idx)));
+                                    let is_primary = selected_idx == Some(idx);
+                                    let is_in_set = selected_set.contains(&idx);
+
+                                    let menu_state =
+                                        build_cell_menu_state(&cell_menu_context, idx, entry);
+                                    let can_toggle_favorite = entry.is_favorite_target();
+                                    let favorite_state = is_favorite(entry);
+                                    let reading_state = reading_hud_state(entry);
+                                    let page_map_failed = has_page_map_failure(entry);
+
+                                    let thumb_state =
+                                        thumb_cell_state(entry, book_states, video_states);
+                                    let action = draw_thumb_cell(
+                                        ui,
+                                        ThumbCellContext {
+                                            idx,
+                                            entry,
+                                            thumb_state,
+                                            preview_texture,
+                                            static_page_count,
+                                            thumb_size,
+                                            interaction_enabled,
+                                            popup_keys,
+                                            can_start_external_drag: menu_state
+                                                .can_start_external_drag,
+                                            resolve_open_action,
+                                        },
+                                        ThumbCellSelectionState {
+                                            is_selected: is_primary,
+                                            is_in_set,
+                                            is_multi_selection: menu_state.is_multi_selection,
+                                        },
+                                        ThumbCellMenuRenderState {
+                                            rename_enabled: menu_state.rename_enabled,
+                                            show_open_menu_item: menu_state.show_open_menu_item,
+                                            show_rename_menu_item: menu_state.show_rename_menu_item,
+                                            show_copy_menu_item: menu_state.show_copy_menu_item,
+                                            show_open_in_explorer: menu_state.show_open_in_explorer,
+                                            show_context_header: menu_state.show_context_header,
+                                            context_header: &menu_state.context_header,
+                                            show_token_menu_frame: menu_state.show_token_menu_frame,
+                                            can_toggle_favorite,
+                                            book_target_count: menu_state.book_target_count,
+                                            book_settings_target_count: menu_state
+                                                .book_settings_target_count,
+                                            external_tools,
+                                            external_tool_busy,
+                                            is_favorite: favorite_state,
+                                        },
+                                        ThumbCellRenderState {
+                                            hud_mode,
+                                            hud_style,
+                                            selection_style,
+                                            hud_font_size,
+                                            hud_selected: is_primary || is_in_set,
+                                            reading_state,
+                                            has_page_map_failure: page_map_failed,
+                                            is_favorite: favorite_state,
+                                            language,
+                                        },
+                                    );
+
+                                    if action.plain_click {
+                                        click_selected = Some(idx);
+                                    }
+                                    if action.ctrl_click {
+                                        click_ctrl = Some(idx);
+                                    }
+                                    if action.shift_click {
+                                        click_shift = Some(idx);
+                                    }
+                                    if action.double_click {
+                                        click_opened = Some(idx);
+                                    }
+                                    if action.drag_started {
+                                        drag_started = Some(idx);
+                                    }
+                                    if hovered_preview.is_none() {
+                                        hovered_preview = action.hovered_preview.clone();
+                                    }
+                                    if action.context_menu_open {
+                                        any_context_menu_open = true;
+                                    }
+
+                                    if ctx_action.is_none() {
+                                        ctx_action = context_action_from_cell_action(idx, &action);
+                                    }
+                                }
+                                if col + 1 < layout.cols {
+                                    ui.add_space(layout.actual_gap);
+                                }
+                            }
+                            ui.add_space(layout.side_margin);
+                        });
+                    }
+                })
+                .inner
+            })
+        })
+        .inner;
+
+    let layout = grid_layout.expect("ScrollArea viewport callback must run");
     let keyboard_opened: Option<usize> = if nav_input.enter {
         let idx = key_selected
             .as_ref()
@@ -326,136 +501,6 @@ pub fn show_grid(
         None
     };
 
-    // ── グリッド描画 ──────────────────────────────────────────────────────────
-    let mut click_selected: Option<usize> = None;
-    let mut click_ctrl: Option<usize> = None;
-    let mut click_shift: Option<usize> = None;
-    let mut click_opened: Option<usize> = None;
-    let mut ctx_action: Option<(usize, ContextAction)> = None;
-    let mut drag_started: Option<usize> = None;
-    let mut any_context_menu_open = false;
-    let mut visible_start: Option<usize> = None;
-    let mut visible_end: Option<usize> = None;
-    let mut hovered_preview: Option<HoveredPreviewCell> = None;
-
-    let mut sa = egui::ScrollArea::vertical()
-        .auto_shrink([false; 2])
-        .wheel_scroll_multiplier(vec2(1.0, wheel_scroll_multiplier.max(0.0)));
-    if let Some(y) = restore_scroll {
-        sa = sa.vertical_scroll_offset(y);
-    }
-
-    let cell_menu_context = CellMenuContext {
-        entries,
-        selected_idx,
-        selected_set,
-        interaction_enabled,
-        language,
-    };
-
-    let scroll_out = sa.show_rows(ui, layout.row_h, layout.rows, |ui, row_range| {
-        for row in row_range {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 0.0;
-                ui.add_space(layout.side_margin);
-                for col in 0..layout.cols {
-                    let idx = row * layout.cols + col;
-                    if let Some(entry) = entries.get(idx) {
-                        visible_start = Some(visible_start.map_or(idx, |start| start.min(idx)));
-                        visible_end = Some(visible_end.map_or(idx, |end| end.max(idx)));
-                        let is_primary = selected_idx == Some(idx);
-                        let is_in_set = selected_set.contains(&idx);
-
-                        let menu_state = build_cell_menu_state(&cell_menu_context, idx, entry);
-                        let can_toggle_favorite = entry.is_favorite_target();
-                        let favorite_state = is_favorite(entry);
-                        let reading_state = reading_hud_state(entry);
-                        let page_map_failed = has_page_map_failure(entry);
-
-                        let thumb_state = thumb_cell_state(entry, book_states, video_states);
-                        let action = draw_thumb_cell(
-                            ui,
-                            ThumbCellContext {
-                                idx,
-                                entry,
-                                thumb_state,
-                                preview_texture,
-                                static_page_count,
-                                thumb_size,
-                                interaction_enabled,
-                                popup_keys,
-                                can_start_external_drag: menu_state.can_start_external_drag,
-                                resolve_open_action,
-                            },
-                            ThumbCellSelectionState {
-                                is_selected: is_primary,
-                                is_in_set,
-                                is_multi_selection: menu_state.is_multi_selection,
-                            },
-                            ThumbCellMenuRenderState {
-                                rename_enabled: menu_state.rename_enabled,
-                                show_open_menu_item: menu_state.show_open_menu_item,
-                                show_rename_menu_item: menu_state.show_rename_menu_item,
-                                show_copy_menu_item: menu_state.show_copy_menu_item,
-                                show_open_in_explorer: menu_state.show_open_in_explorer,
-                                show_context_header: menu_state.show_context_header,
-                                context_header: &menu_state.context_header,
-                                show_token_menu_frame: menu_state.show_token_menu_frame,
-                                can_toggle_favorite,
-                                book_target_count: menu_state.book_target_count,
-                                book_settings_target_count: menu_state.book_settings_target_count,
-                                external_tools,
-                                external_tool_busy,
-                                is_favorite: favorite_state,
-                            },
-                            ThumbCellRenderState {
-                                hud_mode,
-                                hud_style,
-                                selection_style,
-                                hud_font_size,
-                                hud_selected: is_primary || is_in_set,
-                                reading_state,
-                                has_page_map_failure: page_map_failed,
-                                is_favorite: favorite_state,
-                                language,
-                            },
-                        );
-
-                        if action.plain_click {
-                            click_selected = Some(idx);
-                        }
-                        if action.ctrl_click {
-                            click_ctrl = Some(idx);
-                        }
-                        if action.shift_click {
-                            click_shift = Some(idx);
-                        }
-                        if action.double_click {
-                            click_opened = Some(idx);
-                        }
-                        if action.drag_started {
-                            drag_started = Some(idx);
-                        }
-                        if hovered_preview.is_none() {
-                            hovered_preview = action.hovered_preview.clone();
-                        }
-                        if action.context_menu_open {
-                            any_context_menu_open = true;
-                        }
-
-                        if ctx_action.is_none() {
-                            ctx_action = context_action_from_cell_action(idx, &action);
-                        }
-                    }
-                    if col + 1 < layout.cols {
-                        ui.add_space(layout.actual_gap);
-                    }
-                }
-                ui.add_space(layout.side_margin);
-            });
-        }
-    });
-
     // ── スクロール追従 ────────────────────────────────────────────────────────
     let request_scroll_y = compute_request_scroll_y(
         key_selected.as_ref(),
@@ -463,7 +508,22 @@ pub fn show_grid(
         layout.row_h,
         scroll_out.state.offset.y,
         scroll_out.inner_rect.height(),
-    );
+    )
+    .or_else(|| {
+        if scroll_selected_into_view {
+            selected_idx.and_then(|selected_idx| {
+                compute_scroll_to_index(
+                    selected_idx,
+                    layout.cols,
+                    layout.row_h,
+                    scroll_out.state.offset.y,
+                    scroll_out.inner_rect.height(),
+                )
+            })
+        } else {
+            None
+        }
+    });
 
     assemble_grid_result(
         ui,
@@ -933,6 +993,16 @@ fn compute_request_scroll_y(
     let new_sel = key_selected.map(|sel| match sel {
         KeyboardSelection::Plain(idx) | KeyboardSelection::Shift(idx) => *idx,
     })?;
+    compute_scroll_to_index(new_sel, cols, row_h, cur_offset, inner_height)
+}
+
+fn compute_scroll_to_index(
+    new_sel: usize,
+    cols: usize,
+    row_h: f32,
+    cur_offset: f32,
+    inner_height: f32,
+) -> Option<f32> {
     let sel_row = new_sel / cols;
     let sel_y_top = sel_row as f32 * row_h;
     let sel_y_bot = sel_y_top + row_h;
