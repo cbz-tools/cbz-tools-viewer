@@ -21,7 +21,9 @@ use self::viewer_ops::{
     ViewerSyncEvent,
 };
 use crate::LaunchOptions;
-use crate::domain::app_settings::AppSettings;
+use crate::domain::app_settings::{
+    AppSettings, THUMB_DISPLAY_MAX, THUMB_DISPLAY_MIN, THUMB_DISPLAY_STEP,
+};
 use crate::domain::archive::{BookId, BookMeta, CbzRebuildPlanOptions, LibraryEntry};
 use crate::domain::ipc_contract::{IpcErrorCode, ViewerFavoriteState};
 use crate::domain::page_map::SourceRevision;
@@ -1423,7 +1425,8 @@ impl App {
             || self.properties_dialog.is_some()
             || self.deleting.is_some()
             || self.book_settings_clearing.is_some()
-            || self.setting_group_open;
+            || self.setting_group_open
+            || self.pending_error_dialog.is_some();
         let interaction_blocked = modal_open || self.suppress_pointer_until_release;
         let keyboard_blocked = self.library.is_path_editing
             || self.library.path_input_focused
@@ -1605,7 +1608,9 @@ impl App {
             return;
         }
         match action {
-            LibraryAction::OpenArchive(_) | LibraryAction::None => {}
+            LibraryAction::OpenArchive(_)
+            | LibraryAction::ThumbDisplaySizeChanged(_)
+            | LibraryAction::None => {}
             LibraryAction::RunExternalTool { .. } => {}
             _ => {}
         }
@@ -1644,6 +1649,25 @@ impl App {
                 self.setting_group_buf = String::new();
                 self.setting_group_open = true;
             }
+            LibraryAction::ThumbDisplaySizeChanged(direction) => {
+                let current_w = self.app_settings.clamped_display_w();
+                let requested_w = (i32::from(current_w)
+                    + i32::from(*direction) * i32::from(THUMB_DISPLAY_STEP))
+                .clamp(i32::from(THUMB_DISPLAY_MIN), i32::from(THUMB_DISPLAY_MAX))
+                    as u16;
+                let mut next_settings = self.app_settings.clone();
+                next_settings.thumb_display_w = requested_w;
+                let next_w = next_settings.clamped_display_w();
+                if next_w != current_w {
+                    next_settings.thumb_display_w = next_w;
+                    self.app_settings = next_settings;
+                    self.library
+                        .apply_thumb_size(self.app_settings.thumb_w(), self.app_settings.thumb_h());
+                    self.library.scroll_selected_into_view_pending = true;
+                    self.app_settings
+                        .save_with_resources(&self.performance_resources);
+                }
+            }
             LibraryAction::OpenArchive(_)
             | LibraryAction::RunExternalTool { .. }
             | LibraryAction::None => return false,
@@ -1665,13 +1689,18 @@ impl App {
                 || self.properties_dialog.is_some()
                 || self.deleting.is_some()
                 || self.book_settings_clearing.is_some()
-                || self.setting_group_open;
-            let interaction_blocked = modal_open || self.suppress_pointer_until_release;
+                || self.setting_group_open
+                || self.pending_error_dialog.is_some();
+            let interaction_blocked = modal_open
+                || self.suppress_pointer_until_release
+                || self.sidebar_open
+                || self.settings_open;
             let action = library::show(
                 ui,
                 &mut self.library,
                 ui_language,
                 interaction_blocked,
+                self.app_settings.clamped_display_w(),
                 self.app_settings.folder_book_open_as_viewer,
                 library_external_tools,
                 library_external_busy,

@@ -110,6 +110,8 @@ use super::{
 #[derive(Debug)]
 pub enum LibraryAction {
     None,
+    /// Ctrl+ホイールによるサムネイル表示サイズ変更（+1: 拡大、-1: 縮小）
+    ThumbDisplaySizeChanged(i8),
     /// Archive を Viewer で開く
     OpenArchive(usize),
     /// VideoFile を OS 標準関連付けアプリで開く
@@ -1285,7 +1287,12 @@ impl LibraryState {
             .map(|(target, texture)| (&target.book_id, texture))
     }
 
-    fn update_preview(&mut self, ctx: &egui::Context, hovered: Option<HoveredPreviewCell>) {
+    fn update_preview(
+        &mut self,
+        ctx: &egui::Context,
+        hovered: Option<HoveredPreviewCell>,
+        target_width: u16,
+    ) {
         let target_changed = match (&self.preview.target, &hovered) {
             (Some(current), Some(next)) => {
                 current.book_id != next.book_id
@@ -1411,9 +1418,7 @@ impl LibraryState {
                                         session_id: self.preview.session_id,
                                         book_id: hovered.book_id.clone(),
                                         path: hovered.path.clone(),
-                                        target_width:
-                                            crate::domain::app_settings::AppSettings::storage_width(
-                                            ),
+                                        target_width,
                                         expected_size: hovered.size,
                                         expected_modified: hovered.modified,
                                         scrub_bucket: None,
@@ -1431,11 +1436,11 @@ impl LibraryState {
             return;
         };
         if matches!(target.kind, HoveredPreviewKind::Static { .. }) {
-            self.update_static_preview(ctx, target);
+            self.update_static_preview(ctx, target, target_width);
             return;
         }
         if matches!(target.kind, HoveredPreviewKind::Animated { .. }) {
-            self.update_animated_preview(ctx, target);
+            self.update_animated_preview(ctx, target, target_width);
             return;
         }
         if self.preview.preview_failed {
@@ -1463,7 +1468,7 @@ impl LibraryState {
                 session_id: self.preview.session_id,
                 book_id: target.book_id,
                 path: target.path,
-                target_width: crate::domain::app_settings::AppSettings::storage_width(),
+                target_width,
                 expected_size: target.size,
                 expected_modified: target.modified,
                 scene_percent: video_preview_scene_percent(scene_index),
@@ -1513,7 +1518,12 @@ impl LibraryState {
             .request_video_preview_scene(self.preview.session_id, scene_percent);
     }
 
-    fn update_static_preview(&mut self, _ctx: &egui::Context, target: HoveredPreviewCell) {
+    fn update_static_preview(
+        &mut self,
+        _ctx: &egui::Context,
+        target: HoveredPreviewCell,
+        target_width: u16,
+    ) {
         if self.preview.static_failed {
             return;
         }
@@ -1527,7 +1537,7 @@ impl LibraryState {
             session_id: self.preview.session_id,
             book_id: target.book_id,
             path: target.path,
-            target_width: crate::domain::app_settings::AppSettings::storage_width(),
+            target_width,
             expected_size: target.size,
             expected_modified: target.modified,
             page_index,
@@ -1554,7 +1564,12 @@ impl LibraryState {
         }
     }
 
-    fn update_animated_preview(&mut self, ctx: &egui::Context, target: HoveredPreviewCell) {
+    fn update_animated_preview(
+        &mut self,
+        ctx: &egui::Context,
+        target: HoveredPreviewCell,
+        target_width: u16,
+    ) {
         let HoveredPreviewKind::Animated {
             mode,
             target_bucket,
@@ -1585,7 +1600,7 @@ impl LibraryState {
                 session_id: self.preview.session_id,
                 book_id: target.book_id,
                 path: target.path,
-                target_width: crate::domain::app_settings::AppSettings::storage_width(),
+                target_width,
                 expected_size: target.size,
                 expected_modified: target.modified,
                 scrub_bucket: None,
@@ -1674,7 +1689,7 @@ impl LibraryState {
                     session_id: self.preview.session_id,
                     book_id: target.book_id,
                     path: target.path,
-                    target_width: crate::domain::app_settings::AppSettings::storage_width(),
+                    target_width,
                     expected_size: target.size,
                     expected_modified: target.modified,
                     scrub_bucket: Some(target_bucket),
@@ -1692,7 +1707,7 @@ impl LibraryState {
                 session_id: self.preview.session_id,
                 book_id: target.book_id,
                 path: target.path,
-                target_width: crate::domain::app_settings::AppSettings::storage_width(),
+                target_width,
                 expected_size: target.size,
                 expected_modified: target.modified,
                 scrub_bucket: Some(target_bucket),
@@ -2924,7 +2939,7 @@ impl LibraryState {
     // ── サムネイルサイズ変更 ──────────────────────────────────────────────────
 
     /// サムネイル表示サイズを変更する（テクスチャはそのまま流用）。
-    /// ストレージは常に 320px 固定なので再生成ゼロ。
+    /// ストレージは常に 500px 固定なので再生成ゼロ。
     pub fn apply_thumb_size(&mut self, w: f32, h: f32) {
         if (self.thumb_w - w).abs() < 0.5 && (self.thumb_h - h).abs() < 0.5 {
             return;
@@ -4277,11 +4292,13 @@ fn system_time_to_unix_secs(time: SystemTime) -> u64 {
 // ── ライブラリパネル描画 ──────────────────────────────────────────────────────
 
 /// ライブラリパネルを描画する。アクションを返す（Open/Rename/Delete/Copy）。
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut LibraryState,
     language: UiLanguage,
     interaction_blocked: bool,
+    preview_target_width: u16,
     folder_book_open_as_viewer: bool,
     external_tools: &[ExternalToolMenuItem],
     external_tool_busy: bool,
@@ -4386,7 +4403,11 @@ pub fn show(
         },
     );
 
-    state.update_preview(ui.ctx(), result.hovered_preview.clone());
+    state.update_preview(
+        ui.ctx(),
+        result.hovered_preview.clone(),
+        preview_target_width,
+    );
 
     if let Some(visible_range) = result.visible_range.clone() {
         state.refresh_visible_page_map_failures(visible_range.clone(), ui.ctx());
@@ -4456,6 +4477,10 @@ pub fn show(
 
     if let Some(idx) = result.opened {
         return state.resolve_open_action(idx, folder_book_open_as_viewer);
+    }
+
+    if let Some(delta) = result.thumb_size_delta {
+        return LibraryAction::ThumbDisplaySizeChanged(delta);
     }
 
     LibraryAction::None

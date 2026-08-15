@@ -11,14 +11,14 @@ use crate::domain::performance::{SPAD_RAM_RATIO_MAX_PERCENT, SPAD_RAM_RATIO_MIN_
 // ── 定数 ─────────────────────────────────────────────────────────────────────
 
 /// ディスクキャッシュ保存サイズ（固定）
-pub const THUMB_STORAGE_WIDTH: u16 = 320;
+pub const THUMB_STORAGE_WIDTH: u16 = 500;
 
 /// 表示サイズの最小値
-pub const THUMB_DISPLAY_MIN: u16 = 80;
-/// 表示サイズの最大値（= ストレージサイズ）
-pub const THUMB_DISPLAY_MAX: u16 = 320;
+pub const THUMB_DISPLAY_MIN: u16 = 120;
+/// 表示サイズの最大値（ストレージサイズとは独立）
+pub const THUMB_DISPLAY_MAX: u16 = 660;
 /// 表示サイズのステップ
-pub const THUMB_DISPLAY_STEP: u16 = 10;
+pub const THUMB_DISPLAY_STEP: u16 = 20;
 /// 表示サイズのデフォルト（標準）
 pub const THUMB_DISPLAY_DEFAULT: u16 = 200;
 pub const VIEWER_L1_VRAM_CACHE_MAX_MB_DEFAULT: u16 = 256;
@@ -245,7 +245,7 @@ pub const OPEN_REBUILT_CBZ_IN_NEW_VIEWER_DEFAULT: bool = false;
 
 #[derive(Serialize, Clone, Debug)]
 pub struct AppSettings {
-    /// サムネイル表示幅（px）— 160〜320、10刻み
+    /// サムネイル表示幅（px）— 120〜660、20刻み
     #[serde(default = "default_thumb_display_w")]
     pub thumb_display_w: u16,
     /// UI 表示言語
@@ -499,12 +499,12 @@ impl AppSettings {
             .collect();
     }
 
-    /// 表示サイズを 10px 刻みにクランプする
+    /// 表示サイズを 20px 刻みにクランプする
     pub fn clamped_display_w(&self) -> u16 {
         let v = self
             .thumb_display_w
             .clamp(THUMB_DISPLAY_MIN, THUMB_DISPLAY_MAX);
-        // 10の倍数に丸める
+        // 20の倍数に丸める
         (v / THUMB_DISPLAY_STEP) * THUMB_DISPLAY_STEP
     }
 
@@ -553,7 +553,7 @@ impl AppSettings {
         }
     }
 
-    /// ワーカーへ渡す target_width（常に最大サイズ固定）
+    /// 通常サムネイル生成・保存用の固定 target_width
     pub fn storage_width() -> u16 {
         THUMB_STORAGE_WIDTH
     }

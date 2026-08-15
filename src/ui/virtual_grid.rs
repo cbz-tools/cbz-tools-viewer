@@ -90,6 +90,8 @@ pub struct GridResult {
     pub drag_started: Option<usize>,
     /// 今フレームに実際に hover されている preview 対象セル
     pub hovered_preview: Option<HoveredPreviewCell>,
+    /// Ctrl+ホイールによるサムネイル表示サイズ変更（+1: 拡大、-1: 縮小）
+    pub thumb_size_delta: Option<i8>,
 }
 
 #[derive(Clone)]
@@ -278,6 +280,8 @@ pub fn show_grid(
         popup_input_blocked,
         !entries.is_empty(),
     );
+    let thumb_size_delta =
+        consume_ctrl_wheel_for_thumb_size(ui, interaction_enabled, popup_input_blocked);
 
     let count = entries.len();
     let any_nav = nav_input.left
@@ -474,6 +478,7 @@ pub fn show_grid(
             ctx_action,
             drag_started,
             hovered_preview,
+            thumb_size_delta,
         },
     )
 }
@@ -612,6 +617,7 @@ struct GridResultParts {
     ctx_action: Option<(usize, ContextAction)>,
     drag_started: Option<usize>,
     hovered_preview: Option<HoveredPreviewCell>,
+    thumb_size_delta: Option<i8>,
 }
 
 #[derive(Default)]
@@ -857,6 +863,49 @@ fn take_grid_navigation_input(
     }
 }
 
+/// Ctrl+ホイールを表示サイズ変更へ振り向け、ScrollArea が読む前に入力を消費する。
+fn consume_ctrl_wheel_for_thumb_size(
+    ui: &mut egui::Ui,
+    interaction_enabled: bool,
+    popup_input_blocked: bool,
+) -> Option<i8> {
+    if !interaction_enabled
+        || popup_input_blocked
+        || ui.ctx().memory(|memory| memory.focused().is_some())
+        || !ui.rect_contains_pointer(ui.max_rect())
+    {
+        return None;
+    }
+
+    // egui 0.35 treats Ctrl+Wheel as zoom before exposing smooth_scroll_delta,
+    // so inspect the raw Wheel events to detect the intended grid action.
+    let thumb_size_delta = ui.input(|input| {
+        input.raw.events.iter().fold(0i8, |delta, event| {
+            let egui::Event::MouseWheel {
+                delta: wheel_delta,
+                modifiers,
+                ..
+            } = event
+            else {
+                return delta;
+            };
+            if !modifiers.ctrl || wheel_delta.y.abs() <= f32::EPSILON {
+                return delta;
+            }
+            delta.saturating_add(if wheel_delta.y > 0.0 { 1 } else { -1 })
+        })
+    });
+    if thumb_size_delta == 0 {
+        return None;
+    }
+
+    // Keep the same input from reaching the ScrollArea. Ctrl+Wheel is already
+    // removed from smooth_scroll_delta by egui's zoom handling, but clear the
+    // public field defensively for integrations that leave it there.
+    ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
+    Some(thumb_size_delta)
+}
+
 fn compute_request_scroll_y(
     key_selected: Option<&KeyboardSelection>,
     cols: usize,
@@ -907,6 +956,7 @@ fn assemble_grid_result(
         context_action: parts.ctx_action,
         drag_started: parts.drag_started,
         hovered_preview: parts.hovered_preview,
+        thumb_size_delta: parts.thumb_size_delta,
     }
 }
 

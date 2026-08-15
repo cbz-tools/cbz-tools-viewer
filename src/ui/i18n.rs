@@ -677,9 +677,9 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::Japanese => Some("日本語"),
         TextKey::Size => Some("カードサイズ"),
         TextKey::BackToDefaultSize => Some("標準のカードサイズ"),
-        TextKey::SizeMin => Some("最小(80)"),
+        TextKey::SizeMin => Some("最小(120)"),
         TextKey::SizeDefault => Some("標準(200)"),
-        TextKey::SizeMax => Some("特大(320)"),
+        TextKey::SizeMax => Some("特大(660)"),
         TextKey::SizeRealtimeNote => Some(
             "ライブラリ一覧の本カードサイズを調整します。変更はリアルタイムで反映されます（再生成なし）。",
         ),
