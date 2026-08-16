@@ -6,11 +6,7 @@ use crate::domain::app_settings::{
 };
 
 use super::super::i18n::{TextKey, tr};
-use super::super::theme;
-use super::widgets::{
-    SETTINGS_SMALL_BUTTON_SIZE, SETTINGS_TOOL_DELETE_BUTTON_SIZE, section_header, setting_block,
-    subtle_text,
-};
+use super::widgets::{section_header, setting_block, subtle_text};
 
 pub(super) fn show_external_tools_tab(
     ui: &mut egui::Ui,
@@ -19,12 +15,20 @@ pub(super) fn show_external_tools_tab(
 ) {
     section_header(ui, tr(language, TextKey::ExternalTools));
 
-    if settings.external_tools.len() > EXTERNAL_TOOLS_MAX {
-        settings.sanitize_external_tools();
+    settings.sanitize_external_tools();
+    while settings.external_tools.len() < EXTERNAL_TOOLS_MAX {
+        let shortcut = AppSettings::next_available_external_tool_shortcut(&settings.external_tools)
+            .expect("EXTERNAL_TOOLS_MAX must fit available external-tool shortcuts");
+        settings.external_tools.push(ExternalTool {
+            name: String::new(),
+            executable: String::new(),
+            args: "\"{path}\"".to_owned(),
+            shortcut,
+            background: true,
+        });
     }
 
-    let mut remove_idx: Option<usize> = None;
-    for idx in 0..settings.external_tools.len() {
+    for idx in 0..EXTERNAL_TOOLS_MAX {
         let used_shortcuts = settings
             .external_tools
             .iter()
@@ -38,59 +42,9 @@ pub(super) fn show_external_tools_tab(
                 let tool = &mut settings.external_tools[idx];
                 tool_editor(ui, language, idx, tool, &used_shortcuts);
                 ui.add_space(4.0);
-                if ui
-                    .add_sized(
-                        SETTINGS_TOOL_DELETE_BUTTON_SIZE,
-                        egui::Button::new(
-                            egui::RichText::new(tr(language, TextKey::ExternalToolDelete))
-                                .color(theme::DELETE_RED)
-                                .size(theme::FONT_SIZE_BODY),
-                        ),
-                    )
-                    .clicked()
-                {
-                    remove_idx = Some(idx);
-                }
             },
         );
     }
-
-    if let Some(idx) = remove_idx {
-        settings.external_tools.remove(idx);
-    }
-
-    ui.horizontal(|ui| {
-        let can_add = settings.external_tools.len() < EXTERNAL_TOOLS_MAX
-            && AppSettings::next_available_external_tool_shortcut(&settings.external_tools)
-                .is_some();
-        let add_resp = ui.add_enabled(
-            can_add,
-            egui::Button::new(tr(language, TextKey::ExternalToolAdd))
-                .min_size(SETTINGS_SMALL_BUTTON_SIZE),
-        );
-        if add_resp.clicked() {
-            if let Some(shortcut) =
-                AppSettings::next_available_external_tool_shortcut(&settings.external_tools)
-            {
-                settings.external_tools.push(ExternalTool {
-                    name: String::new(),
-                    executable: String::new(),
-                    args: "\"{path}\"".to_owned(),
-                    shortcut,
-                    background: true,
-                });
-            }
-        }
-        subtle_text(
-            ui,
-            &format!(
-                "{}: {} / {}",
-                tr(language, TextKey::CurrentCount),
-                settings.external_tools.len(),
-                EXTERNAL_TOOLS_MAX
-            ),
-        );
-    });
 
     subtle_text(ui, tr(language, TextKey::ExternalToolPathNote));
     subtle_text(ui, tr(language, TextKey::SampleExternalTool));

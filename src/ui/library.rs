@@ -85,6 +85,7 @@ use crate::{
     },
     infra::favorite_store::{FavoriteState, FavoriteStore},
     infra::page_map::coordinator::PageMapStatus,
+    infra::web_search::WebSearchMenuItem,
     infra::worker::thumb_worker::{
         AnimatedPreviewTask, StaticPreviewTask, ThumbTask, ThumbWorker, VideoPreviewTask,
         VideoThumbTask, WorkerMsg,
@@ -141,6 +142,11 @@ pub enum LibraryAction {
     RunExternalTool {
         tool_index: usize,
         targets: Vec<usize>,
+    },
+    /// Shared filename token に対する Web Search
+    WebSearch {
+        search_index: usize,
+        token: String,
     },
 }
 
@@ -803,10 +809,20 @@ impl LibraryState {
                 .filter(|entry| entry.is_favorite_target())
                 .map(|_| LibraryAction::ToggleFavorite(idx)),
             ContextAction::ApplyFilterToken(token) => {
-                self.filter.keyword = token;
-                self.mark_filter_dirty();
+                self.apply_filter_token(token);
                 None
             }
+            ContextAction::ClearFilter => {
+                self.clear_filter();
+                None
+            }
+            ContextAction::WebSearch {
+                search_index,
+                token,
+            } => Some(LibraryAction::WebSearch {
+                search_index,
+                token,
+            }),
             ContextAction::RunExternalTool(tool_index) => {
                 let targets = self.context_target_indices(idx);
                 Some(LibraryAction::RunExternalTool {
@@ -2748,6 +2764,16 @@ impl LibraryState {
         self.filter_dirty = true;
     }
 
+    pub fn apply_filter_token(&mut self, token: String) {
+        self.filter.keyword = token;
+        self.mark_filter_dirty();
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter.keyword.clear();
+        self.mark_filter_dirty();
+    }
+
     /// book_states を唯一の正として全件再集計
     fn recompute_group_counts(&mut self) {
         let mut leaf_counts: HashMap<String, usize> = HashMap::new();
@@ -4366,6 +4392,7 @@ pub fn show(
     folder_book_open_as_viewer: bool,
     external_tools: &[ExternalToolMenuItem],
     external_tool_busy: bool,
+    web_searches: &[WebSearchMenuItem],
 ) -> LibraryAction {
     // フィルタ / ソートが変更されていれば再構築
     if state.filter_dirty {
@@ -4437,6 +4464,7 @@ pub fn show(
             static_page_count: &|entry| state.static_page_count_for_entry(entry),
             interaction_enabled: !interaction_blocked,
             external_tools,
+            web_searches,
             external_tool_busy,
             language,
         },

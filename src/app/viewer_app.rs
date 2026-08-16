@@ -393,6 +393,56 @@ impl ViewerApp {
         Ok(())
     }
 
+    fn request_filter_token(&mut self, token: String) {
+        let (request_tx, request_id) = match &mut self.mode {
+            ViewerMode::Library {
+                request_tx,
+                last_request_id,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                request_tx,
+                last_request_id,
+                ..
+            } => {
+                *last_request_id = last_request_id.saturating_add(1);
+                (request_tx.clone(), *last_request_id)
+            }
+            _ => return,
+        };
+        if request_tx
+            .send(ViewerToLibrary::ApplyFilterToken { request_id, token })
+            .is_err()
+        {
+            tracing::warn!(request_id, "viewer.ipc.filter_token.request.send.failed");
+        }
+    }
+
+    fn request_clear_filter(&mut self) {
+        let (request_tx, request_id) = match &mut self.mode {
+            ViewerMode::Library {
+                request_tx,
+                last_request_id,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                request_tx,
+                last_request_id,
+                ..
+            } => {
+                *last_request_id = last_request_id.saturating_add(1);
+                (request_tx.clone(), *last_request_id)
+            }
+            _ => return,
+        };
+        if request_tx
+            .send(ViewerToLibrary::ClearFilter { request_id })
+            .is_err()
+        {
+            tracing::warn!(request_id, "viewer.ipc.clear_filter.request.send.failed");
+        }
+    }
+
     fn open_boundary_preview_disk_cache() -> Option<DiskCache> {
         DiskCache::open(DiskCache::default_root())
             .or_else(|_| {
@@ -1179,6 +1229,8 @@ impl ViewerApp {
                             self.clear_pending_favorite_toggle_request();
                         }
                     }
+                    LibraryToViewer::ApplyFilterTokenAck { request_id: _ } => {}
+                    LibraryToViewer::ClearFilterAck { request_id: _ } => {}
                     LibraryToViewer::ReadingSessionFinishedAck { request_id: _ } => {}
                     LibraryToViewer::AdjacentBooks {
                         request_id,
@@ -2225,9 +2277,14 @@ impl eframe::App for ViewerApp {
         let mut reading_direction_override_changed: Option<Option<ReadingDirection>> = None;
         let mut quality_changed: Option<Option<ViewerQuality>> = None;
         let capabilities = self.mode.ui_capabilities();
+        let filter_token_enabled = matches!(
+            self.mode,
+            ViewerMode::Library { .. } | ViewerMode::SnapshotOnly { .. }
+        );
         let allow_page_range_delete = self.allow_page_range_delete();
         let external_tools = self.external_tool_button_models();
         let external_tool_state = self.external_tool_toolbar_state_for_ui();
+        let web_searches = crate::infra::web_search::menu_items(&self.app_settings.web_searches);
 
         let panel = if self.is_fullscreen {
             egui::CentralPanel::default()
@@ -2253,6 +2310,8 @@ impl eframe::App for ViewerApp {
                         external_tool_state: &external_tool_state,
                         global_quality: self.app_settings.viewer_quality,
                         capabilities,
+                        filter_token_enabled,
+                        web_searches: &web_searches,
                         allow_page_range_delete,
                         boundary_preview_thumb_size: egui::vec2(
                             self.app_settings.thumb_w(),
@@ -2270,6 +2329,18 @@ impl eframe::App for ViewerApp {
                 );
                 match action {
                     ViewerAction::None => {}
+                    ViewerAction::FilterToken(token) => {
+                        self.request_filter_token(token);
+                    }
+                    ViewerAction::ClearFilter => {
+                        self.request_clear_filter();
+                    }
+                    ViewerAction::WebSearch {
+                        search_index,
+                        token,
+                    } => {
+                        crate::infra::web_search::launch(&self.app_settings, search_index, &token);
+                    }
                     ViewerAction::ToggleFullscreen => {
                         self.toggle_fullscreen(&ctx);
                     }

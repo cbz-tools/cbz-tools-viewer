@@ -62,6 +62,25 @@ FavoriteToggle
 
 ---
 
+### filename token フィルタ操作
+
+```text
+ApplyFilterToken {
+    request_id: u64,
+    token: String,
+}
+
+ClearFilter {
+    request_id: u64,
+}
+```
+
+filename token メニューから Library の keyword filter の適用または解除を要求する。
+filter state は Library が所有し、Library 側で更新と dirty 化を行う。
+Viewer は filter state を保持しない。
+
+---
+
 ### 本移動
 
 ```text
@@ -123,6 +142,22 @@ FavoriteToggleResponse
 ```
 
 更新後のお気に入り状態を返す。
+
+---
+
+### filename token フィルタ操作応答
+
+```text
+ApplyFilterTokenAck {
+    request_id: u64,
+}
+
+ClearFilterAck {
+    request_id: u64,
+}
+```
+
+Library が filename token filter の要求を処理したことを、対応する `request_id` で通知する。
 
 ---
 

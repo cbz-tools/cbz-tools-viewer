@@ -7,12 +7,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use eframe::egui::{self, Color32, Key, Rect, pos2, vec2};
+use eframe::egui::{self, Color32, Key, Popup, PopupCloseBehavior, Rect, pos2, vec2};
 
 use crate::domain::app_settings::{ReadingDirection, UiLanguage, ViewerQuality};
 use crate::domain::archive_settings::SpreadMode;
 use crate::domain::ipc_contract::ViewerFavoriteState;
 use crate::infra::image::decode as img;
+use crate::infra::web_search::WebSearchMenuItem;
 use crate::ui::i18n::{TextKey, tr};
 
 use self::draw::{
@@ -24,7 +25,10 @@ use self::draw::{
 use self::progress::render_page_progress_bar;
 use self::state::{OverlayRenderResult, now_ms};
 use self::toolbar::{ViewerToolbarContext, is_reserved_viewer_key, render_viewer_toolbar};
-use super::{icons, theme};
+use super::{
+    filename_token_menu::{PopupKeyInput, show_filename_token_menu_frame},
+    icons, theme,
+};
 
 mod auto_spread_plan;
 mod decode_layout;
@@ -50,6 +54,12 @@ pub(crate) fn max_texture_side_from_context(ctx: &egui::Context) -> u32 {
 
 pub enum ViewerAction {
     None,
+    FilterToken(String),
+    ClearFilter,
+    WebSearch {
+        search_index: usize,
+        token: String,
+    },
     ToggleFullscreen,
     RequestDelete,
     RequestPageRangeDelete,
@@ -435,6 +445,8 @@ pub struct ViewerShowContext<'a> {
     pub external_tool_state: &'a ExternalToolToolbarState,
     pub global_quality: ViewerQuality,
     pub capabilities: ViewerUiCapabilities,
+    pub filter_token_enabled: bool,
+    pub web_searches: &'a [WebSearchMenuItem],
     pub allow_page_range_delete: bool,
     pub boundary_preview_thumb_size: egui::Vec2,
     pub boundary_preview_hud_font_size: f32,
@@ -736,6 +748,8 @@ pub fn show(
         external_tool_state,
         global_quality,
         capabilities,
+        filter_token_enabled,
+        web_searches,
         allow_page_range_delete,
         boundary_preview_thumb_size,
         boundary_preview_hud_font_size,
@@ -1087,59 +1101,90 @@ pub fn show(
         draw_key_feedback(ui, &used_rect, text);
         ctx.request_repaint_after(Duration::from_millis(60));
     }
-    used_resp.context_menu(|ui| {
-        if !page_range_delete_enabled {
-            return;
-        }
-        let current_page = state
-            .delete_range_context_menu_target_page()
-            .unwrap_or_else(|| state.current_requested_page());
-        let selection = state.delete_range_selection();
-        match (selection.start, selection.end) {
-            (None, None) => {
-                if ui
-                    .button(tr(language, TextKey::DeleteRangeStartHere))
-                    .clicked()
-                {
-                    state.delete_range_set_start(current_page);
-                    ui.close();
-                }
+    Popup::context_menu(&used_resp)
+        .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            let token_menu = show_filename_token_menu_frame(
+                ui,
+                state.entry(),
+                PopupKeyInput::default(),
+                language,
+                filter_token_enabled,
+                web_searches,
+            );
+            let filter_token = token_menu.filter_token;
+            let clear_filter = token_menu.clear_filter;
+            let token_menu_rendered = token_menu.rendered;
+            if let Some(token) = filter_token {
+                action = ViewerAction::FilterToken(token);
+                return;
             }
-            (Some(_), None) => {
-                if ui
-                    .button(tr(language, TextKey::DeleteRangeEndHere))
-                    .clicked()
-                {
-                    state.delete_range_set_end(current_page);
-                    ui.close();
-                }
-                if ui.button(tr(language, TextKey::DeleteRangeClear)).clicked() {
-                    state.delete_range_clear();
-                    ui.close();
-                }
+            if clear_filter {
+                action = ViewerAction::ClearFilter;
+                return;
             }
-            (Some(_), Some(_)) => {
-                let range_delete_label = if let Some(pages_label) = format_delete_range_pages(state)
-                {
-                    format!(
-                        "{} ({pages_label})",
-                        tr(language, TextKey::DeleteRangeRebuild)
-                    )
-                } else {
-                    tr(language, TextKey::DeleteRangeRebuild).to_owned()
+            if let Some((search_index, token)) = token_menu.web_search {
+                action = ViewerAction::WebSearch {
+                    search_index,
+                    token,
                 };
-                if ui.button(range_delete_label).clicked() {
-                    action = ViewerAction::RequestPageRangeDelete;
-                    ui.close();
-                }
-                if ui.button(tr(language, TextKey::DeleteRangeClear)).clicked() {
-                    state.delete_range_clear();
-                    ui.close();
-                }
+                return;
             }
-            (None, Some(_)) => {}
-        }
-    });
+            if token_menu_rendered {
+                ui.separator();
+            }
+            if !page_range_delete_enabled {
+                return;
+            }
+            let current_page = state
+                .delete_range_context_menu_target_page()
+                .unwrap_or_else(|| state.current_requested_page());
+            let selection = state.delete_range_selection();
+            match (selection.start, selection.end) {
+                (None, None) => {
+                    if ui
+                        .button(tr(language, TextKey::DeleteRangeStartHere))
+                        .clicked()
+                    {
+                        state.delete_range_set_start(current_page);
+                        ui.close();
+                    }
+                }
+                (Some(_), None) => {
+                    if ui
+                        .button(tr(language, TextKey::DeleteRangeEndHere))
+                        .clicked()
+                    {
+                        state.delete_range_set_end(current_page);
+                        ui.close();
+                    }
+                    if ui.button(tr(language, TextKey::DeleteRangeClear)).clicked() {
+                        state.delete_range_clear();
+                        ui.close();
+                    }
+                }
+                (Some(_), Some(_)) => {
+                    let range_delete_label =
+                        if let Some(pages_label) = format_delete_range_pages(state) {
+                            format!(
+                                "{} ({pages_label})",
+                                tr(language, TextKey::DeleteRangeRebuild)
+                            )
+                        } else {
+                            tr(language, TextKey::DeleteRangeRebuild).to_owned()
+                        };
+                    if ui.button(range_delete_label).clicked() {
+                        action = ViewerAction::RequestPageRangeDelete;
+                        ui.close();
+                    }
+                    if ui.button(tr(language, TextKey::DeleteRangeClear)).clicked() {
+                        state.delete_range_clear();
+                        ui.close();
+                    }
+                }
+                (None, Some(_)) => {}
+            }
+        });
     let mut overlay_interacting = false;
     let fullscreen_overlay_near =
         is_fullscreen && !in_fullscreen_transition && fullscreen_overlay_near(&ctx, &used_rect);

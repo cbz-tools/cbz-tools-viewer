@@ -17,8 +17,8 @@ use self::library_ops::PendingAfterLoad;
 use self::platform::{normalize_dir_path, sanitize_favorite_dirs};
 use self::ui_helpers::{DialogButtonSpec, calc_cache_size_mb, dialog_button_row, setup_style};
 use self::viewer_ops::{
-    FavoriteToggleResult, LibraryNavSnapshot, RebuildSelectedImagesAsCbzAndNextResult,
-    ViewerSyncEvent,
+    ApplyFilterTokenResult, FavoriteToggleResult, LibraryNavSnapshot,
+    RebuildSelectedImagesAsCbzAndNextResult, ViewerSyncEvent,
 };
 use crate::LaunchOptions;
 use crate::domain::app_settings::{
@@ -1091,6 +1091,35 @@ impl App {
                         );
                     }
                 }
+                ViewerSyncEvent::ApplyFilterToken {
+                    request_id,
+                    token,
+                    response_tx,
+                } => {
+                    self.library.apply_filter_token(token);
+                    self.left_pane_tab = LeftPaneTab::Library;
+                    ctx.request_repaint();
+                    if response_tx.send(ApplyFilterTokenResult::Success).is_err() {
+                        tracing::warn!(
+                            request_id,
+                            "viewer.ipc.filter_token.response_channel_closed"
+                        );
+                    }
+                }
+                ViewerSyncEvent::ClearFilter {
+                    request_id,
+                    response_tx,
+                } => {
+                    self.library.clear_filter();
+                    self.left_pane_tab = LeftPaneTab::Library;
+                    ctx.request_repaint();
+                    if response_tx.send(ApplyFilterTokenResult::Success).is_err() {
+                        tracing::warn!(
+                            request_id,
+                            "viewer.ipc.clear_filter.response_channel_closed"
+                        );
+                    }
+                }
                 ViewerSyncEvent::RebuildSelectedImagesAsCbzAndNext {
                     request_id,
                     book_id,
@@ -1610,7 +1639,8 @@ impl App {
         match action {
             LibraryAction::OpenArchive(_)
             | LibraryAction::ThumbDisplaySizeChanged(_)
-            | LibraryAction::None => {}
+            | LibraryAction::None
+            | LibraryAction::WebSearch { .. } => {}
             LibraryAction::RunExternalTool { .. } => {}
             _ => {}
         }
@@ -1627,6 +1657,10 @@ impl App {
             LibraryAction::Delete(idxs) => self.begin_delete(idxs.clone()),
             LibraryAction::Copy(idxs) => self.do_copy(idxs.clone()),
             LibraryAction::ExternalDrag(idxs) => self.start_external_drag(idxs, frame),
+            LibraryAction::WebSearch {
+                search_index,
+                token,
+            } => crate::infra::web_search::launch(&self.app_settings, *search_index, token),
             LibraryAction::ToggleFavorite(idx) => {
                 let _ = self.toggle_favorite_entry(*idx);
             }
@@ -1684,6 +1718,7 @@ impl App {
         library_external_tools: &[crate::ui::virtual_grid::ExternalToolMenuItem],
         library_external_busy: bool,
     ) {
+        let web_searches = crate::infra::web_search::menu_items(&self.app_settings.web_searches);
         egui::CentralPanel::default().show(root_ui, |ui| {
             let modal_open = self.renaming.is_some()
                 || self.properties_dialog.is_some()
@@ -1704,6 +1739,7 @@ impl App {
                 self.app_settings.folder_book_open_as_viewer,
                 library_external_tools,
                 library_external_busy,
+                &web_searches,
             );
             self.dispatch_library_ui_action(action, ctx, frame);
         });

@@ -9,6 +9,7 @@ pub mod image;
 pub mod ipc;
 pub mod page_map;
 pub mod system_resources;
+pub mod web_search;
 pub mod worker;
 
 pub mod kind_group_store;

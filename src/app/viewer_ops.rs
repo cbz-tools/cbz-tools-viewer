@@ -72,6 +72,15 @@ pub(super) enum ViewerSyncEvent {
         current_path: PathBuf,
         response_tx: mpsc::Sender<FavoriteToggleResult>,
     },
+    ApplyFilterToken {
+        request_id: u64,
+        token: String,
+        response_tx: mpsc::Sender<ApplyFilterTokenResult>,
+    },
+    ClearFilter {
+        request_id: u64,
+        response_tx: mpsc::Sender<ApplyFilterTokenResult>,
+    },
     RebuildSelectedImagesAsCbzAndNext {
         request_id: u64,
         book_id: BookId,
@@ -86,6 +95,11 @@ pub(super) enum ViewerSyncEvent {
 pub(super) enum FavoriteToggleResult {
     Success(ViewerFavoriteState),
     Error(IpcErrorCode),
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum ApplyFilterTokenResult {
+    Success,
 }
 
 #[derive(Clone, Debug)]
@@ -213,6 +227,51 @@ impl App {
                                             code,
                                             retryable: false,
                                         }
+                                    }
+                                    Err(_) => LibraryToViewer::Error {
+                                        request_id,
+                                        code: IpcErrorCode::Unknown,
+                                        retryable: false,
+                                    },
+                                };
+                                Some((response, None))
+                            }
+                            ViewerToLibrary::ApplyFilterToken { request_id, token } => {
+                                let (response_tx, response_rx) =
+                                    mpsc::channel::<ApplyFilterTokenResult>();
+                                pending_viewer_sync_events.lock().push(
+                                    ViewerSyncEvent::ApplyFilterToken {
+                                        request_id,
+                                        token,
+                                        response_tx,
+                                    },
+                                );
+                                repaint_ctx.request_repaint();
+                                let response = match response_rx.recv() {
+                                    Ok(ApplyFilterTokenResult::Success) => {
+                                        LibraryToViewer::ApplyFilterTokenAck { request_id }
+                                    }
+                                    Err(_) => LibraryToViewer::Error {
+                                        request_id,
+                                        code: IpcErrorCode::Unknown,
+                                        retryable: false,
+                                    },
+                                };
+                                Some((response, None))
+                            }
+                            ViewerToLibrary::ClearFilter { request_id } => {
+                                let (response_tx, response_rx) =
+                                    mpsc::channel::<ApplyFilterTokenResult>();
+                                pending_viewer_sync_events.lock().push(
+                                    ViewerSyncEvent::ClearFilter {
+                                        request_id,
+                                        response_tx,
+                                    },
+                                );
+                                repaint_ctx.request_repaint();
+                                let response = match response_rx.recv() {
+                                    Ok(ApplyFilterTokenResult::Success) => {
+                                        LibraryToViewer::ClearFilterAck { request_id }
                                     }
                                     Err(_) => LibraryToViewer::Error {
                                         request_id,
@@ -643,6 +702,12 @@ fn process_viewer_ipc_request(
             )
         }
         ViewerToLibrary::FavoriteToggle { request_id, .. } => {
+            return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
+        }
+        ViewerToLibrary::ApplyFilterToken { request_id, .. } => {
+            return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
+        }
+        ViewerToLibrary::ClearFilter { request_id } => {
             return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
         }
         ViewerToLibrary::Delete {

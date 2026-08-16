@@ -15,6 +15,13 @@ pub enum ViewerToLibrary {
         request_id: u64,
         current_path: PathBuf,
     },
+    ApplyFilterToken {
+        request_id: u64,
+        token: String,
+    },
+    ClearFilter {
+        request_id: u64,
+    },
     RequestAdjacentBooks {
         request_id: u64,
         kind: AdjacentBooksKind,
@@ -92,6 +99,12 @@ pub enum LibraryToViewer {
     FavoriteToggleResponse {
         request_id: u64,
         favorite_state: ViewerFavoriteState,
+    },
+    ApplyFilterTokenAck {
+        request_id: u64,
+    },
+    ClearFilterAck {
+        request_id: u64,
     },
     Deleted {
         request_id: u64,

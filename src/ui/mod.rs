@@ -1,4 +1,5 @@
 pub mod common;
+pub(crate) mod filename_token_menu;
 pub mod i18n;
 pub mod icons;
 pub mod library;

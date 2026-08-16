@@ -511,6 +511,12 @@ fn decode_jpeg_mozjpeg(
 /// target_width に対して最適な mozjpeg スケール分子を返す（分母は 8 固定）。
 /// Speed / Balanced は DCT 縮小を使い、Quality / Original はフルデコードする。
 /// 戻り値: 1=1/8, 2=1/4, 4=1/2, 8=1/1
+/// 設計意図: MozJPEG/libjpeg-turbo では 3/8・5/8・3/4・7/8 などの中間 DCT scale も
+/// 利用できるが、総処理時間の短縮を保証しない。一方、1/4・1/2 など主要な縮小 IDCT は
+/// SIMD 最適化の恩恵を受けるため、速度重視では 1/8・1/4・1/2・1/1 に限定する。
+/// DCT 後の最終表示サイズ調整は fast_image_resize に任せ、「target 以上になる最小の対応
+/// DCT scale」へ安易に変更しない。中間 scale の採否は JPEG decode 単体ではなく、decode +
+/// RGBA 化 + 最終 resize 全体時間で実測して判断する。
 #[cfg(feature = "mozjpeg")]
 fn jpeg_scale_numerator(orig_w: u32, target_w: u32, quality: &ViewerQuality) -> u8 {
     if matches!(quality, ViewerQuality::Quality | ViewerQuality::Original) {

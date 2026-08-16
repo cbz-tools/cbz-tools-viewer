@@ -4,7 +4,7 @@ use crate::domain::app_settings::{
     AppSettings, ExternalTool, ExternalToolShortcut, LIBRARY_HUD_FONT_LEVEL_MAX,
     LIBRARY_HUD_FONT_LEVEL_MIN, LIBRARY_WHEEL_SPEED_MAX, LIBRARY_WHEEL_SPEED_MIN,
     LibraryCardSelectionStyle, LibraryHudMode, LibraryHudStyle, ReadingDirection, UiLanguage,
-    ViewerOpenMode, ViewerQuality,
+    ViewerOpenMode, ViewerQuality, WebSearchBrowser, WebSearchOpenMode,
 };
 use crate::domain::performance::{
     PERFORMANCE_CACHE_MIN_MIB, SPAD_RAM_RATIO_MAX_PERCENT, SPAD_RAM_RATIO_MIN_PERCENT,
@@ -126,6 +126,37 @@ pub(super) mod viewer_open_mode_serde {
         D: Deserializer<'de>,
     {
         Value::deserialize(deserializer).map(Into::into)
+    }
+}
+
+pub(super) mod web_search_browser_serde {
+    use super::WebSearchBrowser;
+    use serde::Serializer;
+
+    pub fn serialize<S>(value: &WebSearchBrowser, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match value {
+            WebSearchBrowser::Chrome => "chrome",
+            WebSearchBrowser::Edge => "edge",
+            WebSearchBrowser::Firefox => "firefox",
+        })
+    }
+}
+
+pub(super) mod web_search_open_mode_serde {
+    use super::WebSearchOpenMode;
+    use serde::Serializer;
+
+    pub fn serialize<S>(value: &WebSearchOpenMode, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(match value {
+            WebSearchOpenMode::Tab => "tab",
+            WebSearchOpenMode::NewWindow => "new_window",
+        })
     }
 }
 
@@ -564,10 +595,26 @@ fn load_app_settings_from_value(
     if let Some(value) = obj.get("external_tools").and_then(parse_external_tools) {
         settings.external_tools = value;
     }
+    if let Some(value) = obj
+        .get("web_search_browser")
+        .and_then(parse_web_search_browser)
+    {
+        settings.web_search_browser = value;
+    }
+    if let Some(value) = obj
+        .get("web_search_open_mode")
+        .and_then(parse_web_search_open_mode)
+    {
+        settings.web_search_open_mode = value;
+    }
+    if let Some(value) = obj.get("web_searches").and_then(parse_web_searches) {
+        settings.web_searches = value;
+    }
 
     settings.viewer_spad_ram_ratio_percent = settings
         .viewer_spad_ram_ratio_percent
         .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT);
+    settings.sanitize_web_searches();
 
     Some(settings)
 }
@@ -598,6 +645,23 @@ fn parse_viewer_open_mode(value: &serde_json::Value) -> Option<ViewerOpenMode> {
     match value.as_str()? {
         "windowed" => Some(ViewerOpenMode::Windowed),
         "fullscreen" => Some(ViewerOpenMode::Fullscreen),
+        _ => None,
+    }
+}
+
+fn parse_web_search_browser(value: &serde_json::Value) -> Option<WebSearchBrowser> {
+    match value.as_str()? {
+        "chrome" => Some(WebSearchBrowser::Chrome),
+        "edge" => Some(WebSearchBrowser::Edge),
+        "firefox" => Some(WebSearchBrowser::Firefox),
+        _ => None,
+    }
+}
+
+fn parse_web_search_open_mode(value: &serde_json::Value) -> Option<WebSearchOpenMode> {
+    match value.as_str()? {
+        "tab" => Some(WebSearchOpenMode::Tab),
+        "new_window" => Some(WebSearchOpenMode::NewWindow),
         _ => None,
     }
 }
@@ -657,4 +721,17 @@ fn parse_external_tools(value: &serde_json::Value) -> Option<Vec<ExternalTool>> 
         }
     }
     Some(tools)
+}
+
+fn parse_web_searches(
+    value: &serde_json::Value,
+) -> Option<Vec<crate::domain::app_settings::WebSearchEntry>> {
+    let items = value.as_array()?;
+    let mut searches = Vec::with_capacity(items.len());
+    for item in items {
+        if let Ok(search) = serde_json::from_value(item.clone()) {
+            searches.push(search);
+        }
+    }
+    Some(searches)
 }

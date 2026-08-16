@@ -6,10 +6,7 @@ use super::super::i18n::{TextKey, tr};
 use super::super::theme;
 use super::SETTINGS_BUTTON_HEIGHT;
 
-pub(super) const SETTINGS_SMALL_BUTTON_SIZE: egui::Vec2 = egui::vec2(72.0, SETTINGS_BUTTON_HEIGHT);
 pub(super) const SETTINGS_RESET_BUTTON_SIZE: egui::Vec2 = egui::vec2(56.0, SETTINGS_BUTTON_HEIGHT);
-pub(super) const SETTINGS_TOOL_DELETE_BUTTON_SIZE: egui::Vec2 =
-    egui::vec2(72.0, SETTINGS_BUTTON_HEIGHT);
 pub(super) const PERFORMANCE_SELECT_WIDTH: f32 = 180.0;
 
 pub(super) struct SliderRange {

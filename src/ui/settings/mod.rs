@@ -14,6 +14,7 @@ mod cache;
 mod display;
 mod external_tools;
 mod performance;
+mod web_search;
 mod widgets;
 
 const SETTINGS_BUTTON_HEIGHT: f32 = theme::CONTROL_HEIGHT;
@@ -43,16 +44,18 @@ enum SettingsTab {
     Viewer,
     Performance,
     ExternalTools,
+    WebSearch,
 }
 
 impl SettingsTab {
-    fn all(language: UiLanguage) -> [(Self, &'static str); 5] {
+    fn all(language: UiLanguage) -> [(Self, &'static str); 6] {
         [
             (Self::General, tr(language, TextKey::General)),
             (Self::Library, tr(language, TextKey::Library)),
             (Self::Viewer, tr(language, TextKey::ViewerTab)),
             (Self::Performance, tr(language, TextKey::Performance)),
             (Self::ExternalTools, tr(language, TextKey::ExternalTools)),
+            (Self::WebSearch, tr(language, TextKey::WebSearch)),
         ]
     }
 }
@@ -145,6 +148,9 @@ pub fn show(
                         }
                         SettingsTab::ExternalTools => {
                             external_tools::show_external_tools_tab(ui, language, settings);
+                        }
+                        SettingsTab::WebSearch => {
+                            web_search::show_web_search_tab(ui, language, settings);
                         }
                     });
             });

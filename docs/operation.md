@@ -23,7 +23,7 @@ Double-click a book to open the Viewer.
 
 ### Settings
 
-The Settings window has five tabs: General, Library, Viewer, Performance, and External Tools.
+The Settings window has six tabs: General, Library, Viewer, Performance, External Tools, and Web Search.
 
 General > App > Language switches the UI language between English and Japanese.
 
@@ -46,6 +46,18 @@ Changes are applied immediately.
 * Open rebuilt archive in a new Viewer is off by default.
   When off, the current Viewer only moves to the next book.
   When on, the rebuilt archive also opens in another Viewer window.
+
+### External Tools settings
+
+Open Settings > External Tools; all 3 tool slots are always shown and configured in place. Each slot has Name, Shortcut, Start mode (Background or Normal), Executable, and Arguments. Set Executable to the program to start. In Arguments, `{path}` is replaced with the full path of the target book. Edit or blank the fields in a slot to configure it or leave it unused.
+
+In the Library, right-click a book (or selected books) and choose External Tools > a configured tool. In the Viewer, use the External Tools toolbar or the configured shortcut. A tool must have a non-empty Name and Executable to appear in these launch surfaces. The app starts the configured executable with the target path; it does not provide or install the external tool.
+
+### Web Search settings
+
+The Web Search tab selects one browser (Chrome, Edge, or Firefox), one open mode (Tab or New Window), and up to five search destinations. Each destination has Display and Link fields; both must be non-empty, and Link must contain `%s`, which is replaced with the URL-encoded selected token. Incomplete destinations are not shown in the token menu. If there are no valid destinations, the Filter, Copy, and Clear Filter items remain available.
+
+The configured destinations are available from the shared filename-token menu in both Library and Viewer. Select a filename token, then choose `Search ... with ...` for the desired destination. The same menu is available in Library, Library-connected Viewer, Standalone Viewer, and Detached Viewer; Web Search does not require IPC. Token selection keeps the menu open so Filter, Copy, or Web Search can be chosen without reopening it. Choosing a destination builds a URL and starts the selected external browser with the selected Tab/New Window mode, then closes the menu. The app only starts that external browser process; it does not make HTTP requests or display search results itself. Only `http://` and `https://` links are executed. If the selected browser is unavailable, the app safely leaves the search unopened.
 
 ### Performance
 
@@ -160,9 +172,13 @@ The selected book file or folder is deleted, and related thumbnails, Page Map, f
 
 Some items are hidden or disabled when multiple items are selected.
 
+For a single Archive, the shared filename-token menu provides Filter by token, Clear Filter, Copy token, and the configured Web Search destinations. Token selection keeps the menu open; choosing Filter, Clear Filter, Copy, or Web Search executes it and closes the menu. Library Clear Filter clears the keyword filter and marks the existing filter for refresh.
+
 ---
 
 ## Viewer screen
+
+The Viewer uses the same filename-token menu and token selection as the Library. Filter by token is sent through the existing Viewer-to-Library filter IPC only when the Viewer has Library/Snapshot IPC. Clear Filter is always active: with that IPC it sends the symmetric minimal clear request to Library; Standalone, Detached, and CLI Viewers safely no-op. Copy and Web Search do not require IPC and use the local clipboard or external-browser launch described above.
 
 ### Page navigation
 

@@ -25,6 +25,7 @@ pub const VIEWER_L1_VRAM_CACHE_MAX_MB_DEFAULT: u16 = 256;
 pub const VIEWER_RGBA_CACHE_MAX_MB_DEFAULT: u16 = 256;
 pub const VIEWER_BACKGROUND_WORKER_COUNT_DEFAULT: u16 = 2;
 pub const EXTERNAL_TOOLS_MAX: usize = 3;
+pub const WEB_SEARCHES_MAX: usize = 5;
 
 pub fn normalize_external_tool_executable(s: &str) -> String {
     s.trim().trim_matches('"').trim().to_owned()
@@ -47,6 +48,27 @@ impl Default for ViewerQuality {
 pub enum ViewerOpenMode {
     Windowed,
     Fullscreen,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WebSearchBrowser {
+    #[default]
+    Chrome,
+    Edge,
+    Firefox,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WebSearchOpenMode {
+    #[default]
+    Tab,
+    NewWindow,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct WebSearchEntry {
+    pub display: String,
+    pub link: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -338,6 +360,13 @@ pub struct AppSettings {
     /// 外部ツール設定（最大3件）
     #[serde(default = "default_external_tools")]
     pub external_tools: Vec<ExternalTool>,
+    /// Web Search 設定（最大5件）
+    #[serde(with = "crate::domain::app_settings_codec::web_search_browser_serde")]
+    pub web_search_browser: WebSearchBrowser,
+    #[serde(with = "crate::domain::app_settings_codec::web_search_open_mode_serde")]
+    pub web_search_open_mode: WebSearchOpenMode,
+    #[serde(default = "default_web_searches")]
+    pub web_searches: Vec<WebSearchEntry>,
 }
 
 #[allow(dead_code)]
@@ -416,6 +445,9 @@ fn default_open_rebuilt_cbz_in_new_viewer() -> bool {
 fn default_external_tools() -> Vec<ExternalTool> {
     Vec::new()
 }
+fn default_web_searches() -> Vec<WebSearchEntry> {
+    Vec::new()
+}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -439,6 +471,9 @@ impl Default for AppSettings {
             resume_from_last_reading_position: false,
             open_rebuilt_cbz_in_new_viewer: OPEN_REBUILT_CBZ_IN_NEW_VIEWER_DEFAULT,
             external_tools: default_external_tools(),
+            web_search_browser: WebSearchBrowser::default(),
+            web_search_open_mode: WebSearchOpenMode::default(),
+            web_searches: default_web_searches(),
         }
     }
 }
@@ -448,6 +483,7 @@ impl AppSettings {
         self.viewer_spad_ram_ratio_percent = self
             .viewer_spad_ram_ratio_percent
             .clamp(SPAD_RAM_RATIO_MIN_PERCENT, SPAD_RAM_RATIO_MAX_PERCENT);
+        self.sanitize_web_searches();
     }
 
     pub const fn external_tool_shortcut_candidates() -> &'static [ExternalToolShortcut] {
@@ -497,6 +533,10 @@ impl AppSettings {
                 tool
             })
             .collect();
+    }
+
+    pub fn sanitize_web_searches(&mut self) {
+        self.web_searches.truncate(WEB_SEARCHES_MAX);
     }
 
     /// 表示サイズを 20px 刻みにクランプする

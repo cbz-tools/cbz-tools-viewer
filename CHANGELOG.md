@@ -14,6 +14,8 @@
 - Added full-page filename-HUD scrubbing for image books with an available Page Map, with page-axis priority for multi-page books, plus in-place playback for animated WebP thumbnails in archives (first image) and standalone image files.
 - Added filename-HUD time scrubbing for standalone animated WebP files and one-page image books whose page is animated WebP; animated WebP pages in multi-page books remain on the page axis.
 - Added Library sidebar filtering by file extension, with item counts and independently collapsible Extensions and Groups sections.
+- Added shared Library and Viewer filename-token actions for filtering, copying, Web Search, and Clear Filter.
+- Added configurable Web Search destinations with Chrome, Edge, or Firefox, Tab or New Window opening, and up to five entries.
 
 ### Changed
 
@@ -28,6 +30,8 @@
 - Moved animated WebP inspection and frame decoding into the published crates.io `webp-anim` `0.1.1` crate, replacing the viewer's direct `libwebp-sys` integration.
 - Refreshed compatible direct dependencies within their existing version requirements, including serde_json, toml, chrono, tokio, memmap2, blake3, bytes, anyhow, and log.
 - Removed the unused direct development dependency on `tempfile` and made the required `windows-sys` `Win32_Security` feature explicit.
+- Changed External Tools settings to show all three slots in place, with empty slots omitted from launch surfaces.
+- Expanded the operation guides with filename-token, Web Search, and fixed-slot External Tools setup details.
 
 ### Fixed
 
@@ -41,7 +45,7 @@
 - Reduced CPU/GPU memory high-water usage after bulk thumbnail generation in large libraries without changing Viewer L1/L2 caches or thumbnail request policy.
 - Fixed a Page Map issue where some JPEG files could fail lightweight metadata probing when a JPEG marker was split across an internal read chunk boundary.
 
-- Reorganized the Settings window into General, Library, Viewer, Performance, and External Tools tabs.
+- Reorganized the Settings window into General, Library, Viewer, Performance, External Tools, and Web Search tabs.
 - Added favorite indicators to Library card HUDs.
 - Unified favorite star drawing across the Library and card HUDs.
 - Added Library Card HUD Style and Library Card Selection Style settings.
