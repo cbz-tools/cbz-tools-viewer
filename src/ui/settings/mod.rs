@@ -18,11 +18,6 @@ mod web_search;
 mod widgets;
 
 const SETTINGS_BUTTON_HEIGHT: f32 = theme::CONTROL_HEIGHT;
-const SETTINGS_TAB_BASE_WIDTH: f32 = 88.0;
-const SETTINGS_TAB_SIZE: egui::Vec2 = egui::vec2(
-    SETTINGS_TAB_BASE_WIDTH + theme::ICON_BUTTON_HOVER_GUARD_X,
-    SETTINGS_BUTTON_HEIGHT,
-);
 const SETTINGS_WINDOW_DEFAULT_SIZE: egui::Vec2 = egui::vec2(720.0, 560.0);
 
 // ── イベント ──────────────────────────────────────────────────────────────────
@@ -160,10 +155,16 @@ pub fn show(
 }
 
 fn tab_selector(ui: &mut egui::Ui, language: UiLanguage, selected: &mut SettingsTab) {
+    let tabs = SettingsTab::all(language);
+    let tab_count = tabs.len();
+    let tab_width = (ui.available_width()
+        - ui.spacing().item_spacing.x * (tab_count.saturating_sub(1) as f32))
+        / tab_count as f32;
+
     ui.horizontal(|ui| {
-        for (tab, label) in SettingsTab::all(language) {
+        for (tab, label) in tabs {
             let resp = ui.add_sized(
-                SETTINGS_TAB_SIZE,
+                egui::vec2(tab_width, SETTINGS_BUTTON_HEIGHT),
                 egui::Button::selectable(*selected == tab, label),
             );
             if resp.clicked() {
