@@ -7,12 +7,6 @@ use crate::domain::performance::PerformanceResources;
 pub(crate) mod app_settings_resolution;
 
 impl AppSettings {
-    #[allow(dead_code)]
-    pub fn load() -> Self {
-        let resources = crate::infra::system_resources::detect_pc_resources();
-        Self::load_with_resources(&resources)
-    }
-
     pub fn load_with_resources(resources: &PerformanceResources) -> Self {
         let path = Self::settings_path();
         let mut settings = match std::fs::read_to_string(&path) {
@@ -60,12 +54,6 @@ impl AppSettings {
         settings.normalize_persisted_values();
         settings.sanitize_external_tools();
         settings
-    }
-
-    #[allow(dead_code)]
-    pub fn save(&self) {
-        let resources = crate::infra::system_resources::detect_pc_resources();
-        self.save_with_resources(&resources);
     }
 
     pub fn save_with_resources(&self, resources: &PerformanceResources) {

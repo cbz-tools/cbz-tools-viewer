@@ -48,7 +48,6 @@ impl RenderSignature {
                     .saturating_mul(RENDER_SIGNATURE_SUITABILITY_DENOMINATOR)
     }
 
-    #[allow(dead_code)]
     pub(super) fn mismatch_reason(self, requirement: DisplayRequirement) -> Option<&'static str> {
         if self.quality != requirement.quality {
             return Some("quality mismatch");
@@ -263,14 +262,10 @@ impl WorkingSetPlan {
 
 /// BG decode の結果を render_signature 単位で追跡し、古い結果の混入を防ぐ。
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub(super) struct BgInflightEntry {
-    pub(super) request_id: u64,
     pub(super) page: u32,
     pub(super) render_signature: RenderSignature,
     pub(super) render_context: BgRenderContext,
-    pub(super) working_set_anchor_page: WorkingSetAnchorPage,
-    pub(super) source_view: Option<u32>,
 }
 
 impl BgInflightEntry {

@@ -24,7 +24,6 @@ pub(crate) use rar_adaptive::RarPageMapSlowOutcome;
 #[cfg(feature = "rar")]
 pub(crate) use rar_adaptive::build_book_page_map_slow_from_rar_path;
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// Folder の FAST 判定。Ready だけが cache 保存へ進める。
 /// RequiresComplete は complete 経路を持つ呼び出し側だけが扱う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,21 +33,18 @@ pub(crate) enum FolderPageMapFastStatus {
     Failed,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FolderPageMapFastOutcome {
     pub status: FolderPageMapFastStatus,
     pub page_map: Option<BookPageMap>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FolderPageMapFastLaneOutput {
     pub status: FolderPageMapFastStatus,
     pub pages: Vec<PageDescriptor>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FolderPageMapSlowFailureReason {
     ReadError,
@@ -57,7 +53,6 @@ pub(crate) enum FolderPageMapSlowFailureReason {
     NoImageEntries,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FolderPageMapSlowFailure {
     pub page_index: Option<u32>,
@@ -65,7 +60,6 @@ pub(crate) struct FolderPageMapSlowFailure {
     pub reason: FolderPageMapSlowFailureReason,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum FolderPageMapSlowOutcome {
     Success(BookPageMap),
@@ -231,7 +225,6 @@ pub(crate) fn build_book_page_map_slow_from_zip_reader(
     ZipPageMapSlowOutcome::Success(BookPageMap::new(revision, pages))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// DIR 本の FAST Page Map を組み立てる。軽量メタデータで確定できない場合は RequiresComplete を返す。
 pub(crate) fn build_book_page_map_fast_from_folder_reader(
     reader: &FolderImageReader,
@@ -255,7 +248,6 @@ pub(crate) fn build_book_page_map_fast_from_folder_reader(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// DIR 本の FAST 経路の出力。軽量メタデータで Page Map を作る途中結果を返す。
 pub(crate) fn build_folder_page_map_fast_lanes(
     reader: &FolderImageReader,
@@ -321,7 +313,6 @@ pub(crate) fn build_folder_page_map_fast_lanes(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 /// DIR 本の slow Page Map を組み立てる。FAST が使えない呼び出し側のフォールバック経路。
 pub(crate) fn build_book_page_map_slow_from_folder_reader(
     reader: &FolderImageReader,
@@ -377,7 +368,6 @@ pub(crate) fn build_book_page_map_slow_from_folder_reader(
     FolderPageMapSlowOutcome::Success(BookPageMap::new(revision, pages))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_book_page_map_fast_from_folder_path(
     path: &Path,
     revision: SourceRevision,
@@ -391,7 +381,6 @@ pub(crate) fn build_book_page_map_fast_from_folder_path(
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn build_book_page_map_slow_from_folder_path(
     path: &Path,
     revision: SourceRevision,

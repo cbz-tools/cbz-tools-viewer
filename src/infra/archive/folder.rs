@@ -26,7 +26,6 @@ pub struct FolderImageReader {
     image_paths: Vec<PathBuf>,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub(crate) struct FolderImageEntryInfo<'a> {
     pub page_index: u32,
@@ -136,7 +135,6 @@ impl FolderImageReader {
             .collect()
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
     /// Page Map / thumbnail 生成が使う画像エントリ順を返す。
     pub(crate) fn page_map_image_entry_infos(
         &self,

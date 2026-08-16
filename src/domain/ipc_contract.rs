@@ -158,10 +158,8 @@ pub enum IpcErrorCode {
     SnapshotUnavailable,
     SnapshotPathMismatch,
     // 将来の IPC コマンドの request 検証失敗に備えて予約してある。
-    #[allow(dead_code)]
     InvalidRequest,
     // 将来互換のための IPC エラー mapping の受け皿として予約してある。
-    #[allow(dead_code)]
     Unknown,
 }
 

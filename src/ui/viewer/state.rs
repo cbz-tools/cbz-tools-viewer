@@ -451,8 +451,6 @@ struct CachedRgbaPage {
     source: &'static str,
 }
 
-type TolerantCacheHit = (Arc<Vec<img::FrameData>>, &'static str, (u32, u32));
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct RgbaEvictionOutcome {
     pub evicted_count: usize,
@@ -557,31 +555,6 @@ impl RgbaPageCache {
         Some((frames, key.render_signature))
     }
 
-    #[allow(dead_code)]
-    fn peek_suitable(
-        &self,
-        page: u32,
-        requirement: DisplayRequirement,
-    ) -> Option<(Arc<Vec<img::FrameData>>, RenderSignature)> {
-        let key = self.best_suitable_candidate(page, requirement)?;
-        let entry = self.entries.get(&key)?;
-        Some((Arc::clone(&entry.frames), key.render_signature))
-    }
-
-    #[allow(dead_code)]
-    fn get_with_tolerance(&mut self, key: &RgbaCacheKey) -> Option<TolerantCacheHit> {
-        if let Some(frames) = self.get(key) {
-            return Some((
-                frames,
-                "exact",
-                (key.render_signature.target_w, key.render_signature.target_h),
-            ));
-        }
-
-        None
-    }
-
-    #[allow(dead_code)]
     pub(super) fn contains(&self, key: &RgbaCacheKey) -> bool {
         self.entries.contains_key(key)
     }
@@ -644,18 +617,6 @@ impl RgbaPageCache {
             nearest_evicted_distance,
             protected_evicted: false,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn has_tolerance_match(&self, key: &RgbaCacheKey) -> Option<(u32, u32)> {
-        self.entries
-            .get(key)
-            .map(|_| (key.render_signature.target_w, key.render_signature.target_h))
-    }
-
-    #[allow(dead_code)]
-    fn has_page_variant(&self, key: &RgbaCacheKey) -> bool {
-        self.entries.contains_key(key)
     }
 
     pub(super) fn insert_with_context(
@@ -907,10 +868,8 @@ pub(super) struct ViewerPersistentState {
     /// 現在のページ構成に対する実効見開き可否。
     pub spread_mode: bool,
     /// グローバル既定のページ開き設定。
-    #[allow(dead_code)]
     pub(super) global_reading_direction: ReadingDirection,
     /// 本ごとのページ開き override。
-    #[allow(dead_code)]
     pub(super) reading_direction_override: Option<ReadingDirection>,
     /// 見開き時に表紙前へ仮想ブランクを入れるか。
     pub cover_blank: bool,
@@ -2970,9 +2929,9 @@ impl ViewerState {
     ) -> bool {
         while let Some(notification) = self.request.worker_manager.try_recv_notification() {
             match notification {
-                ViewerWorkerManagerNotification::BgDispatched { .. } => {}
-                ViewerWorkerManagerNotification::DroppedStale { .. } => {}
-                ViewerWorkerManagerNotification::Error { .. } => {}
+                ViewerWorkerManagerNotification::BgDispatched => {}
+                ViewerWorkerManagerNotification::DroppedStale => {}
+                ViewerWorkerManagerNotification::Error => {}
             }
         }
         let _ = (display_w, display_h, max_tex_side);

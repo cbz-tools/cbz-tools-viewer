@@ -441,7 +441,6 @@ fn default_resume_from_last_reading_position() -> bool {
 fn default_open_rebuilt_cbz_in_new_viewer() -> bool {
     OPEN_REBUILT_CBZ_IN_NEW_VIEWER_DEFAULT
 }
-#[allow(dead_code)]
 fn default_external_tools() -> Vec<ExternalTool> {
     Vec::new()
 }

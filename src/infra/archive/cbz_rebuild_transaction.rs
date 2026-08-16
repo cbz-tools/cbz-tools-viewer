@@ -4,25 +4,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CbzRebuildTransactionStage {
-    Plan,
-    SelectEntries,
-    WriteTemp,
     ValidateBeforeCommit,
     RenameInputToBackup,
     RenameTempToOutput,
     RollbackBackupToInput,
-    RemoveBackup,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CbzRebuildCommitState {
     NotCommitted,
-    Committed,
-    Unknown,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,15 +150,7 @@ impl fmt::Display for CbzRebuildOperationError {
                 "cbz rebuild finalize failed during rollback backup->old rename: {}",
                 self.source
             ),
-            CbzRebuildTransactionStage::RemoveBackup => write!(
-                f,
-                "cbz rebuild finalize failed after output commit at backup delete: {}",
-                self.source
-            ),
-            CbzRebuildTransactionStage::Plan
-            | CbzRebuildTransactionStage::SelectEntries
-            | CbzRebuildTransactionStage::WriteTemp
-            | CbzRebuildTransactionStage::ValidateBeforeCommit => self.source.fmt(f),
+            CbzRebuildTransactionStage::ValidateBeforeCommit => self.source.fmt(f),
         }
     }
 }
@@ -177,11 +161,9 @@ impl Error for CbzRebuildOperationError {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CbzRebuildCleanupOperation {
     RemoveBackup,
-    RemoveTemp,
 }
 
 #[derive(Debug)]
@@ -200,12 +182,6 @@ impl fmt::Display for CbzRebuildCleanupIssue {
                 self.path.display(),
                 self.source
             ),
-            CbzRebuildCleanupOperation::RemoveTemp => write!(
-                f,
-                "cbz rebuild temp cleanup failed: {}: {}",
-                self.path.display(),
-                self.source
-            ),
         }
     }
 }
@@ -217,10 +193,8 @@ impl Error for CbzRebuildCleanupIssue {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) struct CbzRebuildCommitted<T> {
     pub completed: T,
-    pub commit_state: CbzRebuildCommitState,
     pub paths: CbzRebuildTransactionPaths,
     pub cleanup_warnings: Vec<CbzRebuildCleanupIssue>,
 }
@@ -232,7 +206,6 @@ pub(crate) struct CbzRebuildFailureContext {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub(crate) enum CbzRebuildTransactionFailure {
     NotCommitted {
         stage: CbzRebuildTransactionStage,
@@ -370,7 +343,6 @@ pub(crate) fn finalize_cbz_rebuild_transaction<T>(
 
     Ok(CbzRebuildCommitted {
         completed,
-        commit_state: CbzRebuildCommitState::Committed,
         paths,
         cleanup_warnings,
     })
@@ -444,16 +416,7 @@ fn fmt_operation_with_paths(
             paths.input.display(),
             error.source
         ),
-        CbzRebuildTransactionStage::RemoveBackup => write!(
-            f,
-            "cbz rebuild finalize failed after output commit at backup delete: {}: {}",
-            paths.backup.display(),
-            error.source
-        ),
-        CbzRebuildTransactionStage::Plan
-        | CbzRebuildTransactionStage::SelectEntries
-        | CbzRebuildTransactionStage::WriteTemp
-        | CbzRebuildTransactionStage::ValidateBeforeCommit => write!(f, "{error}"),
+        CbzRebuildTransactionStage::ValidateBeforeCommit => write!(f, "{error}"),
     }
 }
 

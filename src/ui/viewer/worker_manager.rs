@@ -25,8 +25,7 @@ use super::{
         desired_auto_streaming_sequence,
     },
     working_set::{
-        BgAdmissionState, BgInflightEntry, BgRenderContext, PageRenderSignatureKey,
-        RenderSignature, WorkingSetAnchorPage,
+        BgAdmissionState, BgInflightEntry, BgRenderContext, PageRenderSignatureKey, RenderSignature,
     },
 };
 
@@ -123,22 +122,11 @@ fn streaming_candidate_limit(worker_capacity: usize) -> usize {
     worker_capacity.max(1).saturating_mul(4)
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(super) enum ViewerWorkerManagerNotification {
-    BgDispatched {
-        generation: u64,
-        request_id: u64,
-        page: u32,
-        render_signature: RenderSignature,
-    },
-    DroppedStale {
-        request_id: u64,
-        reason: &'static str,
-    },
-    Error {
-        message: String,
-    },
+    BgDispatched,
+    DroppedStale,
+    Error,
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -479,24 +467,6 @@ fn streaming_anchor_source(snapshot: &ViewerWorkerManagerSnapshot) -> &'static s
     }
 }
 
-/// 選択中の物理ページから working-set の起点を作る。
-fn working_set_anchor_from_navigation_state(
-    snapshot: &ViewerWorkerManagerSnapshot,
-) -> WorkingSetAnchorPage {
-    let physical_page = navigation_base_page(snapshot).min(snapshot.page_count.saturating_sub(1));
-    match snapshot.spread_setting {
-        SpreadMode::Single => WorkingSetAnchorPage::Single {
-            requested_page: physical_page,
-        },
-        SpreadMode::Spread => WorkingSetAnchorPage::Spread {
-            navigation_page: physical_page,
-        },
-        SpreadMode::Auto => WorkingSetAnchorPage::Auto {
-            navigation_page: physical_page,
-        },
-    }
-}
-
 fn bg_cache_limit_bytes(snapshot: &ViewerWorkerManagerSnapshot) -> usize {
     (snapshot.rgba_cache_max_mb as usize)
         .saturating_mul(1024)
@@ -727,7 +697,6 @@ fn dispatch_streaming_pages(
         state.bg_inflight_by_request_id.insert(
             request_id,
             BgInflightEntry {
-                request_id,
                 page,
                 render_signature,
                 render_context: BgRenderContext {
@@ -740,8 +709,6 @@ fn dispatch_streaming_pages(
                     full_equivalent_area_h: snapshot.full_equivalent_area_h,
                     max_tex_side: snapshot.max_tex_side,
                 },
-                working_set_anchor_page: working_set_anchor_from_navigation_state(snapshot),
-                source_view: Some(page),
             },
         );
         state.bg_summary_dispatch_count = state.bg_summary_dispatch_count.saturating_add(1);
@@ -752,12 +719,7 @@ fn dispatch_streaming_pages(
         }
         selected_shards[shard] = true;
         dispatched += 1;
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::BgDispatched {
-            generation: snapshot.current_generation(),
-            request_id,
-            page,
-            render_signature,
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::BgDispatched);
     }
     bg_trace_debug!(
         "[viewer-worker-manager-dispatch] generation={} book_id={:?} refill_reason={} dispatch_requested={} dispatched={} skipped_shard_busy={} skipped_selected_shard={} available_slots={}",
@@ -838,39 +800,27 @@ fn handle_background_result_streaming(
 ) -> bool {
     let Some(snapshot) = state.snapshot.clone() else {
         update_l2_streaming_status(l2_status, bg_rgba_cache, None, false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason: "missing_snapshot",
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         return false;
     };
     if result.kind == ViewerResultKind::AnimationFramesChunk {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason: "animation_stream_not_managed_here",
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         return false;
     }
 
     let Some(entry) = state.bg_inflight_by_request_id.remove(&result.request_id) else {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason: "untracked_bg_result",
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         return false;
     };
     let entry_key = entry.key();
     state.bg_inflight_by_key.remove(&entry_key);
     release_prefetch_inflight_slot(state, entry.page);
 
-    if let Some(reason) = bg_result_is_stale(&snapshot, &entry) {
+    if bg_result_is_stale(&snapshot, &entry).is_some() {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason,
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         return false;
     }
 
@@ -886,25 +836,17 @@ fn handle_background_result_streaming(
         });
     let Some(frames) = frames else {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason: "background_empty_frames",
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         return false;
     };
     let Some(bytes) = RgbaPageCache::static_rgba_bytes(frames.as_ref()) else {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason: "background_non_static_frames",
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         return false;
     };
     let Some(mut cache) = bg_rgba_cache.write().ok() else {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::Error {
-            message: "bg cache lock poisoned".to_owned(),
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::Error);
         return false;
     };
     let (bg_cache_pages, bg_cache_current_bytes, bg_cache_max_bytes) =
@@ -994,10 +936,7 @@ fn handle_background_result_streaming(
         state
             .bg_admission_state
             .insert(entry.key(), BgAdmissionState::InsertDidNotSurvive);
-        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale {
-            request_id: result.request_id,
-            reason: "background_insert_evicted",
-        });
+        let _ = notification_tx.send(ViewerWorkerManagerNotification::DroppedStale);
         bg_trace_debug!(
             "[bg_rgba.insert-drop] page={} inserted={} inserted_survived={} bg_rgba.current_bytes={} bg_rgba.max_bytes={} bg_rgba.entry_count={} evict_candidates={} render_signature.quality={:?} render_signature.target_w={} render_signature.target_h={} render_signature.max_tex_side={}",
             entry.page,

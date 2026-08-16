@@ -213,11 +213,6 @@ impl PerformanceResources {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn l1_total_mib_for_danger_split(&self, value_mib: u16) -> (u16, u16) {
-        split_mib_evenly(value_mib)
-    }
-
     pub fn default_performance_settings(&self) -> PerformanceSettingsResolved {
         PerformanceSettingsResolved {
             l1_vram_cache_max_mib: self.l1_default_mib(),
