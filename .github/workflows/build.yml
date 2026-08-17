@@ -130,6 +130,28 @@ jobs:
           where.exe cl
           Write-Host "CBZ_VCPKG_ROOT=$env:CBZ_VCPKG_ROOT"
           Write-Host "VCPKG_ROOT=$env:VCPKG_ROOT"
+      - name: Verify NASM for TurboJPEG SIMD
+        shell: pwsh
+        run: |
+          $nasm = Get-Command nasm -ErrorAction SilentlyContinue
+          $nasmPath = $nasm.Source
+          if (-not $nasm) {
+            $knownNasm = @(
+              (Join-Path ${env:ProgramFiles} "NASM\nasm.exe"),
+              (Join-Path ${env:ProgramFiles(x86)} "NASM\nasm.exe")
+            ) | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+            if ($knownNasm) {
+              $nasmPath = $knownNasm
+              Add-Content $env:GITHUB_PATH (Split-Path -Parent $knownNasm)
+            } else {
+              Write-Error "NASM is required for the turbojpeg-sys require-simd build"
+              exit 1
+            }
+          }
+          & $nasmPath -v
+          if ($LASTEXITCODE -ne 0) {
+            exit $LASTEXITCODE
+          }
       - name: Install dav1d (vcpkg)
         shell: pwsh
         run: |
@@ -260,6 +282,18 @@ jobs:
       - name: Verify runtime DLLs prepared (release)
         shell: pwsh
         run: |
+          $jpegRuntimeDlls = @(Get-ChildItem target/release -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^(turbojpeg|jpeg|libjpeg).*\.dll$' })
+          if ($jpegRuntimeDlls.Count -gt 0) {
+            Write-Error "TurboJPEG/libjpeg runtime DLLs were produced despite static linking: $($jpegRuntimeDlls.Name -join ', ')"
+            exit 1
+          }
+          $dependents = @(dumpbin /dependents target/release/cbz-viewer.exe 2>&1)
+          $jpegImports = @($dependents | Select-String -Pattern '(turbojpeg|libjpeg|jpeg)[^ ]*\.dll' -CaseSensitive:$false)
+          if ($jpegImports.Count -gt 0) {
+            Write-Error "The release executable imports a TurboJPEG/libjpeg DLL: $($jpegImports -join '; ')"
+            exit 1
+          }
           if (!(Test-Path target/release/dav1d.dll)) {
             Write-Error "target/release/dav1d.dll was not prepared by build.rs"
             exit 1

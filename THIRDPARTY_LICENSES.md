@@ -3,6 +3,48 @@
 This file primarily documents third-party binary components included in the distribution.
 It is not intended to be a comprehensive license inventory of Rust crate dependencies. Rust crate dependencies are tracked through `Cargo.lock` and, when needed, generated license reports.
 
+## libjpeg-turbo / TurboJPEG
+
+- Purpose: The JPEG page decode backend for full images, thumbnails, and Viewer DCT-scaled images
+- Source: `turbojpeg-sys 1.2.0` vendors libjpeg-turbo 3.1.0
+- Linking: The bundled library is built from source and statically linked; no TurboJPEG or libjpeg DLL is distributed
+- Build policy: `require-simd` is enabled and the Windows CI verifies that NASM is available
+- Rust bindings: Pregenerated bindings are used; bindgen/libclang is not required for JPEG
+- License: libjpeg-turbo uses compatible BSD-style licenses for the IJG/libjpeg and TurboJPEG components. The bundled source's `LICENSE.md` and `README.ijg` are the authoritative texts.
+- Required attribution for binary distributions: “This software is based in part on the work of the Independent JPEG Group.”
+- Scope note: The supported TIFF feature remains enabled. Its upstream `tiff` dependency has a separate, transitive `zune-jpeg` path for TIFF-internal ModernJPEG data; this is outside the standalone JPEG page path and is retained to avoid an unrelated TIFF codec refactor.
+
+The TurboJPEG API component is also covered by the following Modified 3-clause BSD notice from libjpeg-turbo:
+
+```text
+Copyright (C)2009-2024 D. R. Commander. All Rights Reserved.
+Copyright (C)2015 Viktor Szathmáry. All Rights Reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of the libjpeg-turbo Project nor the names of its
+   contributors may be used to endorse or promote products derived from this
+   software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+```
+
 ## UnRAR
 
 - Purpose: RAR/CBR listing and extraction backend

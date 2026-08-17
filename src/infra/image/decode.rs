@@ -161,7 +161,7 @@ pub fn decode(data: &[u8], hint: ImageFormatHint) -> Result<DecodedImage> {
 
 /// サムネイル専用デコード。`target_width` を渡すことで縮小デコードを活用する。
 ///
-/// - JPEG + `mozjpeg` feature: DCT 縮小デコード（1/8・1/4・1/2 から最適スケール選択）
+/// - JPEG: TurboJPEG DCT 縮小デコード（1/8・1/4・1/2 から最適スケール選択）
 /// - それ以外: `decode()` と同じ挙動
 ///
 /// 出力はまだ `target_width` と一致するとは限らない（`resize_to_width` で仕上げる）。
@@ -172,13 +172,11 @@ pub fn decode_for_thumb(
 ) -> Result<DecodedImage> {
     let fmt = resolve_fmt(data, hint);
 
-    // mozjpeg feature が有効な場合は JPEG を DCT 縮小デコード
-    #[cfg(feature = "mozjpeg")]
     if matches!(fmt, ImageFormatHint::Jpeg) {
-        return decode_jpeg_mozjpeg_with_fallback(data, target_width, &ViewerQuality::Balanced);
+        return decode_jpeg_for_target(data, target_width, &ViewerQuality::Balanced);
     }
 
-    // mozjpeg なし、または非 JPEG → 通常デコード（target_width は resize_to_width に委ねる）
+    // 非 JPEG → 通常デコード（target_width は resize_to_width に委ねる）
     let _ = target_width;
     match fmt {
         ImageFormatHint::Jpeg => decode_jpeg(data),
@@ -230,47 +228,10 @@ fn resolve_fmt(data: &[u8], hint: ImageFormatHint) -> ImageFormatHint {
 
 // ── JPEG ──────────────────────────────────────────────────────────────────────
 
-/// JPEG → RGBA8（zune-jpeg: image crate より高速）
+/// JPEG → RGBA8（TurboJPEG が最終 RGBA バッファへ直接出力）
 fn decode_jpeg(data: &[u8]) -> Result<DecodedImage> {
-    use std::io::Cursor;
-
-    use zune_core::colorspace::ColorSpace;
-    use zune_core::options::DecoderOptions;
-    use zune_jpeg::JpegDecoder;
-
-    let opts = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGB);
-    let mut dec = JpegDecoder::new_with_options(Cursor::new(data), opts);
-    dec.decode_headers()
-        .map_err(|e| anyhow::anyhow!("JPEG header: {e:?}"))?;
-    let info = dec.info().context("JPEG info missing")?;
-    let rgb = dec
-        .decode()
-        .map_err(|e| anyhow::anyhow!("JPEG decode: {e:?}"))?;
-
-    let w = info.width as usize;
-    let h = info.height as usize;
-
-    if rgb.len() != w * h * 3 {
-        tracing::warn!(
-            "zune-jpeg buffer mismatch: got {} bytes, expected {}×{}×3={} — fallback to image crate",
-            rgb.len(),
-            w,
-            h,
-            w * h * 3
-        );
-        return decode_generic(data);
-    }
-
-    let pixels: Vec<u8> = rgb
-        .chunks_exact(3)
-        .flat_map(|c| [c[0], c[1], c[2], 255u8])
-        .collect();
-
-    Ok(DecodedImage {
-        width: w as u32,
-        height: h as u32,
-        pixels,
-    })
+    let (decompressor, header) = read_turbojpeg_header(data)?;
+    decode_jpeg_with_scale(data, decompressor, header, turbojpeg::ScalingFactor::ONE)
 }
 
 // ── WebP（静止画）────────────────────────────────────────────────────────────
@@ -440,11 +401,11 @@ fn image_frame_to_frame_data(f: image::Frame) -> FrameData {
     }
 }
 
-// ── mozjpeg 縮小デコード ──────────────────────────────────────────────────────
+// ── TurboJPEG 縮小デコード ───────────────────────────────────────────────────
 
-/// JPEG → RGBA8（mozjpeg DCT 縮小デコード）
+/// JPEG → RGBA8（TurboJPEG DCT 縮小デコード）
 ///
-/// `target_width` から最適なスケール分子（分母=8）を選択してデコードする。
+/// `target_width` から最適な TurboJPEG スケールを選択してデコードする。
 /// 出力サイズはスケール後の近似値であり、`target_width` と一致しない場合がある。
 /// 呼び出し側で `resize_to_width` により最終サイズに揃える。
 ///
@@ -453,77 +414,35 @@ fn image_frame_to_frame_data(f: image::Frame) -> FrameData {
 /// - orig ≥ 4×target → 1/4
 /// - orig ≥ 2×target → 1/2
 /// - それ以外        → 1/1（フルサイズ）
-#[cfg(feature = "mozjpeg")]
-fn decode_jpeg_mozjpeg_with_fallback(
+fn decode_jpeg_for_target(
     data: &[u8],
     target_width: u32,
     quality: &ViewerQuality,
 ) -> Result<DecodedImage> {
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        decode_jpeg_mozjpeg(data, target_width, quality)
-    })) {
-        Ok(Ok(img)) => Ok(img),
-        Ok(Err(e)) => {
-            tracing::debug!(
-                error = %e,
-                "mozjpeg decode failed; fallback to image crate"
-            );
-            decode_generic(data)
-        }
-        Err(_) => {
-            tracing::debug!("mozjpeg decode panicked; fallback to image crate");
-            decode_generic(data)
-        }
-    }
+    let (decompressor, header) = read_turbojpeg_header(data)?;
+    let orig_w = u32::try_from(header.width).context("JPEG width exceeds u32")?;
+    let scale = jpeg_scale_factor(orig_w, target_width, quality);
+    decode_jpeg_with_scale(data, decompressor, header, scale)
 }
 
-#[cfg(feature = "mozjpeg")]
-fn decode_jpeg_mozjpeg(
-    data: &[u8],
-    target_width: u32,
-    quality: &ViewerQuality,
-) -> Result<DecodedImage> {
-    let mut decomp = mozjpeg::Decompress::new_mem(data).context("mozjpeg open")?;
-
-    let orig_w = decomp.width() as u32;
-    let numerator = jpeg_scale_numerator(orig_w, target_width, quality);
-
-    // numerator < 8 のときのみ縮小設定（== 8 はデフォルトと同じなので省略可だが明示）
-    decomp.scale(numerator);
-
-    let mut started = decomp.rgb().context("mozjpeg start rgb")?;
-
-    let w = started.width() as u32;
-    let h = started.height() as u32;
-
-    let rgb: Vec<[u8; 3]> = started.read_scanlines().context("mozjpeg read scanlines")?;
-    started.finish().context("mozjpeg finish")?;
-
-    let pixels: Vec<u8> = rgb.iter().flat_map(|p| [p[0], p[1], p[2], 255u8]).collect();
-
-    Ok(DecodedImage {
-        width: w,
-        height: h,
-        pixels,
-    })
-}
-
-/// target_width に対して最適な mozjpeg スケール分子を返す（分母は 8 固定）。
+/// target_width に対して最適な TurboJPEG スケールを返す。
 /// Speed / Balanced は DCT 縮小を使い、Quality / Original はフルデコードする。
-/// 戻り値: 1=1/8, 2=1/4, 4=1/2, 8=1/1
-/// 設計意図: MozJPEG/libjpeg-turbo では 3/8・5/8・3/4・7/8 などの中間 DCT scale も
+/// 設計意図: libjpeg-turbo では 3/8・5/8・3/4・7/8 などの中間 DCT scale も
 /// 利用できるが、総処理時間の短縮を保証しない。一方、1/4・1/2 など主要な縮小 IDCT は
 /// SIMD 最適化の恩恵を受けるため、速度重視では 1/8・1/4・1/2・1/1 に限定する。
 /// DCT 後の最終表示サイズ調整は fast_image_resize に任せ、「target 以上になる最小の対応
 /// DCT scale」へ安易に変更しない。中間 scale の採否は JPEG decode 単体ではなく、decode +
-/// RGBA 化 + 最終 resize 全体時間で実測して判断する。
-#[cfg(feature = "mozjpeg")]
-fn jpeg_scale_numerator(orig_w: u32, target_w: u32, quality: &ViewerQuality) -> u8 {
+/// RGBA 出力 + 最終 resize 全体時間で実測して判断する。
+fn jpeg_scale_factor(
+    orig_w: u32,
+    target_w: u32,
+    quality: &ViewerQuality,
+) -> turbojpeg::ScalingFactor {
     if matches!(quality, ViewerQuality::Quality | ViewerQuality::Original) {
-        return 8;
+        return turbojpeg::ScalingFactor::ONE;
     }
     if target_w == 0 || orig_w <= target_w {
-        return 8;
+        return turbojpeg::ScalingFactor::ONE;
     }
     let guard_percent = match quality {
         ViewerQuality::Speed => 0,
@@ -537,14 +456,94 @@ fn jpeg_scale_numerator(orig_w: u32, target_w: u32, quality: &ViewerQuality) -> 
         .min(orig_w);
     let ratio = orig_w / guarded_target_w;
     if ratio >= 8 {
-        1
+        turbojpeg::ScalingFactor::ONE_EIGHTH
     } else if ratio >= 4 {
-        2
+        turbojpeg::ScalingFactor::ONE_QUARTER
     } else if ratio >= 2 {
-        4
+        turbojpeg::ScalingFactor::ONE_HALF
     } else {
-        8
+        turbojpeg::ScalingFactor::ONE
     }
+}
+
+fn read_turbojpeg_header(
+    data: &[u8],
+) -> Result<(turbojpeg::Decompressor, turbojpeg::DecompressHeader)> {
+    let mut decompressor = turbojpeg::Decompressor::new().context("TurboJPEG decompressor")?;
+    let header = decompressor
+        .read_header(data)
+        .map_err(|e| anyhow::anyhow!("TurboJPEG header: {e}"))?;
+    Ok((decompressor, header))
+}
+
+fn jpeg_uses_wic_fallback(colorspace: turbojpeg::Colorspace) -> bool {
+    matches!(
+        colorspace,
+        turbojpeg::Colorspace::CMYK | turbojpeg::Colorspace::YCCK
+    )
+}
+
+fn scaled_jpeg_dimension(dimension: usize, scale: turbojpeg::ScalingFactor) -> Result<usize> {
+    let denom = scale.denom();
+    if denom == 0 {
+        anyhow::bail!("TurboJPEG scaling factor has zero denominator");
+    }
+    let numerator = dimension
+        .checked_mul(scale.num())
+        .context("JPEG scaled dimension overflow")?;
+    let rounded = numerator
+        .checked_add(denom - 1)
+        .context("JPEG scaled dimension overflow")?;
+    Ok(rounded / denom)
+}
+
+fn decode_jpeg_with_scale(
+    data: &[u8],
+    mut decompressor: turbojpeg::Decompressor,
+    header: turbojpeg::DecompressHeader,
+    requested_scale: turbojpeg::ScalingFactor,
+) -> Result<DecodedImage> {
+    use turbojpeg::{Image, PixelFormat};
+
+    if jpeg_uses_wic_fallback(header.colorspace) {
+        // TurboJPEG direct RGBA is not used for CMYK/YCCK; only those JPEG
+        // colorspaces fall back to the Windows WIC color conversion path.
+        return super::wic::decode_cmyk_ycck_jpeg(data)
+            .context("CMYK/YCCK JPEG WIC fallback failed");
+    }
+    let scale = if header.is_lossless {
+        turbojpeg::ScalingFactor::ONE
+    } else {
+        requested_scale
+    };
+    decompressor
+        .set_scaling_factor(scale)
+        .map_err(|e| anyhow::anyhow!("TurboJPEG scaling: {e}"))?;
+
+    let width = scaled_jpeg_dimension(header.width, scale)?;
+    let height = scaled_jpeg_dimension(header.height, scale)?;
+    let width_u32 = u32::try_from(width).context("JPEG width exceeds u32")?;
+    let height_u32 = u32::try_from(height).context("JPEG height exceeds u32")?;
+    let pitch = width.checked_mul(4).context("JPEG RGBA pitch overflow")?;
+    let pixel_len = pitch
+        .checked_mul(height)
+        .context("JPEG RGBA buffer size overflow")?;
+    let mut image = Image {
+        pixels: vec![0u8; pixel_len],
+        width,
+        pitch,
+        height,
+        format: PixelFormat::RGBA,
+    };
+    decompressor
+        .decompress(data, image.as_deref_mut())
+        .map_err(|e| anyhow::anyhow!("TurboJPEG RGBA decode: {e}"))?;
+
+    Ok(DecodedImage {
+        width: width_u32,
+        height: height_u32,
+        pixels: image.pixels,
+    })
 }
 
 // ── リサイズ ──────────────────────────────────────────────────────────────────
@@ -607,7 +606,7 @@ fn resize_to_width_with_filter(
 
 /// ビューア表示用に画像をデコードし、全フレームと元サイズを返す。
 ///
-/// - **JPEG**: `mozjpeg` feature 有効時は画質ごとの target / DCT 縮小方針に従う
+/// - **JPEG**: 画質ごとの target / TurboJPEG DCT 縮小方針に従う
 ///   → フルデコードより高速化できるモードを優先
 /// - **PNG / WebP / GIF / APNG など**: `decode_frames()` でデコード後に `max_tex_side` でキャップ
 /// - すべてのフォーマットで `max_tex_side` を超えるフレームはリサイズ（GPU panic 防止）
@@ -659,8 +658,10 @@ fn decode_jpeg_for_viewer(
     quality: ViewerQuality,
     cap: u32,
 ) -> Result<ViewerFrames> {
-    // 元サイズをヘッダーのみ読んで取得（デコードなし: 高速）
-    let (orig_w, orig_h) = read_jpeg_size(data).unwrap_or((0, 0));
+    // 元サイズをTurboJPEGヘッダーのみ読んで取得（デコードなし）
+    let (decompressor, header) = read_turbojpeg_header(data)?;
+    let orig_w = u32::try_from(header.width).context("JPEG width exceeds u32")?;
+    let orig_h = u32::try_from(header.height).context("JPEG height exceeds u32")?;
     let target = match quality {
         ViewerQuality::Original if orig_w > 0 && orig_h > 0 => {
             safe_original_target_side(orig_w, orig_h, cap)
@@ -669,13 +670,12 @@ fn decode_jpeg_for_viewer(
     };
     let resize_filter = jpeg_final_resize_filter(&quality);
 
-    // mozjpeg feature 有効時: 画質ごとの DCT 縮小方針に従ってデコード
-    #[cfg(feature = "mozjpeg")]
-    let img = decode_jpeg_mozjpeg_with_fallback(data, target, &quality)?;
-
-    // mozjpeg なし: 通常デコード
-    #[cfg(not(feature = "mozjpeg"))]
-    let img = decode_jpeg(data)?;
+    let img = decode_jpeg_with_scale(
+        data,
+        decompressor,
+        header,
+        jpeg_scale_factor(orig_w, target, &quality),
+    )?;
 
     let img = resize_to_max_side_with_filter(img, target, resize_filter)?;
     Ok(ViewerFrames {
@@ -981,11 +981,6 @@ fn decode_static_image_for_viewer(
             delay_ms: STATIC_FRAME_DELAY_MS,
         }],
     })
-}
-
-/// JPEG ヘッダーのみを読んで元画像サイズを返す（デコードなし・高速）。
-fn read_jpeg_size(data: &[u8]) -> Result<(u32, u32)> {
-    crate::infra::image::page_map::read_jpeg_metadata(data).map(|(_, w, h)| (w, h))
 }
 
 /// `display_w` と GPU 上限 `cap` の両方を考慮した有効ターゲット幅を返す。

@@ -17,13 +17,13 @@ mod imp {
             Foundation::{
                 DATA_S_SAMEFORMATETC, DRAGDROP_S_CANCEL, DRAGDROP_S_DROP,
                 DRAGDROP_S_USEDEFAULTCURSORS, DV_E_DVASPECT, DV_E_FORMATETC, DV_E_TYMED, E_NOTIMPL,
-                GlobalFree, HWND, OLE_E_ADVISENOTSUPPORTED, RPC_E_CHANGED_MODE, S_OK,
+                GlobalFree, HWND, OLE_E_ADVISENOTSUPPORTED, S_OK,
             },
             System::{
                 Com::{
-                    COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize, DATADIR_GET,
-                    DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject, IDataObject_Impl,
-                    IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
+                    DATADIR_GET, DVASPECT_CONTENT, FORMATETC, IAdviseSink, IDataObject,
+                    IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, STGMEDIUM, STGMEDIUM_0,
+                    TYMED_HGLOBAL,
                 },
                 Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock},
                 Ole::{CF_HDROP, DROPEFFECT_COPY, IDropSource, IDropSource_Impl},
@@ -36,6 +36,7 @@ mod imp {
     // windows-core は直接依存として残す。
     // windows の `#[implement(...)]` 展開は COM/OLE IDataObject/IDropSource 実装で
     // `windows_core` という crate 名を要求し、`windows::core` 経由では代替できない。
+    use crate::platform::com::ComApartment;
     use windows_core::IUnknownImpl;
 
     pub fn start_file_drag(hwnd: isize, paths: &[PathBuf]) -> Result<()> {
@@ -66,38 +67,6 @@ mod imp {
             "external drag finished"
         );
         Ok(())
-    }
-
-    struct ComApartment {
-        should_uninit: bool,
-    }
-
-    impl ComApartment {
-        fn new() -> Result<Self> {
-            // SAFETY:
-            // COM apartment はこのスレッド内だけで初期化し、成功時だけ Drop で対応する。
-            // `RPC_E_CHANGED_MODE` は既存 apartment を流用できるので uninit しない。
-            unsafe {
-                match CoInitializeEx(None, COINIT_APARTMENTTHREADED) {
-                    hr if hr.is_ok() => Ok(Self {
-                        should_uninit: true,
-                    }),
-                    hr if hr == RPC_E_CHANGED_MODE => Ok(Self {
-                        should_uninit: false,
-                    }),
-                    hr => Err(WinError::from(hr).into()),
-                }
-            }
-        }
-    }
-
-    impl Drop for ComApartment {
-        fn drop(&mut self) {
-            if self.should_uninit {
-                // SAFETY: `should_uninit=true` はこの型が `CoInitializeEx` 成功を記録した場合だけ。
-                unsafe { CoUninitialize() };
-            }
-        }
     }
 
     #[implement(IDataObject)]

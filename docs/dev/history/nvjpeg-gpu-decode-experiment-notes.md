@@ -244,11 +244,8 @@ GPU 実験は技術的には成立したが、製品全体の価値と保守コ�
 公開版は CPU-only の画像 decode 構成を維持している。
 
 ```text
-汎用 JPEG decode:
-  zune-jpeg
-
-Viewer / Thumbnail の縮小 JPEG decode:
-  mozjpeg DCT scaling
+公開版のJPEG decode:
+  TurboJPEG / libjpeg-turbo（RGBA8直接出力、1/1・1/2・1/4・1/8 DCT scaling）
 
 GPU thumbnail service:
   なし

@@ -1,3 +1,5 @@
+#[cfg(windows)]
+pub(crate) mod com;
 pub mod windows_drag;
 
 #[cfg(windows)]

@@ -65,7 +65,7 @@ pub struct ViewerRequest {
     pub page_left: Option<u32>,
     /// 右ページ（見開き右）。None = なし
     pub page_right: Option<u32>,
-    /// 表示幅（px）。mozjpeg DCT スケール選択に使用。0 = スケーリングなし
+    /// 表示幅（px）。TurboJPEG DCT スケール選択に使用。0 = スケーリングなし
     pub display_w: u32,
     /// 表示高さ（px）。縦長ページの target 推定に使用。0 = 高さ制約なし
     pub display_h: u32,

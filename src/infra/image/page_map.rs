@@ -227,17 +227,14 @@ pub fn probe_png_metadata(data: &[u8]) -> Result<MetadataProbeResult> {
 }
 
 pub fn read_jpeg_metadata(data: &[u8]) -> Result<(PageImageFormat, u32, u32)> {
-    let mut probe = JpegMetadataProbe::new();
-    match probe.feed(data)? {
-        MetadataProbeResult::Done {
-            format,
-            width,
-            height,
-            ..
-        } => Ok((format, width, height)),
-        MetadataProbeResult::NeedMore => anyhow::bail!("JPEG header too short"),
-        MetadataProbeResult::Invalid => anyhow::bail!("invalid JPEG header"),
+    let header =
+        turbojpeg::read_header(data).map_err(|e| anyhow::anyhow!("TurboJPEG header: {e}"))?;
+    let width = u32::try_from(header.width).context("JPEG width exceeds u32")?;
+    let height = u32::try_from(header.height).context("JPEG height exceeds u32")?;
+    if width == 0 || height == 0 {
+        anyhow::bail!("invalid JPEG dimensions");
     }
+    Ok((PageImageFormat::Jpeg, width, height))
 }
 
 pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, u32)>> {
@@ -251,6 +248,9 @@ pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, 
         Some(format) => format,
         None => return Ok(None),
     };
+    if format == PageImageFormat::Jpeg {
+        return Ok(Some(read_jpeg_metadata(data)?));
+    }
     let (width, height) = reader.into_dimensions().context("image dimensions")?;
     Ok(Some((format, width, height)))
 }

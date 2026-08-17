@@ -19,6 +19,8 @@
 
 ### Changed
 
+- Switched JPEG decoding to the TurboJPEG backend with direct RGBA output, unified thumbnail and Viewer JPEG decoding, and a Windows WIC fallback for CMYK/YCCK JPEGs.
+- Cleaned up the obsolete JPEG/native dependency paths and related native build configuration.
 - Expanded the Library thumbnail display range to 120–660 px in 20 px steps, added persistent Ctrl+Wheel resizing, and distributed extra row width evenly across both side margins and inter-column gaps while preserving the existing minimum gap and virtual-grid column positions.
 - Increased normal Library thumbnail generation and storage width from 320 px to 500 px, while keeping the display size independent from the cached thumbnail size.
 - Changed Library runtime previews for video, animated WebP, and static page scrubbing to decode at the current thumbnail display width instead of the fixed thumbnail storage width; preview results remain runtime-only and are not written to the thumbnail disk cache.

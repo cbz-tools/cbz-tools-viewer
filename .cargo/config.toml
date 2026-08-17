@@ -1,0 +1,5 @@
+[env]
+TURBOJPEG_SOURCE = { value = "vendor", force = true }
+TURBOJPEG_STATIC = { value = "1", force = true }
+TURBOJPEG_BINDING = { value = "pregenerated", force = true }
+CMAKE_TOOLCHAIN_FILE = { value = ".cargo/turbojpeg-msvc.cmake", relative = true, force = true }
