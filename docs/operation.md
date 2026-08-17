@@ -57,7 +57,7 @@ In the Library, right-click a book (or selected books) and choose External Tools
 
 The Web Search tab selects one browser (Chrome, Edge, or Firefox), one open mode (Tab or New Window), and up to five search destinations. Each destination has Display and Link fields; both must be non-empty, and Link must contain `%s`, which is replaced with the URL-encoded selected token. Incomplete destinations are not shown in the token menu. If there are no valid destinations, the Filter, Copy, and Clear Filter items remain available.
 
-The configured destinations are available from the shared filename-token menu in both Library and Viewer. Select a filename token, then choose `Search ... with ...` for the desired destination. The same menu is available in Library, Library-connected Viewer, Standalone Viewer, and Detached Viewer; Web Search does not require IPC. Token selection keeps the menu open so Filter, Copy, or Web Search can be chosen without reopening it. Choosing a destination builds a URL and starts the selected external browser with the selected Tab/New Window mode, then closes the menu. The app only starts that external browser process; it does not make HTTP requests or display search results itself. Only `http://` and `https://` links are executed. If the selected browser is unavailable, the app safely leaves the search unopened.
+The configured destinations are available from the shared filename-token menu in both Library and Viewer. Select a filename token, then open the token-containing `Web Search` submenu and choose the desired destination. The same menu is available in Library, Library-connected Viewer, Standalone Viewer, and Detached Viewer; Web Search does not require IPC. Token selection keeps the menu open so Filter, Copy, or Web Search can be chosen without reopening it. Choosing a destination builds a URL and starts the selected external browser with the selected Tab/New Window mode, then closes the menu. The app only starts that external browser process; it does not make HTTP requests or display search results itself. Only `http://` and `https://` links are executed. If the selected browser is unavailable, the app safely leaves the search unopened.
 
 ### Performance
 
@@ -172,7 +172,7 @@ The selected book file or folder is deleted, and related thumbnails, Page Map, f
 
 Some items are hidden or disabled when multiple items are selected.
 
-For a single Archive, the shared filename-token menu provides Filter by token, Clear Filter, Copy token, and the configured Web Search destinations. Token selection keeps the menu open; choosing Filter, Clear Filter, Copy, or Web Search executes it and closes the menu. Library Clear Filter clears the keyword filter and marks the existing filter for refresh.
+For a single Archive, the shared filename-token menu provides Filter by token, Clear Filter, Copy token, and a `Web Search` submenu containing the configured destinations. Token selection keeps the menu open; choosing Filter, Clear Filter, Copy, or a Web Search destination executes it and closes the menu. Library Clear Filter clears the keyword filter and marks the existing filter for refresh.
 
 ---
 

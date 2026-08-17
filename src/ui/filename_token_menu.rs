@@ -153,29 +153,38 @@ pub(crate) fn show_filename_token_menu_frame(
         ui.close();
     }
 
-    for search in web_searches {
-        let search_label = tr(language, TextKey::WebSearchToken)
-            .replacen("{}", selected_text, 1)
-            .replacen("{}", &search.display, 1);
-        let search_row = ContextMenuRowSpec {
-            label: &search_label,
-            shortcut: "",
-            enabled: can_apply,
-            icon: None,
-            label_color: if can_apply {
-                theme::TEXT_MAIN
-            } else {
-                theme::TEXT_DISABLED
-            },
-            shortcut_color: theme::TEXT_SUBTLE,
-            icon_color: theme::TEXT_MAIN,
-        };
-        if draw_context_menu_row(ui, &search_row) {
-            ui.close();
+    if !web_searches.is_empty() {
+        let mut web_search = None;
+        let web_search_label =
+            tr(language, TextKey::WebSearchToken).replacen("{}", selected_text, 1);
+        ui.menu_button(&web_search_label, |ui| {
+            ui.set_min_width(200.0);
+            ui.set_max_width(200.0);
+            for search in web_searches {
+                let search_row = ContextMenuRowSpec {
+                    label: &search.display,
+                    shortcut: "",
+                    enabled: can_apply,
+                    icon: None,
+                    label_color: if can_apply {
+                        theme::TEXT_MAIN
+                    } else {
+                        theme::TEXT_DISABLED
+                    },
+                    shortcut_color: theme::TEXT_SUBTLE,
+                    icon_color: theme::TEXT_MAIN,
+                };
+                if draw_context_menu_row(ui, &search_row) {
+                    web_search = Some((search.search_index, selected_text.clone()));
+                    ui.close();
+                }
+            }
+        });
+        if let Some(web_search) = web_search {
             return FilenameTokenMenuResult {
                 filter_token: None,
                 clear_filter: false,
-                web_search: Some((search.search_index, selected_text.clone())),
+                web_search: Some(web_search),
                 rendered: true,
             };
         }

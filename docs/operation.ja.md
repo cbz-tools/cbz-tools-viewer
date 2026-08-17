@@ -57,7 +57,7 @@ Libraryでは本（または選択した本）を右クリックし、外部ツ�
 
 WEB検索タブでは、使用するブラウザ（Chrome / Edge / Firefox）と開き方（Tab / New Window）を選択し、最大5件の検索先を登録できます。各検索先には Display と Link を設定します。Display と Link は両方とも空でない必要があり、Link には `%s` を含めます。`%s` は選択した token をURLエンコードした文字列へ置換します。不完全な検索先はtokenメニューに表示されません。有効な検索先が0件でも、フィルタリング、コピー、フィルタリングをクリアは引き続き利用できます。
 
-登録した検索先は、Library と Viewer の共通 filename token メニューから利用できます。filename tokenを選択してから、目的の検索先の `XXXを「検索先」で検索` を選びます。Library、Library連携Viewer、Standalone Viewer、Detached Viewerのいずれでも利用でき、WEB検索にIPCは不要です。tokenを選択しただけではメニューが開いたままなので、再度右クリックせずにフィルタリング、コピー、WEB検索を続けて実行できます。検索先を選ぶとURLを生成し、指定したTab / New Windowで選択ブラウザを起動した後、メニューを閉じます。CBZ Viewer自身はHTTP通信や検索結果の表示を行わず、外部ブラウザプロセスを起動するだけです。実行されるLinkは `http://` または `https://` のみです。選択ブラウザが利用できない場合もクラッシュせず、検索は開かれません。
+登録した検索先は、Library と Viewer の共通 filename token メニューから利用できます。filename tokenを選択してから、そのtokenを含む「WEB検索」submenuを開き、目的の検索先を選びます。Library、Library連携Viewer、Standalone Viewer、Detached Viewerのいずれでも利用でき、WEB検索にIPCは不要です。tokenを選択しただけではメニューが開いたままなので、再度右クリックせずにフィルタリング、コピー、WEB検索を続けて実行できます。検索先を選ぶとURLを生成し、指定したTab / New Windowで選択ブラウザを起動した後、メニューを閉じます。CBZ Viewer自身はHTTP通信や検索結果の表示を行わず、外部ブラウザプロセスを起動するだけです。実行されるLinkは `http://` または `https://` のみです。選択ブラウザが利用できない場合もクラッシュせず、検索は開かれません。
 
 ### Performance
 
@@ -172,7 +172,7 @@ FolderBook では `フォルダへ移動` も表示されます。
 
 複数選択時は一部の項目が表示されないか、無効になります。
 
-Archiveを1件選択した場合は、共通filename tokenメニューからtokenでフィルタリング、フィルタリングをクリア、コピー、登録したWEB検索先を実行できます。tokenを選択しただけではメニューは閉じず、フィルタリング、フィルタリングをクリア、コピー、WEB検索を実行すると閉じます。Libraryの「フィルタリングをクリア」はキーワードを空にし、既存のフィルタを更新対象としてdirtyにします。
+Archiveを1件選択した場合は、共通filename tokenメニューからtokenでフィルタリング、フィルタリングをクリア、コピー、登録したWEB検索先を実行できます。WEB検索先は「WEB検索」submenu内に表示されます。tokenを選択しただけではメニューは閉じず、フィルタリング、フィルタリングをクリア、コピー、WEB検索を実行すると閉じます。Libraryの「フィルタリングをクリア」はキーワードを空にし、既存のフィルタを更新対象としてdirtyにします。
 
 ---
 
