@@ -149,12 +149,18 @@ ZipPla に限らず、多くの既存ビューアの優れた機能やユーザ�
 
 ---
 
-# ライセンス
+# 変更履歴
 
-This project is licensed under the MIT License.
+[CHANGELOG.md](CHANGELOG.md) を参照してください。
 
-See the LICENSE file for details.
+---
 
-Third-party components are documented in THIRDPARTY_LICENSES.md.
+## サードパーティライセンス
 
-Demo manga assets are also licensed under the MIT License.
+[THIRDPARTY_LICENSES.md](THIRDPARTY_LICENSES.md) を参照してください。
+
+---
+
+## ライセンス
+
+MIT — [LICENSE](LICENSE) を参照してください。

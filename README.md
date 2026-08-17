@@ -149,12 +149,18 @@ My thanks go to everyone who has released excellent software.
 
 ---
 
-# License
+# Changelog
 
-This project is licensed under the MIT License.
+See [CHANGELOG.md](CHANGELOG.md).
 
-See the LICENSE file for details.
+---
 
-Third-party components are documented in THIRDPARTY_LICENSES.md.
+## Third-Party Licenses
 
-Demo manga assets are also licensed under the MIT License.
+See [THIRDPARTY_LICENSES.md](THIRDPARTY_LICENSES.md).
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
