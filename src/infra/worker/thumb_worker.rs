@@ -3288,7 +3288,7 @@ impl ThumbnailLaneState {
             .unwrap_or_else(|error| error.into_inner());
         let base_goal = state.base_goal;
         let global_goal = match medium {
-            StorageMedium::Hdd => base_goal.max(1) / 2,
+            StorageMedium::Hdd => base_goal.min(2),
             StorageMedium::Ssd | StorageMedium::Unknown => base_goal,
         }
         .max(1);

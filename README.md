@@ -36,11 +36,13 @@ The demo manga assets are also licensed under the MIT License.
 
 # Highlights
 
-* Organize books as you read. Delete unwanted books, exclude unnecessary pages, and optimize compression through integration with external tools.
-* Predictive loading and caching help keep page turns responsive, even in large books.
-* Adjacent book preloading prepares nearby pages from the next and previous books in the background, reducing the delay when moving between books.
-* Animated WebP streaming playback, including spread view.
-* In the Library, thumbnails, automatic previews, and scrubbing are available depending on the item type. The support matrix is shown below.
+* Predictive loading and caching help reduce page-turn latency, even in large books. Pages from the next and previous books are also prepared in the background to reduce delays when moving between books.
+* In the Viewer, you can move between adjacent books while deleting unwanted books, and remove unwanted page ranges by rebuilding the archive.
+* Animated WebP streaming playback is supported, including spread view.
+* Filename tokens can be used from both the Library and Viewer for filtering, copying, and web searches.
+* The Library provides collection management features such as search, favorites, groups, rename, and delete.
+* Registered external tools can be launched from both the Library and Viewer. With the companion project [**CBZ Tools Optimizer**](https://github.com/cbz-tools/cbz-tools-optimizer), archives can be optimized, converted, and reduced in size.
+* The Library supports automatic previews and scrubbing. Availability is shown in the table below.
 
 | Library item | Thumbnail | Auto preview | Scrub |
 | --- | --- | --- | --- |

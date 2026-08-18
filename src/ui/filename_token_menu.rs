@@ -157,7 +157,7 @@ pub(crate) fn show_filename_token_menu_frame(
         let mut web_search = None;
         let web_search_label =
             tr(language, TextKey::WebSearchToken).replacen("{}", selected_text, 1);
-        ui.menu_button(&web_search_label, |ui| {
+        draw_context_menu_submenu_button(ui, &web_search_label, |ui| {
             ui.set_min_width(200.0);
             ui.set_max_width(200.0);
             for search in web_searches {
@@ -219,6 +219,24 @@ pub(crate) fn show_filename_token_menu_frame(
         web_search: None,
         rendered: true,
     }
+}
+
+fn draw_context_menu_submenu_button<R>(
+    ui: &mut egui::Ui,
+    label: &str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) {
+    let width = ui.available_width().max(1.0);
+    let height = ui.spacing().interact_size.y;
+    let old_button_padding = ui.spacing().button_padding;
+    ui.spacing_mut().button_padding.x = CONTEXT_MENU_ROW_PADDING_X;
+    let _ = egui::menu::SubMenuButton::from_button(
+        egui::Button::new(label)
+            .right_text(egui::menu::SubMenuButton::RIGHT_ARROW)
+            .min_size(egui::vec2(width, height)),
+    )
+    .ui(ui, add_contents);
+    ui.spacing_mut().button_padding = old_button_padding;
 }
 
 const CONTEXT_MENU_ROW_CORNER_RADIUS: f32 = 3.0;

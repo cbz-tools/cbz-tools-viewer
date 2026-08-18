@@ -34,6 +34,8 @@
 - Removed the unused direct development dependency on `tempfile` and made the required `windows-sys` `Win32_Security` feature explicit.
 - Changed External Tools settings to show all three slots in place, with empty slots omitted from launch surfaces.
 - Expanded the operation guides with filename-token, Web Search, and fixed-slot External Tools setup details.
+- Reorganized and updated the README Highlights to consolidate the current feature descriptions.
+- Changed the HDD global thumbnail generation goal to use `base_goal.min(2)`.
 
 ### Fixed
 
@@ -57,3 +59,4 @@
 - Added current image file names to the Viewer toolbar.
 - Added a Library entry Properties dialog for archives, folder books, and image files, showing the file name, full path, kind, size, modified time, and archive page count when available.
 - Stabilized the Library entry Properties dialog layout with fixed value/copy columns, three-line name/path display, full-text copy buttons, and a centered close button.
+- Fixed Web Search and External Tools submenu rows so their left edges align with the surrounding context-menu rows.
