@@ -252,7 +252,6 @@ fn apply_toolbar_state_actions(
 fn apply_external_tool_toolbar_actions(
     state: &ViewerState,
     toolbar_events: &mut ToolbarEvents,
-    external_tool_state: &ExternalToolToolbarState,
     action: &mut ViewerAction,
 ) {
     if let Some(tool_index) = toolbar_events.external_tool_click {
@@ -261,34 +260,18 @@ fn apply_external_tool_toolbar_actions(
             tool_index,
             state.persistent.entry.path.display()
         );
-        if matches!(
-            external_tool_state,
-            ExternalToolToolbarState::Running { .. }
-        ) {
-            log::warn!(
-                "[external-tool] toolbar ignored busy before enqueue tool_index={}",
-                tool_index
-            );
-        } else {
-            *action = ViewerAction::RunExternalTool {
-                tool_index,
-                target_path: state.persistent.entry.path.as_ref().to_path_buf(),
-                trigger: ExternalToolTrigger::Toolbar,
-            };
-        }
+        *action = ViewerAction::RunExternalTool {
+            tool_index,
+            target_path: state.persistent.entry.path.as_ref().to_path_buf(),
+            trigger: ExternalToolTrigger::Toolbar,
+        };
     }
     if let Some((tool_index, key, target_path)) = toolbar_events.external_tool_shortcut.take() {
-        if matches!(
-            external_tool_state,
-            ExternalToolToolbarState::Running { .. }
-        ) {
-        } else {
-            *action = ViewerAction::RunExternalTool {
-                tool_index,
-                target_path,
-                trigger: ExternalToolTrigger::Shortcut { key },
-            };
-        }
+        *action = ViewerAction::RunExternalTool {
+            tool_index,
+            target_path,
+            trigger: ExternalToolTrigger::Shortcut { key },
+        };
     }
 }
 
@@ -443,6 +426,7 @@ pub struct ViewerShowContext<'a> {
     pub is_fullscreen: bool,
     pub external_tools: &'a [ExternalToolButtonModel],
     pub external_tool_state: &'a ExternalToolToolbarState,
+    pub external_tool_active_counts: &'a [usize],
     pub global_quality: ViewerQuality,
     pub capabilities: ViewerUiCapabilities,
     pub filter_token_enabled: bool,
@@ -746,6 +730,7 @@ pub fn show(
         is_fullscreen,
         external_tools,
         external_tool_state,
+        external_tool_active_counts,
         global_quality,
         capabilities,
         filter_token_enabled,
@@ -797,6 +782,7 @@ pub fn show(
                 interaction_blocked,
                 external_tools,
                 external_tool_state,
+                external_tool_active_counts,
                 global_quality,
                 capabilities,
             },
@@ -974,7 +960,6 @@ pub fn show(
         &ctx,
         state,
         external_tools,
-        external_tool_state,
         ViewerInputParams {
             interaction_blocked,
             in_viewport_transition,
@@ -1210,6 +1195,7 @@ pub fn show(
                 interaction_blocked,
                 external_tools,
                 external_tool_state,
+                external_tool_active_counts,
                 global_quality,
                 capabilities,
             },
@@ -1310,12 +1296,7 @@ pub fn show(
         state.stop_slideshow();
         action = ViewerAction::ToggleFullscreen;
     }
-    apply_external_tool_toolbar_actions(
-        state,
-        &mut toolbar_events,
-        external_tool_state,
-        &mut action,
-    );
+    apply_external_tool_toolbar_actions(state, &mut toolbar_events, &mut action);
 
     if !in_viewport_transition {
         let _ = state.maybe_request_animation_stream_fill(display_w, display_h, max_tex_side);
@@ -1349,7 +1330,6 @@ fn handle_keyboard_and_wheel_input(
     ctx: &egui::Context,
     state: &mut ViewerState,
     external_tools: &[ExternalToolButtonModel],
-    external_tool_state: &ExternalToolToolbarState,
     params: ViewerInputParams,
     toolbar_events: &mut ToolbarEvents,
 ) -> (bool, ViewerAction) {
@@ -1404,17 +1384,6 @@ fn handle_keyboard_and_wheel_input(
                         tool.name,
                         state.persistent.entry.path.display()
                     );
-                    if matches!(
-                        external_tool_state,
-                        ExternalToolToolbarState::Running { .. }
-                    ) {
-                        log::warn!(
-                            "[external-tool] shortcut ignored busy before enqueue key={} tool={}",
-                            tool.shortcut,
-                            tool.name
-                        );
-                        break;
-                    }
                     toolbar_events.external_tool_shortcut = Some((
                         tool.tool_index,
                         tool.shortcut,

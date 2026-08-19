@@ -616,6 +616,7 @@ pub(super) fn draw_fullscreen_overlay(
         interaction_blocked,
         external_tools,
         external_tool_state,
+        external_tool_active_counts,
         global_quality,
         capabilities,
     } = overlay;
@@ -669,6 +670,7 @@ pub(super) fn draw_fullscreen_overlay(
                         interaction_blocked,
                         external_tools,
                         external_tool_state,
+                        external_tool_active_counts,
                         global_quality,
                         capabilities,
                     },
@@ -1348,6 +1350,7 @@ pub(super) struct FullscreenOverlayContext<'a> {
     pub(super) interaction_blocked: bool,
     pub(super) external_tools: &'a [ExternalToolButtonModel],
     pub(super) external_tool_state: &'a ExternalToolToolbarState,
+    pub(super) external_tool_active_counts: &'a [usize],
     pub(super) global_quality: crate::domain::app_settings::ViewerQuality,
     pub(super) capabilities: ViewerUiCapabilities,
 }

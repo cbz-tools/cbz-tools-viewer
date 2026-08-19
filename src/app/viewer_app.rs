@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -69,6 +70,7 @@ pub struct ViewerApp {
     map_make_skip: bool,
     external_tool_worker: ExternalToolWorker,
     external_tool_running: Option<ExternalToolRunning>,
+    external_tool_queue: VecDeque<ExternalToolReservation>,
     external_tool_ui_state: ExternalToolUiState,
     external_tool_next_request_id: u64,
     boundary_preview_disk_cache: Option<DiskCache>,
@@ -153,6 +155,11 @@ struct ExternalToolRunning {
     request_id: u64,
     tool_index: usize,
     path: std::path::PathBuf,
+}
+
+struct ExternalToolReservation {
+    request: ExternalToolRunRequest,
+    trigger: ExternalToolTrigger,
 }
 
 enum ExternalToolUiState {
@@ -658,6 +665,7 @@ impl ViewerApp {
             map_make_skip: launch.map_make_skip,
             external_tool_worker: ExternalToolWorker::spawn(),
             external_tool_running: None,
+            external_tool_queue: VecDeque::new(),
             external_tool_ui_state: ExternalToolUiState::Idle,
             external_tool_next_request_id: 1,
             boundary_preview_disk_cache: Self::open_boundary_preview_disk_cache(),
@@ -1968,11 +1976,11 @@ impl ViewerApp {
         &mut self,
         tool_index: usize,
         target_path: std::path::PathBuf,
-        _trigger: ExternalToolTrigger,
+        trigger: ExternalToolTrigger,
     ) {
-        if self.external_tool_running.is_some() {
+        if self.external_tool_request_exists(tool_index, &target_path) {
             tracing::warn!(
-                "[external-tool] request rejected busy tool_index={} path={}",
+                "[external-tool] request ignored duplicate tool_index={} path={}",
                 tool_index,
                 target_path.display()
             );
@@ -1983,29 +1991,93 @@ impl ViewerApp {
         };
         let request_id = self.external_tool_next_request_id;
         self.external_tool_next_request_id = self.external_tool_next_request_id.saturating_add(1);
-        let req = ExternalToolRunRequest {
-            request_id,
-            tool_index,
-            tool_name: tool.name.clone(),
-            executable: normalize_external_tool_executable(&tool.executable),
-            args: tool.args,
-            background: tool.background,
-            target_path: target_path.clone(),
-            target_paths: vec![target_path.clone()],
-            accepted_at: Instant::now(),
+        let reservation = ExternalToolReservation {
+            request: ExternalToolRunRequest {
+                request_id,
+                tool_index,
+                tool_name: tool.name.clone(),
+                executable: normalize_external_tool_executable(&tool.executable),
+                args: tool.args,
+                background: tool.background,
+                target_path: target_path.clone(),
+                target_paths: vec![target_path.clone()],
+                accepted_at: Instant::now(),
+            },
+            trigger,
         };
-        if !self.external_tool_worker.request(req) {
-            return;
+        if self.external_tool_running.is_none() {
+            let _ = self.start_external_tool_reservation(reservation);
+        } else {
+            self.external_tool_queue.push_back(reservation);
+        }
+    }
+
+    fn external_tool_request_exists(&self, tool_index: usize, target_path: &Path) -> bool {
+        self.external_tool_running.as_ref().is_some_and(|running| {
+            running.tool_index == tool_index && running.path.as_path() == target_path
+        }) || self.external_tool_queue.iter().any(|reservation| {
+            reservation.request.tool_index == tool_index
+                && reservation.request.target_path.as_path() == target_path
+        })
+    }
+
+    fn external_tool_active_counts(&self) -> Vec<usize> {
+        let mut counts = vec![0; self.app_settings.external_tools.len()];
+        if let Some(running) = &self.external_tool_running {
+            if let Some(count) = counts.get_mut(running.tool_index) {
+                *count += 1;
+            }
+        }
+        for reservation in &self.external_tool_queue {
+            if let Some(count) = counts.get_mut(reservation.request.tool_index) {
+                *count += 1;
+            }
+        }
+        counts
+    }
+
+    fn start_external_tool_reservation(&mut self, reservation: ExternalToolReservation) -> bool {
+        debug_assert!(self.external_tool_running.is_none());
+        let trigger = match reservation.trigger {
+            ExternalToolTrigger::Toolbar => "toolbar",
+            ExternalToolTrigger::Shortcut { .. } => "shortcut",
+        };
+        if !self
+            .external_tool_worker
+            .request(reservation.request.clone())
+        {
+            tracing::error!(
+                request_id = reservation.request.request_id,
+                tool_index = reservation.request.tool_index,
+                trigger,
+                "[external-tool] worker unavailable; reservation dropped"
+            );
+            return false;
         }
         self.external_tool_running = Some(ExternalToolRunning {
-            request_id,
-            tool_index,
-            path: target_path.clone(),
+            request_id: reservation.request.request_id,
+            tool_index: reservation.request.tool_index,
+            path: reservation.request.target_path.clone(),
         });
         self.external_tool_ui_state = ExternalToolUiState::Running {
-            tool_index,
-            path: target_path,
+            tool_index: reservation.request.tool_index,
+            path: reservation.request.target_path.clone(),
         };
+        tracing::debug!(
+            request_id = reservation.request.request_id,
+            tool_index = reservation.request.tool_index,
+            trigger,
+            "[external-tool] request started"
+        );
+        true
+    }
+
+    fn start_next_external_tool_reservation(&mut self) {
+        while let Some(next) = self.external_tool_queue.pop_front() {
+            if self.start_external_tool_reservation(next) {
+                return;
+            }
+        }
     }
 
     fn poll_external_tool_results(&mut self, ctx: &egui::Context) {
@@ -2042,6 +2114,7 @@ impl ViewerApp {
                 path: result.target_path,
             };
         }
+        self.start_next_external_tool_reservation();
     }
 
     fn tick_external_tool_ui_state(&mut self) {
@@ -2284,6 +2357,7 @@ impl eframe::App for ViewerApp {
         let allow_page_range_delete = self.allow_page_range_delete();
         let external_tools = self.external_tool_button_models();
         let external_tool_state = self.external_tool_toolbar_state_for_ui();
+        let external_tool_active_counts = self.external_tool_active_counts();
         let web_searches = crate::infra::web_search::menu_items(&self.app_settings.web_searches);
 
         let panel = if self.is_fullscreen {
@@ -2308,6 +2382,7 @@ impl eframe::App for ViewerApp {
                         is_fullscreen: self.is_fullscreen,
                         external_tools: &external_tools,
                         external_tool_state: &external_tool_state,
+                        external_tool_active_counts: &external_tool_active_counts,
                         global_quality: self.app_settings.viewer_quality,
                         capabilities,
                         filter_token_enabled,

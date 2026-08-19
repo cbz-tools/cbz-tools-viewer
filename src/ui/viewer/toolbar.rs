@@ -23,6 +23,7 @@ pub(super) struct ViewerToolbarContext<'a> {
     pub(super) interaction_blocked: bool,
     pub(super) external_tools: &'a [ExternalToolButtonModel],
     pub(super) external_tool_state: &'a ExternalToolToolbarState,
+    pub(super) external_tool_active_counts: &'a [usize],
     pub(super) global_quality: ViewerQuality,
     pub(super) capabilities: ViewerUiCapabilities,
 }
@@ -150,6 +151,7 @@ pub(super) fn render_viewer_toolbar(
         interaction_blocked,
         external_tools,
         external_tool_state,
+        external_tool_active_counts,
         global_quality,
         capabilities,
     } = toolbar;
@@ -436,11 +438,7 @@ pub(super) fn render_viewer_toolbar(
 
         if !external_tools.is_empty() {
             ui.separator();
-            let all_disabled = interaction_blocked
-                || matches!(
-                    external_tool_state,
-                    ExternalToolToolbarState::Running { .. }
-                );
+            let all_disabled = interaction_blocked;
             if let ExternalToolToolbarState::Running {
                 tool_index, path, ..
             } = external_tool_state
@@ -448,32 +446,44 @@ pub(super) fn render_viewer_toolbar(
                 let _ = (tool_index, path);
             }
             for tool in external_tools {
-                let mut button_state = theme::ExternalToolButtonState::Idle;
-                match external_tool_state {
-                    ExternalToolToolbarState::Success { tool_index, path }
-                        if *tool_index == tool.tool_index
-                            && path.as_path() == current_book_path =>
-                    {
-                        button_state = theme::ExternalToolButtonState::Success;
+                let active_count = external_tool_active_counts
+                    .get(tool.tool_index)
+                    .copied()
+                    .unwrap_or(0);
+                let button_state = if active_count >= 2 {
+                    theme::ExternalToolButtonState::Running
+                } else {
+                    match external_tool_state {
+                        ExternalToolToolbarState::Success { tool_index, path }
+                            if *tool_index == tool.tool_index
+                                && path.as_path() == current_book_path =>
+                        {
+                            theme::ExternalToolButtonState::Success
+                        }
+                        ExternalToolToolbarState::Failed { tool_index, path }
+                            if *tool_index == tool.tool_index
+                                && path.as_path() == current_book_path =>
+                        {
+                            theme::ExternalToolButtonState::Failed
+                        }
+                        ExternalToolToolbarState::Running { .. } => {
+                            theme::ExternalToolButtonState::Running
+                        }
+                        _ => theme::ExternalToolButtonState::Idle,
                     }
-                    ExternalToolToolbarState::Failed { tool_index, path }
-                        if *tool_index == tool.tool_index
-                            && path.as_path() == current_book_path =>
-                    {
-                        button_state = theme::ExternalToolButtonState::Failed;
-                    }
-                    ExternalToolToolbarState::Running { .. } => {
-                        button_state = theme::ExternalToolButtonState::Running;
-                    }
-                    _ => {}
-                }
+                };
+                let label = match active_count {
+                    0 | 1 => tool.shortcut.to_string(),
+                    2..=9 => active_count.to_string(),
+                    _ => "9+".to_owned(),
+                };
                 let fill = theme::external_tool_button_bg(button_state);
                 let resp = ui
                     .add_enabled_ui(!all_disabled, |ui| {
                         ui.add_sized(
                             VIEWER_TOOLBAR_ICON_BUTTON_SIZE,
                             egui::Button::new(
-                                egui::RichText::new(tool.shortcut.to_string())
+                                egui::RichText::new(label)
                                     .size(theme::FONT_SIZE_BODY)
                                     .color(theme::TEXT_MAIN),
                             )
