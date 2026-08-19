@@ -19,6 +19,8 @@
 
 ### Changed
 
+- Changed Viewer External Tools to queue requests for other books while a tool is running, process them in order, and show the request count on tool buttons.
+- Changed the guaranteed adjacent-book/SPAD preload start from the 30% L2 usage/Page Map retention gate to 500 ms after the current book's first display commit; rapid page navigation does not reset the timer, and additional preloading still waits for L2 to settle.
 - Changed the Windows release to use a single `cbz-viewer.exe` launcher that embeds the viewer core, dav1d, and FFmpeg runtime DLLs and extracts validated runtime files to a versioned user-local directory when needed.
 - Switched JPEG decoding to the TurboJPEG backend with direct RGBA output, unified thumbnail and Viewer JPEG decoding, and a Windows WIC fallback for CMYK/YCCK JPEGs.
 - Cleaned up the obsolete JPEG/native dependency paths and related native build configuration.
