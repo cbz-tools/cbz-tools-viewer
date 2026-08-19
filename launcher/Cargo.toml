@@ -1,0 +1,18 @@
+[package]
+name = "cbz-viewer-launcher"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+rust-version.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "cbz-viewer"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
+
+[build-dependencies]
+sha2 = "0.10"

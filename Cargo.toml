@@ -1,13 +1,25 @@
 [package]
 name = "cbz-viewer"
-version = "0.4.6"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+description.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cbz-viewer-core"
+path = "src/main.rs"
+
+[workspace]
+members = ["launcher"]
+resolver = "3"
+
+[workspace.package]
+version = "0.4.7"
 edition = "2024"
 authors = []
 description = "High-performance CBZ/ZIP/RAR manga viewer"
 rust-version = "1.97"
-
-[workspace]
-resolver = "3"
 
 # §10 最適化：release ビルドでバイナリサイズ削減・速度向上
 [profile.release]

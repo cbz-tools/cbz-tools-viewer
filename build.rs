@@ -55,7 +55,7 @@ fn maybe_copy_dav1d_dll() {
             continue;
         }
 
-        let exe_dir_destination = Path::new("target").join(&profile).join("dav1d.dll");
+        let exe_dir_destination = runtime_destination_dir(&profile).join("dav1d.dll");
 
         match copy_dll(&source, &exe_dir_destination) {
             Ok(_) => {
@@ -105,21 +105,7 @@ fn maybe_copy_ffmpeg_runtime_dlls() {
     // `--target-dir`; walking from `.../<profile>/build/<pkg>/out` keeps the
     // runtime beside the executable in both the default and custom target
     // directories.
-    let destination_dir = env::var_os("OUT_DIR")
-        .map(PathBuf::from)
-        .and_then(|out_dir| {
-            out_dir
-                .parent()
-                .and_then(Path::parent)
-                .and_then(Path::parent)
-                .map(Path::to_path_buf)
-        })
-        .unwrap_or_else(|| {
-            let target_dir = env::var_os("CARGO_TARGET_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("target"));
-            target_dir.join(profile)
-        });
+    let destination_dir = runtime_destination_dir(&profile);
     // ff-sys still requires avfilter.lib at link time, but the release
     // executable does not import avfilter-*.dll. The runtime closure is:
     // avformat -> avcodec -> swresample, with avutil and swscale also
@@ -234,6 +220,24 @@ fn maybe_copy_ffmpeg_runtime_dlls() {
             )
         });
     }
+}
+
+fn runtime_destination_dir(profile: &str) -> PathBuf {
+    env::var_os("OUT_DIR")
+        .map(PathBuf::from)
+        .and_then(|out_dir| {
+            out_dir
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::parent)
+                .map(Path::to_path_buf)
+        })
+        .unwrap_or_else(|| {
+            let target_dir = env::var_os("CARGO_TARGET_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("target"));
+            target_dir.join(profile)
+        })
 }
 
 fn candidate_dav1d_dll_paths() -> Vec<PathBuf> {

@@ -6,7 +6,9 @@ CBZ Viewer is a Windows comic book viewer. It opens CBZ, ZIP, RAR, CBR, and EPUB
 
 Selecting a video file opens it with the associated Windows application. CBZ Viewer does not play video.
 
-The executable is `cbz-viewer.exe`.
+The package contains the single executable `cbz-viewer.exe`. It is a small
+launcher; on first run it validates and extracts the viewer core and its
+runtime files into a versioned directory under `%LOCALAPPDATA%\cbz-viewer`.
 
 ---
 
@@ -14,7 +16,8 @@ The executable is `cbz-viewer.exe`.
 
 Download the latest release from [Latest Release](https://github.com/cbz-tools/cbz-tools-viewer/releases/latest).
 
-Extract the ZIP and run `cbz-viewer.exe` directly. No installation is required.
+Extract the ZIP and run `cbz-viewer.exe` directly. No installation is required;
+the launcher keeps the packaged runtime in the current user's local app data.
 
 ---
 

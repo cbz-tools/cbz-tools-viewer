@@ -6,7 +6,9 @@ CBZ Viewer は、Windows 向けの漫画ビューアです。CBZ / ZIP / RAR / C
 
 動画ファイルを選択すると、Windows の関連付けアプリで開きます。CBZ Viewer 自体に動画再生機能はありません。
 
-実行ファイルは `cbz-viewer.exe` です。
+パッケージの実行ファイルは `cbz-viewer.exe` だけです。これは小さな
+ランチャーで、初回起動時にビューア本体とランタイムを `%LOCALAPPDATA%\cbz-viewer`
+配下のバージョン別ディレクトリへ検証・展開します。
 
 ---
 
@@ -14,7 +16,8 @@ CBZ Viewer は、Windows 向けの漫画ビューアです。CBZ / ZIP / RAR / C
 
 最新版は [Latest Release](https://github.com/cbz-tools/cbz-tools-viewer/releases/latest) からダウンロードできます。
 
-ZIP を展開し、`cbz-viewer.exe` を直接実行してください。追加インストールは不要です。
+ZIP を展開し、`cbz-viewer.exe` を直接実行してください。追加インストールは不要で、
+パッケージのランタイムは現在のユーザーのローカルアプリデータに保持されます。
 
 ---
 

@@ -47,9 +47,15 @@ if (Test-Path $shaPath) {
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
 
 Copy-File (Join-Path $Workspace "target/release/cbz-viewer.exe") (Join-Path $stageDir "cbz-viewer.exe")
-Copy-File (Join-Path $Workspace "target/release/dav1d.dll") (Join-Path $stageDir "dav1d.dll")
 
 $runtimeDir = Join-Path $Workspace "target/release"
+$corePath = Join-Path $runtimeDir "cbz-viewer-core.exe"
+if (!(Test-Path -LiteralPath $corePath -PathType Leaf)) {
+  throw "The core executable used as the launcher's embedded input is missing: $corePath"
+}
+if (!(Test-Path -LiteralPath (Join-Path $runtimeDir "dav1d.dll") -PathType Leaf)) {
+  throw "The dav1d runtime used as the launcher's embedded input is missing"
+}
 $allowedFfmpegRegex = '^(avcodec|avformat|avutil|swresample|swscale)-\d+\.dll$'
 $ffmpegDlls = @(Get-ChildItem -LiteralPath $runtimeDir -File -ErrorAction SilentlyContinue |
   Where-Object { $_.Name -match '^(av|sw).+\.dll$' })
@@ -64,17 +70,12 @@ foreach ($component in @('avcodec', 'avformat', 'avutil', 'swresample', 'swscale
   if ($matches.Count -ne 1) {
     throw "Expected exactly one staged FFmpeg runtime DLL for $component, found $($matches.Count)"
   }
-  Copy-File $matches[0].FullName (Join-Path $stageDir $matches[0].Name)
 }
 
-$stagedFfmpegDlls = @(Get-ChildItem -LiteralPath $stageDir -File -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -match '^(av|sw).+\.dll$' })
-$unexpectedStagedFfmpegDlls = @($stagedFfmpegDlls | Where-Object { $_.Name -notmatch $allowedFfmpegRegex })
-if ($unexpectedStagedFfmpegDlls.Count -gt 0) {
-  throw "Unexpected FFmpeg runtime DLLs in package stage: $($unexpectedStagedFfmpegDlls.Name -join ', ')"
-}
-if ($stagedFfmpegDlls.Count -ne 5) {
-  throw "Expected exactly five FFmpeg runtime DLLs in package stage, found $($stagedFfmpegDlls.Count)"
+$rootDlls = @(Get-ChildItem -LiteralPath $stageDir -File -ErrorAction SilentlyContinue |
+  Where-Object { $_.Extension -ieq ".dll" })
+if ($rootDlls.Count -gt 0) {
+  throw "Runtime DLLs must remain embedded by the launcher and absent from the package root: $($rootDlls.Name -join ', ')"
 }
 
 Copy-File (Join-Path $Workspace "README.md") (Join-Path $stageDir "README.md")
@@ -86,6 +87,23 @@ Copy-File (Join-Path $ffmpegShareDir "copyright") (Join-Path $stageDir "third_pa
 Copy-File (Join-Path $ffmpegShareDir "vcpkg.spdx.json") (Join-Path $stageDir "third_party/ffmpeg/vcpkg.spdx.json")
 
 Compress-Archive -Path $stageDir -DestinationPath $zipPath
+
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+try {
+  $packageRoot = "$packageName/"
+  $rootDllEntries = @($archive.Entries | Where-Object {
+    $_.FullName.StartsWith($packageRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+      $_.FullName.Substring($packageRoot.Length) -notmatch '/' -and
+      $_.Name -match '\.dll$'
+  })
+  if ($rootDllEntries.Count -gt 0) {
+    throw "Release ZIP contains DLLs at its root: $($rootDllEntries.FullName -join ', ')"
+  }
+}
+finally {
+  $archive.Dispose()
+}
 
 $hash = Get-FileHash -Algorithm SHA256 -Path $zipPath
 "$($hash.Hash.ToLowerInvariant())  $($hash.Path | Split-Path -Leaf)" | Set-Content -Path $shaPath

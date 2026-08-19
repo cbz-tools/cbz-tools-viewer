@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Changed the Windows release to use a single `cbz-viewer.exe` launcher that embeds the viewer core, dav1d, and FFmpeg runtime DLLs and extracts validated runtime files to a versioned user-local directory when needed.
 - Switched JPEG decoding to the TurboJPEG backend with direct RGBA output, unified thumbnail and Viewer JPEG decoding, and a Windows WIC fallback for CMYK/YCCK JPEGs.
 - Cleaned up the obsolete JPEG/native dependency paths and related native build configuration.
 - Expanded the Library thumbnail display range to 120–660 px in 20 px steps, added persistent Ctrl+Wheel resizing, and distributed extra row width evenly across both side margins and inter-column gaps while preserving the existing minimum gap and virtual-grid column positions.

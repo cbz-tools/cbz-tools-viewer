@@ -104,8 +104,8 @@ POSSIBILITY OF SUCH DAMAGE.
 - Purpose: Runtime dependency for the AVIF decoding backend (`image/avif-native`)
 - License: BSD-2-Clause
 - Repository source: `third_party/dav1d/dav1d.dll`
-- Copy policy: `build.rs` automatically copies it to `target/<profile>/dav1d.dll` (next to the executable)
-- Load policy: Loaded next to the executable through the standard Windows DLL search
+- Copy policy: `build.rs` prepares it next to the core executable; the release launcher embeds it and extracts it into its versioned local runtime directory
+- Load policy: The core loads it next to the extracted core executable through the standard Windows DLL search
 - The distribution includes the original license text corresponding to `third_party/dav1d/LICENSE`
 
 ### License notes
@@ -116,7 +116,7 @@ POSSIBILITY OF SUCH DAMAGE.
 ## FFmpeg runtime DLLs
 
 - Purpose: Representative-frame extraction from VideoFile using `ff-decode`
-- Distribution method: `build.rs` copies the **dynamically linked** FFmpeg runtime DLLs from vcpkg `x64-windows` next to the executable
+- Distribution method: `build.rs` prepares the **dynamically linked** FFmpeg runtime DLLs from vcpkg `x64-windows`; the release launcher embeds the allowlisted runtime closure and extracts it next to the core executable
 - Build dependency: `ffmpeg:x64-windows` (FFmpeg 7/8-compatible `ff-sys` development libraries) and LLVM/libclang for bindgen
 - Build policy: GPL and nonfree FFmpeg features are not enabled
 - License: FFmpeg is used under an LGPL 2.1-or-later configuration. At distribution time, the applicable LGPL/source notices for the bundled DLLs and the notices for vcpkg dependency components are retained

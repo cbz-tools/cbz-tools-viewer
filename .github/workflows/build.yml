@@ -270,15 +270,24 @@ jobs:
             -VcpkgRoot $env:CBZ_VCPKG_ROOT `
             -OutputDir "target/package" `
             -Triplet "x64-windows"
-      - name: cargo build --release
+      - name: cargo build --release (core)
         shell: pwsh
         run: |
           $start = Get-Date
-          Write-Host "cargo build --release reached: start"
-          cargo build --release
-          Write-Host "cargo build --release reached: success"
+          Write-Host "cargo build --release --bin cbz-viewer-core reached: start"
+          cargo build --release --bin cbz-viewer-core
+          Write-Host "cargo build --release --bin cbz-viewer-core reached: success"
           $elapsed = (Get-Date) - $start
-          Write-Host ("cargo build elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
+          Write-Host ("core build elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
+      - name: cargo build --release (launcher)
+        shell: pwsh
+        run: |
+          $start = Get-Date
+          Write-Host "cargo build --release -p cbz-viewer-launcher reached: start"
+          cargo build --release -p cbz-viewer-launcher
+          Write-Host "cargo build --release -p cbz-viewer-launcher reached: success"
+          $elapsed = (Get-Date) - $start
+          Write-Host ("launcher build elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
       - name: Verify runtime DLLs prepared (release)
         shell: pwsh
         run: |
@@ -288,10 +297,18 @@ jobs:
             Write-Error "TurboJPEG/libjpeg runtime DLLs were produced despite static linking: $($jpegRuntimeDlls.Name -join ', ')"
             exit 1
           }
-          $dependents = @(dumpbin /dependents target/release/cbz-viewer.exe 2>&1)
+          if (!(Test-Path target/release/cbz-viewer-core.exe)) {
+            Write-Error "The core executable was not produced"
+            exit 1
+          }
+          if (!(Test-Path target/release/cbz-viewer.exe)) {
+            Write-Error "The launcher executable was not produced"
+            exit 1
+          }
+          $dependents = @(dumpbin /dependents target/release/cbz-viewer-core.exe 2>&1)
           $jpegImports = @($dependents | Select-String -Pattern '(turbojpeg|libjpeg|jpeg)[^ ]*\.dll' -CaseSensitive:$false)
           if ($jpegImports.Count -gt 0) {
-            Write-Error "The release executable imports a TurboJPEG/libjpeg DLL: $($jpegImports -join '; ')"
+            Write-Error "The core executable imports a TurboJPEG/libjpeg DLL: $($jpegImports -join '; ')"
             exit 1
           }
           if (!(Test-Path target/release/dav1d.dll)) {
@@ -312,6 +329,13 @@ jobs:
           }
           if ($missingFfmpegDll) {
             Write-Error "target/release FFmpeg runtime allowlist is incomplete or ambiguous: $($missingFfmpegDll -join ', ')"
+            exit 1
+          }
+          $launcherDependents = @(dumpbin /dependents target/release/cbz-viewer.exe 2>&1)
+          $launcherRuntimeImports = @($launcherDependents |
+            Select-String -Pattern '(avcodec|avformat|avutil|swresample|swscale|dav1d)[^ ]*\.dll' -CaseSensitive:$false)
+          if ($launcherRuntimeImports.Count -gt 0) {
+            Write-Error "The launcher imports a runtime DLL instead of embedding it: $($launcherRuntimeImports -join '; ')"
             exit 1
           }
       - name: Resolve release package version
@@ -340,6 +364,24 @@ jobs:
             -Version $env:CBZ_RELEASE_VERSION `
             -Workspace $env:GITHUB_WORKSPACE `
             -OutputDir "target/package"
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zipPath = Join-Path "target/package" "$env:CBZ_RELEASE_PACKAGE.zip"
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+          try {
+            $packageRoot = "$env:CBZ_RELEASE_PACKAGE/"
+            $rootDlls = @($archive.Entries | Where-Object {
+              $_.FullName.StartsWith($packageRoot, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $_.FullName.Substring($packageRoot.Length) -notmatch '/' -and
+                $_.Name -match '\.dll$'
+            })
+            if ($rootDlls.Count -gt 0) {
+              Write-Error "Release ZIP contains root DLLs: $($rootDlls.FullName -join ', ')"
+              exit 1
+            }
+          }
+          finally {
+            $archive.Dispose()
+          }
           $elapsed = (Get-Date) - $start
           Write-Host "package end"
           Write-Host ("package elapsed seconds: {0:N2}" -f $elapsed.TotalSeconds)
