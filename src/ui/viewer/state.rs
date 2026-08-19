@@ -59,9 +59,8 @@ const KEY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 const INTERACTIVE_DISPLAY_CANDIDATE_LIMIT: usize = 8;
 const LOG_VIEWPORT_TRANSITION: bool = cfg!(debug_assertions);
 const TRANSITION_LOG_FRAMES: u8 = 30;
-/// SPAD最低保証を先行開始する割合。ユーザー設定ではなく調整用の内部定数。
-/// L2バイト使用率と、Page Mapがある場合のL2保持ページ率で共用する。
-const SPAD_EARLY_START_THRESHOLD_PERCENT: usize = 30;
+/// 初回表示commit後にSPAD最低保証を先行開始するまでの遅延。
+const SPAD_GUARANTEED_START_DELAY: Duration = Duration::from_millis(500);
 const SPAD_GUARANTEED_PAGE_COUNT: usize = 2;
 macro_rules! spad_trace_debug {
     ($($arg:tt)*) => {
@@ -1093,6 +1092,8 @@ pub(super) struct ViewerUiRuntimeState {
     pub(super) pending_placeholder_latched: bool,
     pub(super) pending_visible_last: Option<bool>,
     pub(super) last_display_commit_show_seq: Option<u64>,
+    /// このViewerStateで最初に表示commitが成功した時刻。ページ移動ではリセットしない。
+    pub(super) first_display_commit_at: Option<Instant>,
     pub(super) gpu_warmup_plan: GpuWarmupPlanSnapshot,
     pub(super) key_feedback_until: Option<Instant>,
     pub(super) key_feedback_text: Option<&'static str>,
@@ -1693,6 +1694,7 @@ impl ViewerState {
                 pending_placeholder_latched: false,
                 pending_visible_last: None,
                 last_display_commit_show_seq: None,
+                first_display_commit_at: None,
                 gpu_warmup_plan: GpuWarmupPlanSnapshot::default(),
                 key_feedback_until: None,
                 key_feedback_text: None,
@@ -2706,6 +2708,10 @@ impl ViewerState {
             self.ui_runtime.nav_mode = NavMode::Sequential;
         }
         self.ui_runtime.last_display_commit_show_seq = Some(self.ui_runtime.show_seq);
+        if self.ui_runtime.first_display_commit_at.is_none() {
+            self.ui_runtime.first_display_commit_at = Some(Instant::now());
+            ctx.request_repaint_after(SPAD_GUARANTEED_START_DELAY);
+        }
         if result.left_is_animation_stream || result.right_is_animation_stream {
             self.request.active_animation_stream_view = Some(self.persistent.requested_page);
         } else {
@@ -3458,52 +3464,40 @@ impl ViewerState {
         }
         {
             let l2_status = self.l2_settled_status();
-            let display_stable = self.ui_runtime.last_display_commit_show_seq.is_some()
-                && !self.ui_runtime.loading
-                && self.persistent.displayed_page == self.persistent.requested_page
-                && self.persistent.displayed_page == self.persistent.target_page;
-            let l2_usage_threshold_reached = l2_status.max_bytes > 0
-                && l2_status.current_bytes.saturating_mul(100)
-                    >= l2_status
-                        .max_bytes
-                        .saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT);
-            let page_map_page_count = match &self.persistent.page_map_mode {
-                ViewerPageMapMode::Mapped(page_map) => Some(page_map.page_count()),
-                ViewerPageMapMode::Unavailable => None,
-            };
-            let l2_page_threshold_reached = page_map_page_count.is_some_and(|page_count| {
-                page_count > 0
-                    && l2_status.cached_page_count.saturating_mul(100)
-                        >= page_count.saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT)
-            });
-            let scope = if l2_status.settled {
+            let first_display_commit_at = self.ui_runtime.first_display_commit_at;
+            let scope = if first_display_commit_at.is_some() && l2_status.settled {
                 Some(SpadDispatchScope::All)
-            } else if l2_usage_threshold_reached || l2_page_threshold_reached {
-                Some(SpadDispatchScope::GuaranteedOnly)
+            } else if let Some(first_display_commit_at) = first_display_commit_at {
+                let elapsed = first_display_commit_at.elapsed();
+                if elapsed >= SPAD_GUARANTEED_START_DELAY {
+                    Some(SpadDispatchScope::GuaranteedOnly)
+                } else {
+                    ctx.request_repaint_after(SPAD_GUARANTEED_START_DELAY - elapsed);
+                    None
+                }
             } else {
                 None
             };
-            let skip_reason = if !display_stable {
-                Some("display_not_stable")
+            let skip_reason = if first_display_commit_at.is_none() {
+                Some("initial_display_not_committed")
             } else if l2_status.book_id.as_ref() != Some(&current_book_id) {
                 Some("book_mismatch")
             } else if l2_status.generation != current_generation {
                 Some("generation_mismatch")
             } else if scope.is_none() {
-                Some("l2_below_early_usage_threshold")
+                Some("guaranteed_start_delay_not_elapsed")
             } else {
                 None
             };
             if let Some(reason) = skip_reason {
                 spad_trace_debug!(
-                    "[spad-skip] reason={} generation={} settled={} l2_bytes={}/{} l2_pages={}/{} inflight={}",
+                    "[spad-skip] reason={} generation={} settled={} l2_bytes={}/{} l2_pages={} inflight={}",
                     reason,
                     l2_status.generation,
                     l2_status.settled,
                     l2_status.current_bytes,
                     l2_status.max_bytes,
                     l2_status.cached_page_count,
-                    page_map_page_count.unwrap_or(0),
                     self.spad.next_inflight.is_some() || self.spad.prev_inflight.is_some()
                 );
                 return handled;
