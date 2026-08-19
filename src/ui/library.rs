@@ -298,6 +298,8 @@ pub struct LibraryState {
     thumb_cache: Option<DiskCache>,
     /// Last visible display-thumbnail task identity sequence sent to the worker.
     last_display_set: Option<Vec<DisplayThumbKey>>,
+    /// Last display-thumbnail identity invalidated by a stale result; one retry per identity.
+    last_display_stale_retry: Option<DisplayThumbKey>,
 
     // ── サムネイルサイズ（AppSettings から更新） ─────────────────────────────
     /// サムネイル幅（px）
@@ -1922,6 +1924,7 @@ impl LibraryState {
     pub fn clear_books(&mut self) {
         self.invalidate_preview();
         self.last_display_set = None;
+        self.last_display_stale_retry = None;
         self.book_states.clear();
         self.video_states.clear();
         self.recompute_group_counts();
@@ -2066,6 +2069,7 @@ impl LibraryState {
             background_artifact_completion_logged: true,
             thumb_cache: open_thumb_cache(),
             last_display_set: None,
+            last_display_stale_retry: None,
             thumb_w: theme::THUMB_W,
             thumb_h: theme::THUMB_H,
             wheel_scroll_multiplier: 2.0,
@@ -2879,6 +2883,7 @@ impl LibraryState {
     fn rebuild_entries(&mut self) {
         self.invalidate_preview();
         self.last_display_set = None;
+        self.last_display_stale_retry = None;
         self.prune_page_map_failure_states();
         let selected_paths_before = self.selected_paths_snapshot();
         let selected_path_before = self
@@ -3030,6 +3035,20 @@ impl LibraryState {
                     self.handle_video_thumbnail_message(msg, ctx)
                 }
                 WorkerMsg::Ready(resp) => self.handle_thumbnail_ready(resp, ctx),
+                WorkerMsg::DisplayStale {
+                    book_id,
+                    expected_size,
+                    expected_modified,
+                    target_width,
+                    bypass_cache,
+                } => self.handle_display_thumbnail_stale(
+                    book_id,
+                    expected_size,
+                    expected_modified,
+                    target_width,
+                    bypass_cache,
+                    ctx,
+                ),
                 msg @ (WorkerMsg::Failed(_)
                 | WorkerMsg::FailedPermanent(_)
                 | WorkerMsg::FailedWithRevision { .. }
@@ -3601,9 +3620,10 @@ impl LibraryState {
                 expected_size,
                 expected_modified,
             } => (book_id, expected_size, expected_modified),
-            WorkerMsg::Stale(_id) => {
+            WorkerMsg::Stale(id) => {
                 // 同じ path/id のファイル差し替え前に開始された古いタスク。
                 // 新しいタスク側で再生成されるため、状態を変更しない。
+                let _ = id;
                 return WorkerPollResult::Stale;
             }
             _ => {
@@ -3652,6 +3672,37 @@ impl LibraryState {
         }
         ctx.request_repaint();
         WorkerPollResult::Failed
+    }
+
+    fn handle_display_thumbnail_stale(
+        &mut self,
+        book_id: BookId,
+        expected_size: u64,
+        expected_modified: Option<SystemTime>,
+        target_width: u16,
+        bypass_cache: bool,
+        ctx: &egui::Context,
+    ) -> WorkerPollResult {
+        let key = DisplayThumbKey {
+            book_id,
+            expected_size,
+            expected_modified,
+            target_width,
+            bypass_cache,
+        };
+        if self.last_display_stale_retry.as_ref() == Some(&key) {
+            return WorkerPollResult::Stale;
+        }
+        let Some(display_keys) = self.last_display_set.as_mut() else {
+            return WorkerPollResult::Stale;
+        };
+        let Some(index) = display_keys.iter().position(|candidate| candidate == &key) else {
+            return WorkerPollResult::Stale;
+        };
+        display_keys.remove(index);
+        self.last_display_stale_retry = Some(key);
+        ctx.request_repaint();
+        WorkerPollResult::Stale
     }
 
     // ── サムネイル一括要求 ────────────────────────────────────────────────────
@@ -4015,6 +4066,7 @@ impl LibraryState {
     }
 
     fn clear_display_tasks_if_needed(&mut self) {
+        self.last_display_stale_retry = None;
         if self
             .last_display_set
             .as_ref()
@@ -4054,6 +4106,13 @@ impl LibraryState {
                 }
             }
         }
+        if self
+            .last_display_stale_retry
+            .as_ref()
+            .is_some_and(|stale_key| !display_keys.contains(stale_key))
+        {
+            self.last_display_stale_retry = None;
+        }
         let should_replace_display_tasks = self.last_display_set.as_ref() != Some(&display_keys);
         self.last_display_set = Some(display_keys);
         if should_replace_display_tasks {
@@ -4061,14 +4120,14 @@ impl LibraryState {
         }
     }
 
-    fn display_thumb_task_for_entry(&self, entry: &LibraryEntry) -> Option<ThumbTask> {
+    fn display_thumb_task_for_entry(&mut self, entry: &LibraryEntry) -> Option<ThumbTask> {
         let book_id = entry.thumb_id_ref()?;
         let snapshot = self.source_snapshots.get(book_id)?;
         let path = Arc::clone(&snapshot.path);
         let expected_size = snapshot.size;
         let expected_modified = snapshot.modified;
         let target_width = crate::domain::app_settings::AppSettings::storage_width();
-        let state = self.book_state(book_id)?;
+        let state = self.book_state_mut(book_id);
         if state.texture.is_some() || state.thumb_failed {
             return None;
         }

@@ -253,6 +253,14 @@ pub enum WorkerMsg {
     },
     /// 要求後に同じ path/id のファイル内容が変わった古いタスク。UI へ失敗状態としては反映しない。
     Stale(BookId),
+    /// 表示用サムネイルの古いタスク。UI 側で該当する表示要求だけを再試行可能にする。
+    DisplayStale {
+        book_id: BookId,
+        expected_size: u64,
+        expected_modified: Option<SystemTime>,
+        target_width: u16,
+        bypass_cache: bool,
+    },
     /// VideoFile の古いタスク。要求時点の source snapshot を UI 側で照合して
     /// 新しい video request の Loading 状態を誤って解除しないために使う。
     VideoStale {
@@ -1246,7 +1254,7 @@ async fn run_thumb_task(
     runtime: ThumbTaskRuntime,
     permit: tokio::sync::OwnedSemaphorePermit,
     timeout: Option<Duration>,
-    _label: &'static str,
+    label: &'static str,
     task_gen: u64,
     flight: TaskFlightGuard,
 ) {
@@ -1286,6 +1294,7 @@ async fn run_thumb_task(
                         tx: tx_for_watch,
                         repaint: repaint_for_watch,
                         generation: generation_for_watch,
+                        display: label == "display",
                     },
                 )
                 .await;
@@ -1345,9 +1354,20 @@ async fn handle_thumb_result(
             }
         }
         WorkerMsg::Stale(_) => {
-            // 古い結果は UI に流さない。差分 scan 側の再要求に任せる。
+            if runtime.display {
+                let _ = runtime.tx.send(WorkerMsg::DisplayStale {
+                    book_id: task.book_id,
+                    expected_size: task.expected_size,
+                    expected_modified: task.expected_modified,
+                    target_width: task.target_width,
+                    bypass_cache: task.bypass_cache,
+                });
+                runtime.repaint.request_repaint();
+            }
+            // 通常・背景の古い結果は UI に流さない。差分 scan 側の再要求に任せる。
         }
         WorkerMsg::VideoReady(_) => unreachable!(),
+        WorkerMsg::DisplayStale { .. } => unreachable!(),
         WorkerMsg::VideoPreviewReady(_)
         | WorkerMsg::VideoPreviewFailed(_)
         | WorkerMsg::VideoPreviewStale(_)
@@ -1406,6 +1426,7 @@ struct ThumbTaskResultContext {
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
+    display: bool,
 }
 
 fn mark_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
