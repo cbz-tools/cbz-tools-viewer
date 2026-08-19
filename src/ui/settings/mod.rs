@@ -84,6 +84,7 @@ pub fn show(
         .default_pos(default_pos)
         .default_size(SETTINGS_WINDOW_DEFAULT_SIZE)
         .min_width(720.0)
+        .max_width(SETTINGS_WINDOW_DEFAULT_SIZE.x)
         .show(ctx, |ui| {
             ui.set_min_width(680.0);
             ui.visuals_mut().widgets.inactive.bg_fill = theme::SEPARATOR_WEAK;
