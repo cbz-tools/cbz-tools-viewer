@@ -866,7 +866,7 @@ fn process_request(
         ViewerRequestKind::AnimationStreamStart | ViewerRequestKind::AnimationStreamFill
     ) {
         match cache.as_mut() {
-            Some(cached) => process_animation_stream_request(req, cached, result, req_started),
+            Some(cached) => process_animation_stream_request(req, cached, result),
             None => {
                 result.error = Some("viewer cache unavailable".to_owned());
                 result
@@ -998,7 +998,6 @@ fn process_animation_stream_request(
     req: &ViewerRequest,
     cached: &mut CachedReader,
     mut result: ViewerResult,
-    req_started: Instant,
 ) -> ViewerResult {
     if let Some(pn) = req.page_left.filter(|pn| *pn < result.page_count) {
         match get_animation_stream_chunk_or_failed(
@@ -1064,14 +1063,6 @@ fn process_animation_stream_request(
         }
     }
 
-    tracing::trace!(
-        request_id = req.id,
-        kind = ?req.kind,
-        left = result.left.is_some(),
-        right = result.right.is_some(),
-        elapsed_ms = req_started.elapsed().as_millis(),
-        "viewer_loader: animation stream request timing"
-    );
     result.kind = ViewerResultKind::AnimationFramesChunk;
     result
 }

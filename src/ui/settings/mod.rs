@@ -34,7 +34,6 @@ pub enum SettingsEvent {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SettingsTab {
-    General,
     Library,
     Viewer,
     Performance,
@@ -43,9 +42,8 @@ enum SettingsTab {
 }
 
 impl SettingsTab {
-    fn all(language: UiLanguage) -> [(Self, &'static str); 6] {
+    fn all(language: UiLanguage) -> [(Self, &'static str); 5] {
         [
-            (Self::General, tr(language, TextKey::General)),
             (Self::Library, tr(language, TextKey::Library)),
             (Self::Viewer, tr(language, TextKey::ViewerTab)),
             (Self::Performance, tr(language, TextKey::Performance)),
@@ -98,7 +96,7 @@ pub fn show(
             let mut selected_tab = ctx.memory_mut(|mem| {
                 mem.data
                     .get_temp::<SettingsTab>(egui::Id::new("settings_selected_tab"))
-                    .unwrap_or(SettingsTab::General)
+                    .unwrap_or(SettingsTab::Library)
             });
             tab_selector(ui, language, &mut selected_tab);
             ctx.memory_mut(|mem| {
@@ -123,9 +121,6 @@ pub fn show(
                     )
                     .auto_shrink([false, false])
                     .show(ui, |ui| match selected_tab {
-                        SettingsTab::General => {
-                            display::show_general_tab(ui, language, settings);
-                        }
                         SettingsTab::Library => {
                             cache::show_library_tab(ui, language, settings, &mut event);
                         }

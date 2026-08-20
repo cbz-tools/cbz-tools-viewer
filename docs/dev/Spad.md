@@ -130,17 +130,20 @@ shared SPAD queueは使わない。Next dispatchを先に試して優先性を�
 
 ## 開始条件とdispatch順
 
-SPAD dispatchは、現在本の初回表示が成功してcommit済みで、L2 statusのBookId / generationが現在Viewerと一致することを前提にside別で判定する。
+SPAD dispatchは、現在本の初回表示がcommit済みで、L2 statusのBookId / generationが現在Viewerと一致することを前提にside別で判定する。
 
-初回の成功したdisplay commitから500 ms経過すると、L2が未完了でも各隣接本の最低保証2枚だけを先行dispatchできる。高速なページ送り中も、このタイマーはresetしない。したがって、表示中ページとrequested / target pageの一致や`loading`解除の継続は開始条件にしない。
+L2が未完了でも、次のいずれかを満たす場合は、各隣接本の最低保証2枚だけを先行dispatchできる。
 
-これは本を開いた直後のもっとも競合しやすい期間を避けつつ、読書操作やL2容量に依存せず最低保証を開始するための固定遅延である。500 ms以内にcurrent bookのforward burstが必ず完了することを意味しない。L2 settled後は通常どおり追加割合を含む残りのSPAD dispatchを許可する。
+- SPAD追加予約分を除いたL2 RGBA cacheの実使用量が有効上限の30%に達した。
+- 現在本のPage Mapがあり、L2に保持された物理ページ数がPage Map総ページ数の30%に達した。
+
+Page Mapがない場合は、ページ数条件を使わない。L2 settled後は通常どおり追加割合を含む残りのSPAD dispatchを許可する。
 
 ```text
-現在本の初回表示commit成功済み
+現在本の表示commit済み、loading中でなく、displayed_page == requested_page、かつ displayed_page == target_page
 L2 statusのBookIdが現在Viewerと一致
 L2 statusのgenerationが現在Viewerと一致
-L2 settled済み、または初回display commitから500 ms経過
+L2 settled済み、またはL2使用率が30%以上、または（Page Mapがある場合）L2保持ページ率が30%以上
 ```
 
 各sideはside別inflightがなく、targetが存在し、targetが未exhaustedで、target budgetとdispatch可能な候補pageが残る場合にdispatch可能である。
@@ -280,7 +283,7 @@ SPAD target configure
         ↓
 existing Page Map cache read only (optional)
         ↓
-初回display commitから500 ms / L2 settled gate
+L2 30% / settled gate
         ↓
 SPAD dispatch
     ├─ spad-next worker

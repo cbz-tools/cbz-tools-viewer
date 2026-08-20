@@ -55,6 +55,16 @@ fn main() {
         }
     }
 
+    let mut res = winresource::WindowsResource::new();
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is required");
+    res.set("ProductName", "CBZ Viewer")
+        .set("FileDescription", "CBZ Viewer")
+        .set("OriginalFilename", "cbz-viewer.exe")
+        .set("FileVersion", &version)
+        .set("ProductVersion", &version);
+    res.compile()
+        .expect("failed to embed Windows version resource");
+
     write_generated(&generated, &assets).expect("write embedded asset module");
 }
 

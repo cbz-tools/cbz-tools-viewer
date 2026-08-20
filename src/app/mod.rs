@@ -36,6 +36,7 @@ use crate::infra::cache::{
 use crate::infra::worker::external_tool_worker::ExternalToolWorker;
 use crate::session::{LeftPaneTab, SessionState, sort_key_to_str, sort_order_to_str};
 use crate::ui::{
+    about,
     i18n::{TextKey, tr},
     icons,
     library::{self, LibraryAction, LibraryState},
@@ -93,6 +94,8 @@ pub struct App {
     performance_resources: PerformanceResources,
     /// 設定ウィンドウ表示フラグ
     settings_open: bool,
+    /// About ウィンドウ表示フラグ
+    about_open: bool,
     /// キャッシュ使用量（MB）。-1.0 = 未計算
     cache_size_mb: f32,
 
@@ -224,6 +227,7 @@ impl App {
             app_settings,
             performance_resources,
             settings_open: false,
+            about_open: false,
             cache_size_mb: -1.0,
             pending_select,
             pending_drop_select: None,
@@ -458,6 +462,10 @@ impl eframe::App for App {
         }
 
         // ── ライブラリ（常時表示） ────────────────────────────────────────────
+        if self.about_open {
+            about::show(&ctx, &mut self.about_open);
+        }
+
         self.show_library(ui, frame);
         self.refresh_library_book_order();
 
@@ -1568,6 +1576,21 @@ impl App {
         }
         if topbar_result.settings_requested {
             self.settings_open = true;
+        }
+        if topbar_result.language_toggle_requested {
+            self.app_settings.ui_language = match self.app_settings.ui_language {
+                crate::domain::app_settings::UiLanguage::English => {
+                    crate::domain::app_settings::UiLanguage::Japanese
+                }
+                crate::domain::app_settings::UiLanguage::Japanese => {
+                    crate::domain::app_settings::UiLanguage::English
+                }
+            };
+            self.app_settings
+                .save_with_resources(&self.performance_resources);
+        }
+        if topbar_result.about_requested {
+            self.about_open = true;
         }
         if topbar_result.hud_mode_changed {
             self.app_settings.library_hud_mode = self.library.hud_mode;

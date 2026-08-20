@@ -16,3 +16,6 @@ sha2 = "0.10"
 
 [build-dependencies]
 sha2 = "0.10"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"

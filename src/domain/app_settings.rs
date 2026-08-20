@@ -204,8 +204,6 @@ pub enum UiLanguage {
 }
 
 impl UiLanguage {
-    pub const ALL: [Self; 2] = [Self::English, Self::Japanese];
-
     pub const fn as_code(self) -> &'static str {
         match self {
             Self::English => "en",
@@ -219,10 +217,6 @@ impl UiLanguage {
             "ja" => Some(Self::Japanese),
             _ => None,
         }
-    }
-
-    pub fn all() -> &'static [Self] {
-        &Self::ALL
     }
 }
 

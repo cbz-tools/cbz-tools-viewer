@@ -1,3 +1,4 @@
+pub(crate) mod about;
 pub mod common;
 pub(crate) mod filename_token_menu;
 pub mod i18n;

@@ -4,33 +4,8 @@ use crate::domain::app_settings::UiLanguage;
 use crate::domain::app_settings::{AppSettings, ReadingDirection, ViewerQuality};
 
 use super::super::common::reading_direction_label;
-use super::super::i18n::{TextKey, tr, ui_language_choice_key};
+use super::super::i18n::{TextKey, tr};
 use super::widgets::{section_header, setting_block, subtle_text};
-
-pub(super) fn show_general_tab(
-    ui: &mut egui::Ui,
-    language: UiLanguage,
-    settings: &mut AppSettings,
-) {
-    section_header(ui, tr(language, TextKey::App));
-    setting_block(ui, tr(language, TextKey::Language), |ui| {
-        ui.horizontal(|ui| {
-            ui.set_height(26.0);
-            egui::ComboBox::from_id_salt("ui_language")
-                .selected_text(tr(language, ui_language_choice_key(settings.ui_language)))
-                .width(220.0)
-                .show_ui(ui, |ui| {
-                    for &candidate in UiLanguage::all() {
-                        ui.selectable_value(
-                            &mut settings.ui_language,
-                            candidate,
-                            tr(language, ui_language_choice_key(candidate)),
-                        );
-                    }
-                });
-        });
-    });
-}
 
 pub(super) fn show_viewer_tab(ui: &mut egui::Ui, language: UiLanguage, settings: &mut AppSettings) {
     section_header(ui, tr(language, TextKey::Display));

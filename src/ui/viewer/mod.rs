@@ -651,6 +651,34 @@ impl PageContent {
         }
     }
 
+    pub(super) fn synchronize_initial_start(&mut self, baseline: Instant) {
+        match self {
+            Self::AnimatedReady {
+                frames,
+                next_frame_at,
+                ..
+            } => {
+                let delay = frames
+                    .first()
+                    .map(|frame| frame.delay_ms.max(img::MIN_FRAME_DELAY_MS) as u64)
+                    .unwrap_or(3_600_000);
+                *next_frame_at = baseline + Duration::from_millis(delay);
+            }
+            Self::AnimatedStream {
+                queue,
+                next_frame_at,
+                ..
+            } => {
+                let delay = queue
+                    .front()
+                    .map(|frame| frame.delay_ms.max(img::MIN_FRAME_DELAY_MS) as u64)
+                    .unwrap_or(3_600_000);
+                *next_frame_at = baseline + Duration::from_millis(delay);
+            }
+            Self::Static(_) => {}
+        }
+    }
+
     pub fn append_stream_chunk(&mut self, frames: Arc<Vec<img::FrameData>>, exhausted: bool) {
         if let Self::AnimatedStream {
             queue,
@@ -1301,7 +1329,13 @@ pub fn show(
     if !in_viewport_transition {
         let _ = state.maybe_request_animation_stream_fill(display_w, display_h, max_tex_side);
     }
-    if !in_viewport_transition && state.request.animation_stream_request_id.is_some() {
+    if !in_viewport_transition
+        && state
+            .request
+            .animation_stream_request_ids
+            .iter()
+            .any(Option::is_some)
+    {
         ctx.request_repaint_after(LOADING_REPAINT_INTERVAL);
     }
     if state.playback.slideshow_active {

@@ -24,9 +24,19 @@ fn main() {
 fn embed_windows_icon() {
     let mut res = winresource::WindowsResource::new();
     res.set_icon("assets/viewer_icon.ico");
+    set_windows_version_info(&mut res);
     if let Err(err) = res.compile() {
         panic!("failed to embed Windows icon resource: {err}");
     }
+}
+
+fn set_windows_version_info(res: &mut winresource::WindowsResource) {
+    let version = env::var("CARGO_PKG_VERSION").expect("CARGO_PKG_VERSION is required");
+    res.set("ProductName", "CBZ Viewer")
+        .set("FileDescription", "CBZ Viewer")
+        .set("OriginalFilename", "cbz-viewer-core.exe")
+        .set("FileVersion", &version)
+        .set("ProductVersion", &version);
 }
 
 fn copy_dll(source: &Path, destination: &Path) -> io::Result<()> {

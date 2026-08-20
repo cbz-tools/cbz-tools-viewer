@@ -23,9 +23,14 @@ Double-click a book to open the Viewer.
 
 ### Settings
 
-The Settings window has six tabs: General, Library, Viewer, Performance, External Tools, and Web Search.
+Press the Settings button at the top of the Library to open the following menu.
 
-General > App > Language switches the UI language between English and Japanese.
+* `Preferences...` opens the Settings window.
+* `Language: EN ⇔ JP` switches between English and Japanese.
+* Separator
+* `About CBZ Viewer...` shows the application name and current version. `GitHub` and `Check for latest version` open GitHub in the default browser.
+
+The Settings window has five tabs: Library, Viewer, Performance, External Tools, and Web Search.
 
 Language changes take effect immediately, and no restart is required.
 

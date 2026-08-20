@@ -4,7 +4,6 @@ use chrono::{Datelike, NaiveDate};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextKey {
     Settings,
-    General,
     Library,
     ViewerTab,
     Display,
@@ -18,11 +17,9 @@ pub enum TextKey {
     WebSearchEntryLabel,
     WebSearchLinkPlaceholder,
     WebSearchLinkNote,
-    App,
     List,
     CardDisplay,
     ReadingSection,
-    Language,
     Size,
     BackToDefaultSize,
     SizeMin,
@@ -111,8 +108,6 @@ pub enum TextKey {
     Count,
     ExternalToolLabel,
     ExternalToolPathNote,
-    English,
-    Japanese,
     Example,
     Optimizer,
     SampleExternalTool,
@@ -237,13 +232,6 @@ pub enum TextKey {
     DeleteRangeProcessing,
     DeleteRangeFailed,
     DeleteRangeAllPagesNotAllowed,
-}
-
-pub const fn ui_language_choice_key(language: UiLanguage) -> TextKey {
-    match language {
-        UiLanguage::English => TextKey::English,
-        UiLanguage::Japanese => TextKey::Japanese,
-    }
 }
 
 pub fn tr(language: UiLanguage, key: TextKey) -> &'static str {
@@ -400,7 +388,6 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::DeleteRangeAllPagesNotAllowed => {
             "Cannot delete all image pages. At least one image page must remain."
         }
-        TextKey::General => "General",
         TextKey::Display => "Display",
         TextKey::Performance => "Performance",
         TextKey::ExternalTools => "External Tools",
@@ -415,13 +402,9 @@ fn english_text(key: TextKey) -> &'static str {
             "Links containing %s are shown in the token menu; only http:// and https:// links are executed."
         }
         TextKey::ViewerTab => "Viewer",
-        TextKey::App => "App",
         TextKey::List => "List",
         TextKey::CardDisplay => "Card Display",
         TextKey::ReadingSection => "Reading",
-        TextKey::Language => "Language",
-        TextKey::English => "English",
-        TextKey::Japanese => "Japanese",
         TextKey::Size => "Card size",
         TextKey::BackToDefaultSize => "Restore default card size",
         TextKey::SizeMin => "Min",
@@ -681,7 +664,6 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::DeleteRangeAllPagesNotAllowed => {
             Some("すべての画像ページは削除できません。少なくとも1ページは残す必要があります。")
         }
-        TextKey::General => Some("一般"),
         TextKey::Display => Some("表示"),
         TextKey::Performance => Some("パフォーマンス"),
         TextKey::ExternalTools => Some("外部ツール"),
@@ -696,13 +678,9 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
             "%s を含む Link が token メニューに表示されます。実行するのは http:// または https:// のみです。",
         ),
         TextKey::ViewerTab => Some("Viewer"),
-        TextKey::App => Some("アプリ"),
         TextKey::List => Some("一覧"),
         TextKey::CardDisplay => Some("カード表示"),
         TextKey::ReadingSection => Some("読書"),
-        TextKey::Language => Some("言語"),
-        TextKey::English => Some("英語"),
-        TextKey::Japanese => Some("日本語"),
         TextKey::Size => Some("カードサイズ"),
         TextKey::BackToDefaultSize => Some("標準のカードサイズ"),
         TextKey::SizeMin => Some("最小(120)"),

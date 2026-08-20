@@ -93,7 +93,7 @@ pub(super) struct ViewerWorkerManagerSnapshot {
     pub(super) background_worker_count: usize,
     pub(super) rgba_cache_max_mb: u16,
     pub(super) active_animation_stream_view: Option<u32>,
-    pub(super) animation_stream_request_id: Option<u64>,
+    pub(super) animation_stream_request_in_flight: bool,
 }
 
 impl ViewerWorkerManagerSnapshot {
@@ -1045,15 +1045,15 @@ fn pump_background_work(
         return;
     }
     if snapshot.active_animation_stream_view.is_some()
-        || snapshot.animation_stream_request_id.is_some()
+        || snapshot.animation_stream_request_in_flight
     {
         update_l2_streaming_status(l2_status, bg_rgba_cache, Some(&snapshot), false);
         bg_trace_debug!(
-            "[viewer-worker-manager-pump-skip] reason=animation_stream_active generation={} book_id={:?} active_view={:?} request_id={:?}",
+            "[viewer-worker-manager-pump-skip] reason=animation_stream_active generation={} book_id={:?} active_view={:?} request_in_flight={}",
             snapshot.generation,
             snapshot.book_id,
             snapshot.active_animation_stream_view,
-            snapshot.animation_stream_request_id
+            snapshot.animation_stream_request_in_flight
         );
         return;
     }

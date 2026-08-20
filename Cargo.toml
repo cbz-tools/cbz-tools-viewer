@@ -15,7 +15,7 @@ members = ["launcher"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.8"
+version = "0.4.9"
 edition = "2024"
 authors = []
 description = "High-performance CBZ/ZIP/RAR manga viewer"

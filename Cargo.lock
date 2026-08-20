@@ -613,7 +613,7 @@ dependencies = [
 
 [[package]]
 name = "cbz-viewer"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "anyhow",
  "blake3",
@@ -657,9 +657,10 @@ dependencies = [
 
 [[package]]
 name = "cbz-viewer-launcher"
-version = "0.4.8"
+version = "0.4.9"
 dependencies = [
  "sha2",
+ "winresource",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
 //! トップバーの UI。
 //!
-//! パス入力、ソート、フィルタ、viewer 起動モードの切替だけを扱う。
+//! パス入力、ソート、フィルタ、viewer 起動モードの切替、設定メニューを扱う。
 use std::path::{Component, Path, PathBuf};
 
 use eframe::egui;
@@ -48,6 +48,10 @@ pub struct TopbarResult {
     pub toggle_sidebar: bool,
     /// ⚙ ボタンが押されたら true
     pub settings_requested: bool,
+    /// 設定メニューの言語切替が押されたら true
+    pub language_toggle_requested: bool,
+    /// 設定メニューの About が押されたら true
+    pub about_requested: bool,
     /// HUD 表示モードが変更されたら true
     pub hud_mode_changed: bool,
     /// Viewer 起動モードが変更されたら true
@@ -72,6 +76,8 @@ pub fn show(
 ) -> TopbarResult {
     let mut toggle_sidebar = false;
     let mut settings_requested = false;
+    let mut language_toggle_requested = false;
+    let mut about_requested = false;
     let mut hud_mode_changed = false;
     let mut viewer_open_mode_changed = false;
     let mut nav_back = false;
@@ -176,19 +182,31 @@ pub fn show(
         ui.separator();
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // 設定ボタン
-            let settings_resp = ui
-                .add_sized(
-                    TOPBAR_ICON_BUTTON_SIZE,
-                    egui::Button::new(icons::icon(icons::ICON_SETTINGS, ICON_SIZE_MENU_SETTINGS))
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(quiet_stroke),
-                )
-                .on_hover_text(tr(language, TextKey::Settings));
+            // 設定メニュー。項目名は UI 言語にかかわらず英語固定。
+            let (settings_resp, _) = egui::containers::menu::MenuButton::from_button(
+                egui::Button::new(icons::icon(icons::ICON_SETTINGS, ICON_SIZE_MENU_SETTINGS))
+                    .min_size(TOPBAR_ICON_BUTTON_SIZE)
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(quiet_stroke),
+            )
+            .ui(ui, |ui| {
+                ui.set_min_width(220.0);
+                if ui.button("Preferences...").clicked() {
+                    settings_requested = true;
+                    ui.close();
+                }
+                if ui.button("Language: EN ⇔ JP").clicked() {
+                    language_toggle_requested = true;
+                    ui.close();
+                }
+                ui.separator();
+                if ui.button("About CBZ Viewer...").clicked() {
+                    about_requested = true;
+                    ui.close();
+                }
+            });
+            let settings_resp = settings_resp.on_hover_text(tr(language, TextKey::Settings));
             paint_quiet_hover_border(ui, &settings_resp);
-            if settings_resp.clicked() {
-                settings_requested = true;
-            }
 
             let prev = state.filter.keyword.clone();
             let placeholder = search_placeholder_text(language, state.current_dir.as_deref());
@@ -528,6 +546,8 @@ pub fn show(
         scan_dir: None,
         toggle_sidebar,
         settings_requested,
+        language_toggle_requested,
+        about_requested,
         hud_mode_changed,
         viewer_open_mode_changed,
         nav_back,

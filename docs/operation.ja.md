@@ -23,9 +23,14 @@
 
 ### 設定
 
-設定画面は 一般 / ライブラリ / Viewer / パフォーマンス / 外部ツール / WEB検索 の 6 タブです。
+ライブラリ上部の設定ボタンを押すと、次のメニューが開きます。
 
-一般 > アプリ > 言語 で English / 日本語 を切り替えられます。
+* `Preferences...` は設定画面を開きます。
+* `Language: EN ⇔ JP` は English / 日本語を切り替えます。
+* 区切り線
+* `About CBZ Viewer...` はアプリケーション名と現在のVersionを表示します。`GitHub` と `Check for latest version` から、既定のブラウザでGitHubを開けます。
+
+設定画面は Library / Viewer / Performance / External Tools / Web Search の 5 タブです。
 
 言語変更は即時反映され、再起動は不要です。
 

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.4.9
 
 ### Added
 
@@ -20,7 +20,8 @@
 ### Changed
 
 - Changed Viewer External Tools to queue requests for other books while a tool is running, process them in order, and show the request count on tool buttons.
-- Changed the guaranteed adjacent-book/SPAD preload start from the 30% L2 usage/Page Map retention gate to 500 ms after the current book's first display commit; rapid page navigation does not reset the timer, and additional preloading still waits for L2 to settle.
+- Changed the adjacent-book/SPAD preload gate to require a stable display and use 30% L2 usage or Page Map retention thresholds; once L2 is settled, the full dispatch scope is allowed.
+- Changed visible spread Animated WebP stream requests to split left and right sides and handle each side independently on the existing `interactive-even` and `interactive-odd` workers.
 - Changed the Windows release to use a single `cbz-viewer.exe` launcher that embeds the viewer core, dav1d, and FFmpeg runtime DLLs and extracts validated runtime files to a versioned user-local directory when needed.
 - Switched JPEG decoding to the TurboJPEG backend with direct RGBA output, unified thumbnail and Viewer JPEG decoding, and a Windows WIC fallback for CMYK/YCCK JPEGs.
 - Cleaned up the obsolete JPEG/native dependency paths and related native build configuration.
@@ -36,6 +37,7 @@
 - Refreshed compatible direct dependencies within their existing version requirements, including serde_json, toml, chrono, tokio, memmap2, blake3, bytes, anyhow, and log.
 - Removed the unused direct development dependency on `tempfile` and made the required `windows-sys` `Win32_Security` feature explicit.
 - Changed External Tools settings to show all three slots in place, with empty slots omitted from launch surfaces.
+- Changed the Library top-bar Settings button to open a menu with `Preferences...`, `Language: EN ⇔ JP`, and `About CBZ Viewer...`; moved language switching out of the Settings window and removed the now-empty General tab.
 - Expanded the operation guides with filename-token, Web Search, and fixed-slot External Tools setup details.
 - Reorganized and updated the README Highlights to consolidate the current feature descriptions.
 - Changed the HDD global thumbnail generation goal to use `base_goal.min(2)`.
@@ -51,6 +53,7 @@
 - Changed the Library thumbnail CPU memory cache from a fixed 500-entry limit to a 256 MiB byte budget.
 - Reduced CPU/GPU memory high-water usage after bulk thumbnail generation in large libraries without changing Viewer L1/L2 caches or thumbnail request policy.
 - Fixed a Page Map issue where some JPEG files could fail lightweight metadata probing when a JPEG marker was split across an internal read chunk boundary.
+- Fixed spread playback so that when both sides are Animated WebP, playback starts from a common time captured at display commit.
 
 - Reorganized the Settings window into General, Library, Viewer, Performance, External Tools, and Web Search tabs.
 - Added favorite indicators to Library card HUDs.

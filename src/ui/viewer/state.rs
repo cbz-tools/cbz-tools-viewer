@@ -59,8 +59,11 @@ const KEY_FEEDBACK_DURATION: Duration = Duration::from_secs(2);
 const INTERACTIVE_DISPLAY_CANDIDATE_LIMIT: usize = 8;
 const LOG_VIEWPORT_TRANSITION: bool = cfg!(debug_assertions);
 const TRANSITION_LOG_FRAMES: u8 = 30;
-/// 初回表示commit後にSPAD最低保証を先行開始するまでの遅延。
-const SPAD_GUARANTEED_START_DELAY: Duration = Duration::from_millis(500);
+const ANIMATION_STREAM_LEFT_SLOT: usize = 0;
+const ANIMATION_STREAM_RIGHT_SLOT: usize = 1;
+/// SPAD最低保証を先行開始する割合。ユーザー設定ではなく調整用の内部定数。
+/// L2バイト使用率と、Page Mapがある場合のL2保持ページ率で共用する。
+const SPAD_EARLY_START_THRESHOLD_PERCENT: usize = 30;
 const SPAD_GUARANTEED_PAGE_COUNT: usize = 2;
 macro_rules! spad_trace_debug {
     ($($arg:tt)*) => {
@@ -1052,7 +1055,7 @@ pub(super) struct ViewerRequestState {
     /// 現在表示中の animation stream 対象 view。
     pub(super) active_animation_stream_view: Option<u32>,
     /// 将来の逐次アニメ供給 request。
-    pub(super) animation_stream_request_id: Option<u64>,
+    pub(super) animation_stream_request_ids: [Option<u64>; 2],
     pub(super) nav_traces: HashMap<u64, NavTrace>,
     pub(super) next_nav_id: u64,
     pub(super) active_nav_id: Option<u64>,
@@ -1092,8 +1095,6 @@ pub(super) struct ViewerUiRuntimeState {
     pub(super) pending_placeholder_latched: bool,
     pub(super) pending_visible_last: Option<bool>,
     pub(super) last_display_commit_show_seq: Option<u64>,
-    /// このViewerStateで最初に表示commitが成功した時刻。ページ移動ではリセットしない。
-    pub(super) first_display_commit_at: Option<Instant>,
     pub(super) gpu_warmup_plan: GpuWarmupPlanSnapshot,
     pub(super) key_feedback_until: Option<Instant>,
     pub(super) key_feedback_text: Option<&'static str>,
@@ -1665,7 +1666,7 @@ impl ViewerState {
                 display_target_stability_reason: "no-previous-target",
                 queued_view: None,
                 active_animation_stream_view: None,
-                animation_stream_request_id: None,
+                animation_stream_request_ids: [None; 2],
                 nav_traces: HashMap::new(),
                 next_nav_id: 1,
                 active_nav_id: None,
@@ -1694,7 +1695,6 @@ impl ViewerState {
                 pending_placeholder_latched: false,
                 pending_visible_last: None,
                 last_display_commit_show_seq: None,
-                first_display_commit_at: None,
                 gpu_warmup_plan: GpuWarmupPlanSnapshot::default(),
                 key_feedback_until: None,
                 key_feedback_text: None,
@@ -2203,7 +2203,7 @@ impl ViewerState {
             last_display_commit_show_seq = ?self.ui_runtime.last_display_commit_show_seq,
             loading = self.ui_runtime.loading,
             pending_interactive_group = self.request.pending_interactive_group.is_some(),
-            animation_stream_request_id = ?self.request.animation_stream_request_id,
+            animation_stream_request_ids = ?self.request.animation_stream_request_ids,
             active_animation_stream_view = ?self.request.active_animation_stream_view,
             viewport_transition = self.ui_runtime.viewport_transition_active,
             fullscreen_transition = self.ui_runtime.fullscreen_transition_frames > 0,
@@ -2211,7 +2211,11 @@ impl ViewerState {
         );
         if self.ui_runtime.loading
             || self.request.pending_interactive_group.is_some()
-            || self.request.animation_stream_request_id.is_some()
+            || self
+                .request
+                .animation_stream_request_ids
+                .iter()
+                .any(Option::is_some)
             || self.request.active_animation_stream_view.is_some()
             || self.ui_runtime.viewport_transition_active
             || self.ui_runtime.fullscreen_transition_frames > 0
@@ -2220,7 +2224,12 @@ impl ViewerState {
                 "loading"
             } else if self.request.pending_interactive_group.is_some() {
                 "pending-interactive-group"
-            } else if self.request.animation_stream_request_id.is_some() {
+            } else if self
+                .request
+                .animation_stream_request_ids
+                .iter()
+                .any(Option::is_some)
+            {
                 "animation-request"
             } else if self.request.active_animation_stream_view.is_some() {
                 "animation-active"
@@ -2462,6 +2471,22 @@ impl ViewerState {
         );
         self.display_assets.content_left = left.content;
         self.display_assets.content_right = right.content;
+        let both_contents_animated = matches!(
+            self.display_assets.content_left.as_ref(),
+            Some(PageContent::AnimatedReady { .. } | PageContent::AnimatedStream { .. })
+        ) && matches!(
+            self.display_assets.content_right.as_ref(),
+            Some(PageContent::AnimatedReady { .. } | PageContent::AnimatedStream { .. })
+        );
+        if both_contents_animated {
+            let baseline = Instant::now();
+            if let Some(content) = self.display_assets.content_left.as_mut() {
+                content.synchronize_initial_start(baseline);
+            }
+            if let Some(content) = self.display_assets.content_right.as_mut() {
+                content.synchronize_initial_start(baseline);
+            }
+        }
         let upload_elapsed = upload_started.elapsed().as_millis();
         let committed = self.finalize_display_commit(FinalizeDisplayCommitContext {
             result,
@@ -2708,10 +2733,6 @@ impl ViewerState {
             self.ui_runtime.nav_mode = NavMode::Sequential;
         }
         self.ui_runtime.last_display_commit_show_seq = Some(self.ui_runtime.show_seq);
-        if self.ui_runtime.first_display_commit_at.is_none() {
-            self.ui_runtime.first_display_commit_at = Some(Instant::now());
-            ctx.request_repaint_after(SPAD_GUARANTEED_START_DELAY);
-        }
         if result.left_is_animation_stream || result.right_is_animation_stream {
             self.request.active_animation_stream_view = Some(self.persistent.requested_page);
         } else {
@@ -2873,7 +2894,7 @@ impl ViewerState {
         self.request.rgba_cache_max_mb.hash(&mut hasher);
         self.request.spad_ram_ratio_percent.hash(&mut hasher);
         self.request.active_animation_stream_view.hash(&mut hasher);
-        self.request.animation_stream_request_id.hash(&mut hasher);
+        self.request.animation_stream_request_ids.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -2922,7 +2943,11 @@ impl ViewerState {
                 page_decode_h,
             ),
             active_animation_stream_view: self.request.active_animation_stream_view,
-            animation_stream_request_id: self.request.animation_stream_request_id,
+            animation_stream_request_in_flight: self
+                .request
+                .animation_stream_request_ids
+                .iter()
+                .any(Option::is_some),
         };
         self.request.worker_manager.update_state(snapshot);
     }
@@ -3464,40 +3489,52 @@ impl ViewerState {
         }
         {
             let l2_status = self.l2_settled_status();
-            let first_display_commit_at = self.ui_runtime.first_display_commit_at;
-            let scope = if first_display_commit_at.is_some() && l2_status.settled {
+            let display_stable = self.ui_runtime.last_display_commit_show_seq.is_some()
+                && !self.ui_runtime.loading
+                && self.persistent.displayed_page == self.persistent.requested_page
+                && self.persistent.displayed_page == self.persistent.target_page;
+            let l2_usage_threshold_reached = l2_status.max_bytes > 0
+                && l2_status.current_bytes.saturating_mul(100)
+                    >= l2_status
+                        .max_bytes
+                        .saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT);
+            let page_map_page_count = match &self.persistent.page_map_mode {
+                ViewerPageMapMode::Mapped(page_map) => Some(page_map.page_count()),
+                ViewerPageMapMode::Unavailable => None,
+            };
+            let l2_page_threshold_reached = page_map_page_count.is_some_and(|page_count| {
+                page_count > 0
+                    && l2_status.cached_page_count.saturating_mul(100)
+                        >= page_count.saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT)
+            });
+            let scope = if l2_status.settled {
                 Some(SpadDispatchScope::All)
-            } else if let Some(first_display_commit_at) = first_display_commit_at {
-                let elapsed = first_display_commit_at.elapsed();
-                if elapsed >= SPAD_GUARANTEED_START_DELAY {
-                    Some(SpadDispatchScope::GuaranteedOnly)
-                } else {
-                    ctx.request_repaint_after(SPAD_GUARANTEED_START_DELAY - elapsed);
-                    None
-                }
+            } else if l2_usage_threshold_reached || l2_page_threshold_reached {
+                Some(SpadDispatchScope::GuaranteedOnly)
             } else {
                 None
             };
-            let skip_reason = if first_display_commit_at.is_none() {
-                Some("initial_display_not_committed")
+            let skip_reason = if !display_stable {
+                Some("display_not_stable")
             } else if l2_status.book_id.as_ref() != Some(&current_book_id) {
                 Some("book_mismatch")
             } else if l2_status.generation != current_generation {
                 Some("generation_mismatch")
             } else if scope.is_none() {
-                Some("guaranteed_start_delay_not_elapsed")
+                Some("l2_below_early_usage_threshold")
             } else {
                 None
             };
             if let Some(reason) = skip_reason {
                 spad_trace_debug!(
-                    "[spad-skip] reason={} generation={} settled={} l2_bytes={}/{} l2_pages={} inflight={}",
+                    "[spad-skip] reason={} generation={} settled={} l2_bytes={}/{} l2_pages={}/{} inflight={}",
                     reason,
                     l2_status.generation,
                     l2_status.settled,
                     l2_status.current_bytes,
                     l2_status.max_bytes,
                     l2_status.cached_page_count,
+                    page_map_page_count.unwrap_or(0),
                     self.spad.next_inflight.is_some() || self.spad.prev_inflight.is_some()
                 );
                 return handled;
@@ -5706,7 +5743,7 @@ impl ViewerState {
 
     pub(super) fn clear_animation_stream_state(&mut self) {
         self.request.active_animation_stream_view = None;
-        self.request.animation_stream_request_id = None;
+        self.request.animation_stream_request_ids = [None; 2];
     }
 
     pub(super) fn invalidate_spread_snapshot(&mut self) {
@@ -5913,9 +5950,10 @@ impl ViewerState {
     pub(super) fn apply_animation_stream_chunk_result(
         &mut self,
         result: crate::infra::worker::viewer_loader::ViewerResult,
+        request_slot: usize,
         ctx: &egui::Context,
     ) -> bool {
-        self.request.animation_stream_request_id = None;
+        self.request.animation_stream_request_ids[request_slot] = None;
         if self.request.active_animation_stream_view != Some(self.active_animation_view())
             || self.ui_runtime.nav_mode == NavMode::FollowLatest
         {
@@ -5963,12 +6001,6 @@ impl ViewerState {
                 }
             }
         }
-        tracing::trace!(
-            request_id = result.request_id,
-            left_exhausted = result.left_stream_exhausted,
-            right_exhausted = result.right_stream_exhausted,
-            "viewer_ui: animation stream chunk applied"
-        );
         true
     }
 
@@ -6530,8 +6562,13 @@ impl ViewerState {
 
         // 世代外の結果は到着順ではなく新しさを優先して捨てる。
         if !is_active_interactive_id {
-            if self.request.animation_stream_request_id == Some(result.request_id) {
-                return self.apply_animation_stream_chunk_result(result, ctx);
+            if let Some(request_slot) = self
+                .request
+                .animation_stream_request_ids
+                .iter()
+                .position(|id| *id == Some(result.request_id))
+            {
+                return self.apply_animation_stream_chunk_result(result, request_slot, ctx);
             }
             tracing::trace!(
                 "[viewer-result-drop] nav_id={} req={} current_req={} view={} reason=stale_noninteractive_result worker={} page_left={:?} page_right={:?}",
@@ -6612,7 +6649,6 @@ impl ViewerState {
     ) -> bool {
         if self.ui_runtime.loading
             || self.request.queued_view.is_some()
-            || self.request.animation_stream_request_id.is_some()
             || self.ui_runtime.nav_mode == NavMode::FollowLatest
         {
             return false;
@@ -6624,23 +6660,31 @@ impl ViewerState {
             return false;
         }
 
-        let left_needs_restart = self
-            .display_assets
-            .content_left
-            .as_ref()
-            .is_some_and(PageContent::stream_should_restart);
-        let right_needs_restart = self
-            .display_assets
-            .content_right
-            .as_ref()
-            .is_some_and(PageContent::stream_should_restart);
-        let left_needs_fill = !left_needs_restart
+        let left_slot_empty =
+            self.request.animation_stream_request_ids[ANIMATION_STREAM_LEFT_SLOT].is_none();
+        let right_slot_empty =
+            self.request.animation_stream_request_ids[ANIMATION_STREAM_RIGHT_SLOT].is_none();
+        let left_needs_restart = left_slot_empty
+            && self
+                .display_assets
+                .content_left
+                .as_ref()
+                .is_some_and(PageContent::stream_should_restart);
+        let right_needs_restart = right_slot_empty
+            && self
+                .display_assets
+                .content_right
+                .as_ref()
+                .is_some_and(PageContent::stream_should_restart);
+        let left_needs_fill = left_slot_empty
+            && !left_needs_restart
             && self
                 .display_assets
                 .content_left
                 .as_ref()
                 .is_some_and(PageContent::stream_should_fill);
-        let right_needs_fill = !right_needs_restart
+        let right_needs_fill = right_slot_empty
+            && !right_needs_restart
             && self
                 .display_assets
                 .content_right
@@ -6654,71 +6698,60 @@ impl ViewerState {
         self.log_view_layout("request", &layout);
         let full_left = layout.page_left;
         let full_right = layout.page_right;
-        let page_left = if left_needs_restart || left_needs_fill {
-            full_left
-        } else {
-            None
-        };
-        let page_right = if right_needs_restart || right_needs_fill {
-            full_right
-        } else {
-            None
-        };
         let request_display_w = layout.page_decode_w;
         let request_display_h = layout.page_decode_h;
-        let request_id = if left_needs_restart || right_needs_restart {
-            self.request
-                .loader
-                .send_animation_stream_start(ViewerLoadRequest {
-                    path: Arc::clone(&self.persistent.entry.path),
-                    view_idx,
-                    page_left,
-                    page_right,
-                    display_w: request_display_w,
-                    display_h: request_display_h,
-                    quality: self.request.quality,
-                    max_tex_side,
-                    frame_cache_cap: self.frame_cache_cap(),
-                    nav_id: self.request.active_nav_id.unwrap_or(0),
-                    interactive: true,
-                })
-        } else {
-            self.request
-                .loader
-                .send_animation_stream_fill(ViewerLoadRequest {
-                    path: Arc::clone(&self.persistent.entry.path),
-                    view_idx,
-                    page_left,
-                    page_right,
-                    display_w: request_display_w,
-                    display_h: request_display_h,
-                    quality: self.request.quality,
-                    max_tex_side,
-                    frame_cache_cap: self.frame_cache_cap(),
-                    nav_id: self.request.active_nav_id.unwrap_or(0),
-                    interactive: true,
-                })
-        };
-        self.request.animation_stream_request_id = Some(request_id);
+        let nav_id = self.request.active_nav_id.unwrap_or(0);
+        let frame_cache_cap = self.frame_cache_cap();
         if left_needs_restart || left_needs_fill {
+            let request = ViewerLoadRequest {
+                path: Arc::clone(&self.persistent.entry.path),
+                view_idx,
+                page_left: full_left,
+                page_right: None,
+                display_w: request_display_w,
+                display_h: request_display_h,
+                quality: self.request.quality,
+                max_tex_side,
+                frame_cache_cap,
+                nav_id,
+                interactive: true,
+            };
+            let request_id = if left_needs_restart {
+                self.request.loader.send_animation_stream_start(request)
+            } else {
+                self.request.loader.send_animation_stream_fill(request)
+            };
+            self.request.animation_stream_request_ids[ANIMATION_STREAM_LEFT_SLOT] =
+                Some(request_id);
             if let Some(content) = self.display_assets.content_left.as_mut() {
                 content.mark_stream_fill_in_flight();
             }
         }
         if right_needs_restart || right_needs_fill {
+            let request = ViewerLoadRequest {
+                path: Arc::clone(&self.persistent.entry.path),
+                view_idx,
+                page_left: None,
+                page_right: full_right,
+                display_w: request_display_w,
+                display_h: request_display_h,
+                quality: self.request.quality,
+                max_tex_side,
+                frame_cache_cap,
+                nav_id,
+                interactive: true,
+            };
+            let request_id = if right_needs_restart {
+                self.request.loader.send_animation_stream_start(request)
+            } else {
+                self.request.loader.send_animation_stream_fill(request)
+            };
+            self.request.animation_stream_request_ids[ANIMATION_STREAM_RIGHT_SLOT] =
+                Some(request_id);
             if let Some(content) = self.display_assets.content_right.as_mut() {
                 content.mark_stream_fill_in_flight();
             }
         }
-        tracing::trace!(
-            request_id,
-            view_idx,
-            left_needs_restart,
-            right_needs_restart,
-            left_needs_fill,
-            right_needs_fill,
-            "viewer_ui: animation stream fill requested"
-        );
         true
     }
 
@@ -6732,10 +6765,15 @@ impl ViewerState {
             self.request.prefetch_idle_deadline = None;
             return;
         }
-        if self.request.animation_stream_request_id.is_some() {
+        if self
+            .request
+            .animation_stream_request_ids
+            .iter()
+            .any(Option::is_some)
+        {
             tracing::trace!(
                 requested_page = self.persistent.requested_page,
-                animation_stream_request_id = ?self.request.animation_stream_request_id,
+                animation_stream_request_ids = ?self.request.animation_stream_request_ids,
                 "viewer: prefetch suppressed by animation stream"
             );
             self.request.prefetch_idle_deadline = None;
