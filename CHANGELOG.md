@@ -1,7 +1,5 @@
 # Changelog
 
-## 0.4.9
-
 ### Added
 
 - Added `Alt+Enter` in the Library to open Properties for the selected item.
