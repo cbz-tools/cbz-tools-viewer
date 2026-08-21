@@ -480,8 +480,20 @@ impl PageContent {
         }
     }
 
+    fn update_animated_texture(
+        texture: &mut egui::TextureHandle,
+        size: [usize; 2],
+        color: egui::ColorImage,
+    ) {
+        if texture.size() == size {
+            texture.set_partial([0, 0], color, egui::TextureOptions::LINEAR);
+        } else {
+            texture.set(color, egui::TextureOptions::LINEAR);
+        }
+    }
+
     /// 次回再描画時刻を管理する。静止画は長周期で固定する。
-    pub fn tick(&mut self, label: &str, ctx: &egui::Context) -> Duration {
+    pub fn tick(&mut self, _label: &str, _ctx: &egui::Context) -> Duration {
         match self {
             Self::Static(_) => Duration::from_secs(3600),
             Self::AnimatedReady {
@@ -501,7 +513,11 @@ impl PageContent {
                         [img.width as usize, img.height as usize],
                         &img.pixels,
                     );
-                    *texture = ctx.load_texture(label, color, egui::TextureOptions::LINEAR);
+                    Self::update_animated_texture(
+                        texture,
+                        [img.width as usize, img.height as usize],
+                        color,
+                    );
                     let delay = frames[*current].delay_ms.max(img::MIN_FRAME_DELAY_MS) as u64;
                     *next_frame_at = now + Duration::from_millis(delay);
                 }
@@ -527,7 +543,11 @@ impl PageContent {
                                 [img.width as usize, img.height as usize],
                                 &img.pixels,
                             );
-                            *texture = ctx.load_texture(label, color, egui::TextureOptions::LINEAR);
+                            Self::update_animated_texture(
+                                texture,
+                                [img.width as usize, img.height as usize],
+                                color,
+                            );
                             let delay = next.delay_ms.max(img::MIN_FRAME_DELAY_MS) as u64;
                             *next_frame_at = now + Duration::from_millis(delay);
                         }

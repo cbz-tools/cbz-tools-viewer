@@ -3,7 +3,7 @@
 //! UI には先にサムネイルを返し、永続化と Page Map 反映は後段で処理する。
 //! complete / slow Page Map の実処理は `PageMapCoordinator` に委譲する。
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -53,6 +53,8 @@ const THUMB_MEM_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// 動画代表フレームを取得する位置の割合。
 const VIDEO_THUMB_POSITION_RATIO: f64 = 0.05;
 const ANIMATED_PREVIEW_SCRUB_BUCKET_SLOTS: usize = 16;
+pub(crate) const BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE: usize = 3_000;
+const BACKGROUND_ARTIFACT_MAX_CREDIT: f64 = 8.0;
 
 // ── 公開型 ────────────────────────────────────────────────────────────────────
 
@@ -272,11 +274,33 @@ pub enum WorkerMsg {
     PageMapStatus(PageMapStatus),
 }
 
+#[derive(Clone)]
+pub(crate) enum BackgroundArtifactJob {
+    Image {
+        task: ThumbTask,
+        page_map_only: bool,
+    },
+    Video(VideoThumbTask),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RequestOrigin {
+    Visible,
+    Background,
+}
+
+impl RequestOrigin {
+    fn is_visible(self) -> bool {
+        matches!(self, Self::Visible)
+    }
+}
+
 // ── ThumbWorker ───────────────────────────────────────────────────────────────
 
 pub struct ThumbWorker {
     req_tx: tokio::sync::mpsc::UnboundedSender<WorkerReq>,
     video_req_tx: tokio::sync::mpsc::UnboundedSender<VideoReq>,
+    video_background_req_tx: tokio::sync::mpsc::UnboundedSender<VideoReq>,
     resp_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WorkerMsg>>,
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
@@ -284,10 +308,24 @@ pub struct ThumbWorker {
     display_mailbox: Arc<DisplayThumbMailbox>,
     preview_control: Arc<PreviewControl>,
     animated_result: Arc<Mutex<Option<WorkerMsg>>>,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
+    background_scheduler_ready: Arc<std::sync::atomic::AtomicBool>,
+    background_scheduler_tx: std::sync::mpsc::Sender<BackgroundSchedulerCommand>,
+    background_scheduler_handle: Mutex<Option<thread::JoinHandle<()>>>,
+}
+
+enum BackgroundSchedulerCommand {
+    Replace {
+        jobs: Vec<BackgroundArtifactJob>,
+        generation: u64,
+    },
+    SetVisible(HashSet<BookId>),
+    Clear,
+    Shutdown,
 }
 
 enum WorkerReq {
-    Task(ThumbTask, u64),
+    Task(ThumbTask, u64, RequestOrigin),
     PageMapOnly(ThumbTask, u64),
     PruneObsoleteArtifacts {
         id: BookId,
@@ -307,7 +345,7 @@ enum WorkerReq {
 }
 
 enum VideoReq {
-    Task(VideoThumbTask, u64),
+    Task(VideoThumbTask, u64, RequestOrigin),
     ClearCache,
     RemoveCache(BookId),
     Shutdown,
@@ -556,7 +594,188 @@ fn submit_animated_preview_scrub(
 
 enum VideoLoopEvent {
     TaskFinished(Option<Result<(), tokio::task::JoinError>>),
-    Request(Option<VideoReq>),
+    VisibleRequest(Option<VideoReq>),
+    BackgroundRequest(Option<VideoReq>),
+}
+
+fn background_artifact_is_visible(
+    visible_artifact_ids: &Arc<Mutex<HashSet<BookId>>>,
+    id: &BookId,
+) -> bool {
+    visible_artifact_ids
+        .lock()
+        .map(|ids| ids.contains(id))
+        .unwrap_or(false)
+}
+
+fn background_scheduler_loop(
+    rx: std::sync::mpsc::Receiver<BackgroundSchedulerCommand>,
+    req_tx: tokio::sync::mpsc::UnboundedSender<WorkerReq>,
+    video_background_req_tx: tokio::sync::mpsc::UnboundedSender<VideoReq>,
+    generation: Arc<AtomicU64>,
+    lanes: Arc<ThumbnailLaneState>,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
+    background_scheduler_ready: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut jobs = VecDeque::new();
+    let mut job_generation = generation.load(Ordering::Relaxed);
+    let mut credit = 0.0;
+    let mut last_refill_at = Instant::now();
+
+    loop {
+        if !background_scheduler_ready.load(Ordering::Acquire) {
+            match rx.recv() {
+                Ok(BackgroundSchedulerCommand::Replace {
+                    jobs: replacement,
+                    generation: replacement_generation,
+                }) => {
+                    jobs = replacement.into();
+                    job_generation = replacement_generation;
+                    credit = 0.0;
+                    last_refill_at = Instant::now();
+                }
+                Ok(BackgroundSchedulerCommand::SetVisible(ids)) => {
+                    if let Ok(mut visible) = visible_artifact_ids.lock() {
+                        *visible = ids;
+                    }
+                    background_scheduler_ready.store(true, Ordering::Release);
+                }
+                Ok(BackgroundSchedulerCommand::Clear) => {
+                    jobs.clear();
+                    credit = 0.0;
+                    last_refill_at = Instant::now();
+                    job_generation = generation.load(Ordering::Relaxed);
+                }
+                Ok(BackgroundSchedulerCommand::Shutdown) | Err(_) => return,
+            }
+            continue;
+        }
+
+        if jobs.is_empty() {
+            match rx.recv() {
+                Ok(BackgroundSchedulerCommand::Replace {
+                    jobs: replacement,
+                    generation: replacement_generation,
+                }) => {
+                    jobs = replacement.into();
+                    job_generation = replacement_generation;
+                    credit = 0.0;
+                    last_refill_at = Instant::now();
+                }
+                Ok(BackgroundSchedulerCommand::SetVisible(ids)) => {
+                    if let Ok(mut visible) = visible_artifact_ids.lock() {
+                        *visible = ids;
+                    }
+                }
+                Ok(BackgroundSchedulerCommand::Clear) => {
+                    jobs.clear();
+                    credit = 0.0;
+                    last_refill_at = Instant::now();
+                    job_generation = generation.load(Ordering::Relaxed);
+                    background_scheduler_ready.store(false, Ordering::Release);
+                }
+                Ok(BackgroundSchedulerCommand::Shutdown) | Err(_) => return,
+            }
+            continue;
+        }
+
+        if generation.load(Ordering::Relaxed) != job_generation {
+            jobs.clear();
+            credit = 0.0;
+            last_refill_at = Instant::now();
+            job_generation = generation.load(Ordering::Relaxed);
+            continue;
+        }
+
+        let now = Instant::now();
+        let elapsed = now.saturating_duration_since(last_refill_at).as_secs_f64();
+        credit = (credit + elapsed * (BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE as f64 / 60.0))
+            .min(BACKGROUND_ARTIFACT_MAX_CREDIT);
+        last_refill_at = now;
+        let budget = credit.floor() as usize;
+        if budget == 0 {
+            let rate_per_second = BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE as f64 / 60.0;
+            let until_credit = ((1.0 - credit).max(0.0) / rate_per_second).max(0.001);
+            match rx.recv_timeout(Duration::from_secs_f64(until_credit)) {
+                Ok(command) => match command {
+                    BackgroundSchedulerCommand::Replace {
+                        jobs: replacement,
+                        generation: replacement_generation,
+                    } => {
+                        jobs = replacement.into();
+                        job_generation = replacement_generation;
+                        credit = 0.0;
+                        last_refill_at = Instant::now();
+                    }
+                    BackgroundSchedulerCommand::SetVisible(ids) => {
+                        if let Ok(mut visible) = visible_artifact_ids.lock() {
+                            *visible = ids;
+                        }
+                    }
+                    BackgroundSchedulerCommand::Clear => {
+                        jobs.clear();
+                        credit = 0.0;
+                        last_refill_at = Instant::now();
+                        job_generation = generation.load(Ordering::Relaxed);
+                        background_scheduler_ready.store(false, Ordering::Release);
+                    }
+                    BackgroundSchedulerCommand::Shutdown => return,
+                },
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+            continue;
+        }
+
+        for _ in 0..budget {
+            let Some(job) = jobs.pop_front() else {
+                break;
+            };
+            credit -= 1.0;
+            let id = match &job {
+                BackgroundArtifactJob::Image { task, .. } => &task.book_id,
+                BackgroundArtifactJob::Video(task) => &task.book_id,
+            };
+            if background_artifact_is_visible(&visible_artifact_ids, id) {
+                continue;
+            }
+            match job {
+                BackgroundArtifactJob::Image {
+                    task,
+                    page_map_only,
+                } => {
+                    if page_map_only {
+                        let _ = req_tx.send(WorkerReq::PageMapOnly(task, job_generation));
+                    } else {
+                        lanes.mark_request_pending(ThumbnailLane::Image);
+                        if req_tx
+                            .send(WorkerReq::Task(
+                                task,
+                                job_generation,
+                                RequestOrigin::Background,
+                            ))
+                            .is_err()
+                        {
+                            lanes.retire_request_pending(ThumbnailLane::Image);
+                        }
+                    }
+                }
+                BackgroundArtifactJob::Video(task) => {
+                    lanes.mark_request_pending(ThumbnailLane::Video);
+                    if video_background_req_tx
+                        .send(VideoReq::Task(
+                            task,
+                            job_generation,
+                            RequestOrigin::Background,
+                        ))
+                        .is_err()
+                    {
+                        lanes.retire_request_pending(ThumbnailLane::Video);
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl ThumbWorker {
@@ -567,13 +786,41 @@ impl ThumbWorker {
             .clamp(2, 8);
         let (req_tx, req_rx) = tokio::sync::mpsc::unbounded_channel::<WorkerReq>();
         let (video_req_tx, video_req_rx) = tokio::sync::mpsc::unbounded_channel::<VideoReq>();
+        let (video_background_req_tx, video_background_req_rx) =
+            tokio::sync::mpsc::unbounded_channel::<VideoReq>();
         let (resp_tx, resp_rx) = std::sync::mpsc::channel::<WorkerMsg>();
+        let (background_scheduler_tx, background_scheduler_rx) =
+            std::sync::mpsc::channel::<BackgroundSchedulerCommand>();
         let generation = Arc::new(AtomicU64::new(0));
         let artifact_generation = Arc::new(AtomicU64::new(0));
         let lanes = Arc::new(ThumbnailLaneState::new(base_goal));
         let display_mailbox = Arc::new(DisplayThumbMailbox::new(Arc::clone(&lanes)));
         let preview_control = Arc::new(PreviewControl::new());
         let animated_result = Arc::new(Mutex::new(None));
+        let visible_artifact_ids = Arc::new(Mutex::new(HashSet::new()));
+        let background_scheduler_ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let background_scheduler_handle = thread::Builder::new()
+            .name("thumb-background-scheduler".into())
+            .spawn({
+                let req_tx = req_tx.clone();
+                let video_background_req_tx = video_background_req_tx.clone();
+                let generation = Arc::clone(&generation);
+                let lanes = Arc::clone(&lanes);
+                let visible_artifact_ids = Arc::clone(&visible_artifact_ids);
+                let background_scheduler_ready = Arc::clone(&background_scheduler_ready);
+                move || {
+                    background_scheduler_loop(
+                        background_scheduler_rx,
+                        req_tx,
+                        video_background_req_tx,
+                        generation,
+                        lanes,
+                        visible_artifact_ids,
+                        background_scheduler_ready,
+                    )
+                }
+            })
+            .ok();
         let normal_resp_tx = resp_tx.clone();
         let preview_resp_tx = resp_tx.clone();
         let normal_repaint = repaint.clone();
@@ -586,11 +833,13 @@ impl ThumbWorker {
                 let artifact_gate = Arc::clone(&artifact_gate);
                 let lanes = Arc::clone(&lanes);
                 let display_mailbox = Arc::clone(&display_mailbox);
+                let visible_artifact_ids = Arc::clone(&visible_artifact_ids);
                 let req_tx = req_tx.clone();
                 move || {
                     worker_main(WorkerMainContext {
                         req_rx,
                         video_req_rx,
+                        video_background_req_rx,
                         req_tx,
                         resp_tx: normal_resp_tx,
                         repaint: normal_repaint,
@@ -599,6 +848,7 @@ impl ThumbWorker {
                         artifact_gate,
                         lanes,
                         display_mailbox,
+                        visible_artifact_ids,
                         base_goal,
                     })
                 }
@@ -625,6 +875,7 @@ impl ThumbWorker {
         Self {
             req_tx,
             video_req_tx,
+            video_background_req_tx,
             resp_rx: std::sync::Mutex::new(resp_rx),
             generation,
             artifact_generation,
@@ -632,13 +883,21 @@ impl ThumbWorker {
             display_mailbox,
             preview_control,
             animated_result,
+            visible_artifact_ids,
+            background_scheduler_ready,
+            background_scheduler_tx,
+            background_scheduler_handle: Mutex::new(background_scheduler_handle),
         }
     }
 
     pub fn request(&self, task: ThumbTask) {
         let generation = self.generation.load(Ordering::Relaxed);
         self.lanes.mark_request_pending(ThumbnailLane::Image);
-        if self.req_tx.send(WorkerReq::Task(task, generation)).is_err() {
+        if self
+            .req_tx
+            .send(WorkerReq::Task(task, generation, RequestOrigin::Visible))
+            .is_err()
+        {
             self.lanes.retire_request_pending(ThumbnailLane::Image);
         }
     }
@@ -649,9 +908,28 @@ impl ThumbWorker {
             .replace(tasks.into_iter().map(|task| (task, generation)).collect());
     }
 
-    pub fn request_page_map(&self, task: ThumbTask) {
+    pub(crate) fn replace_background_artifact_jobs(&self, jobs: Vec<BackgroundArtifactJob>) {
         let generation = self.generation.load(Ordering::Relaxed);
-        let _ = self.req_tx.send(WorkerReq::PageMapOnly(task, generation));
+        self.background_scheduler_ready
+            .store(false, Ordering::Release);
+        let _ = self
+            .background_scheduler_tx
+            .send(BackgroundSchedulerCommand::Replace { jobs, generation });
+    }
+
+    pub(crate) fn set_visible_artifact_ids(&self, ids: HashSet<BookId>) {
+        if let Ok(mut visible) = self.visible_artifact_ids.lock() {
+            *visible = ids.clone();
+        }
+        self.background_scheduler_ready
+            .store(true, Ordering::Release);
+        let _ = self
+            .background_scheduler_tx
+            .send(BackgroundSchedulerCommand::SetVisible(ids));
+    }
+
+    pub(crate) fn is_artifact_visible(&self, id: &BookId) -> bool {
+        background_artifact_is_visible(&self.visible_artifact_ids, id)
     }
 
     pub fn request_video(&self, task: VideoThumbTask) {
@@ -665,7 +943,7 @@ impl ThumbWorker {
         self.lanes.mark_request_pending(ThumbnailLane::Video);
         if self
             .video_req_tx
-            .send(VideoReq::Task(task, generation))
+            .send(VideoReq::Task(task, generation, RequestOrigin::Visible))
             .is_err()
         {
             self.lanes.retire_request_pending(ThumbnailLane::Video);
@@ -753,16 +1031,32 @@ impl ThumbWorker {
 
     pub fn clear_pending_tasks(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
+        self.background_scheduler_ready
+            .store(false, Ordering::Release);
         self.stop_preview();
         self.display_mailbox.clear();
+        if let Ok(mut visible) = self.visible_artifact_ids.lock() {
+            visible.clear();
+        }
+        let _ = self
+            .background_scheduler_tx
+            .send(BackgroundSchedulerCommand::Clear);
         let _ = self.req_tx.send(WorkerReq::ClearPending);
     }
 
     pub fn clear_cache_state(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.artifact_generation.fetch_add(1, Ordering::SeqCst);
+        self.background_scheduler_ready
+            .store(false, Ordering::Release);
         self.stop_preview();
         self.display_mailbox.clear();
+        if let Ok(mut visible) = self.visible_artifact_ids.lock() {
+            visible.clear();
+        }
+        let _ = self
+            .background_scheduler_tx
+            .send(BackgroundSchedulerCommand::Clear);
         let _ = self.req_tx.send(WorkerReq::ClearCaches);
         let _ = self.video_req_tx.send(VideoReq::ClearCache);
     }
@@ -783,8 +1077,17 @@ impl ThumbWorker {
         self.generation.fetch_add(1, Ordering::SeqCst);
         clear_animated_preview_result(&self.animated_result);
         self.display_mailbox.close();
+        let _ = self
+            .background_scheduler_tx
+            .send(BackgroundSchedulerCommand::Shutdown);
+        if let Ok(mut handle) = self.background_scheduler_handle.lock() {
+            if let Some(handle) = handle.take() {
+                let _ = handle.join();
+            }
+        }
         let _ = self.req_tx.send(WorkerReq::Shutdown);
         let _ = self.video_req_tx.send(VideoReq::Shutdown);
+        let _ = self.video_background_req_tx.send(VideoReq::Shutdown);
         self.preview_control.shutdown();
     }
 
@@ -820,6 +1123,7 @@ impl Drop for ThumbWorker {
 struct WorkerMainContext {
     req_rx: tokio::sync::mpsc::UnboundedReceiver<WorkerReq>,
     video_req_rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
+    video_background_req_rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
     req_tx: tokio::sync::mpsc::UnboundedSender<WorkerReq>,
     resp_tx: std::sync::mpsc::Sender<WorkerMsg>,
     repaint: RepaintNotifier,
@@ -828,6 +1132,7 @@ struct WorkerMainContext {
     artifact_gate: Arc<RwLock<()>>,
     lanes: Arc<ThumbnailLaneState>,
     display_mailbox: Arc<DisplayThumbMailbox>,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
     base_goal: usize,
 }
 
@@ -835,6 +1140,7 @@ fn worker_main(context: WorkerMainContext) {
     let WorkerMainContext {
         mut req_rx,
         video_req_rx,
+        video_background_req_rx,
         req_tx,
         resp_tx,
         repaint,
@@ -843,6 +1149,7 @@ fn worker_main(context: WorkerMainContext) {
         artifact_gate,
         lanes,
         display_mailbox,
+        visible_artifact_ids,
         base_goal,
     } = context;
 
@@ -895,9 +1202,13 @@ fn worker_main(context: WorkerMainContext) {
     let page_map_status_notifier = {
         let resp_tx = resp_tx.clone();
         let repaint = repaint.clone();
-        Arc::new(move |status| {
+        let visible_artifact_ids = Arc::clone(&visible_artifact_ids);
+        Arc::new(move |status: PageMapStatus| {
+            let visible = background_artifact_is_visible(&visible_artifact_ids, &status.book_id);
             let _ = resp_tx.send(WorkerMsg::PageMapStatus(status));
-            repaint.request_repaint();
+            if visible {
+                repaint.request_repaint();
+            }
         })
     };
     let page_map_coordinator = Arc::new(PageMapCoordinator::new(
@@ -959,6 +1270,7 @@ fn worker_main(context: WorkerMainContext) {
             let prune_sem = Arc::clone(&prune_sem);
             let generation = Arc::clone(&generation);
             let display_mailbox = Arc::clone(&display_mailbox);
+            let visible_artifact_ids = Arc::clone(&visible_artifact_ids);
             async move {
                 while let Some(req) = req_rx.recv().await {
                     match req {
@@ -1069,7 +1381,7 @@ fn worker_main(context: WorkerMainContext) {
                                 }
                             });
                         }
-                        WorkerReq::Task(task, task_gen) => {
+                        WorkerReq::Task(task, task_gen, origin) => {
                             let _pending = PendingRequestGuard::new(
                                 Arc::clone(&shared.lanes),
                                 ThumbnailLane::Image,
@@ -1102,6 +1414,7 @@ fn worker_main(context: WorkerMainContext) {
                             let tx = resp_tx.clone();
                             let repaint = repaint.clone();
                             let generation = Arc::clone(&generation);
+                            let visible_artifact_ids_for_task = Arc::clone(&visible_artifact_ids);
                             tokio::spawn({
                                 let shared = Arc::clone(&shared);
                                 async move {
@@ -1112,6 +1425,8 @@ fn worker_main(context: WorkerMainContext) {
                                             tx,
                                             repaint,
                                             generation,
+                                            origin,
+                                            visible_artifact_ids: visible_artifact_ids_for_task,
                                         },
                                         permit,
                                         Some(NORMAL_TIMEOUT),
@@ -1135,9 +1450,19 @@ fn worker_main(context: WorkerMainContext) {
             let repaint = repaint.clone();
             let generation = Arc::clone(&generation);
             let thumbnail_sem = Arc::clone(&thumbnail_sem);
+            let visible_artifact_ids = Arc::clone(&visible_artifact_ids);
             async move {
-                video_worker_loop(video_req_rx, shared, tx, repaint, generation, thumbnail_sem)
-                    .await;
+                video_worker_loop(
+                    video_req_rx,
+                    video_background_req_rx,
+                    shared,
+                    tx,
+                    repaint,
+                    generation,
+                    thumbnail_sem,
+                    Arc::clone(&visible_artifact_ids),
+                )
+                .await;
             }
         });
 
@@ -1148,6 +1473,7 @@ fn worker_main(context: WorkerMainContext) {
             let generation = Arc::clone(&generation);
             let thumbnail_sem = Arc::clone(&thumbnail_sem);
             let display_mailbox = Arc::clone(&display_mailbox);
+            let visible_artifact_ids = Arc::clone(&visible_artifact_ids);
             async move {
                 display_worker_loop(
                     display_mailbox,
@@ -1156,6 +1482,7 @@ fn worker_main(context: WorkerMainContext) {
                     repaint,
                     generation,
                     thumbnail_sem,
+                    visible_artifact_ids,
                 )
                 .await;
             }
@@ -1172,6 +1499,7 @@ async fn display_worker_loop(
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
     thumbnail_sem: Arc<Semaphore>,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
 ) {
     loop {
         let notified = display_mailbox.wake.notified();
@@ -1221,6 +1549,7 @@ async fn display_worker_loop(
         let tx = resp_tx.clone();
         let repaint = repaint.clone();
         let generation = Arc::clone(&generation);
+        let visible_artifact_ids_for_task = Arc::clone(&visible_artifact_ids);
         tokio::spawn({
             let shared = Arc::clone(&shared);
             async move {
@@ -1231,6 +1560,8 @@ async fn display_worker_loop(
                         tx,
                         repaint,
                         generation,
+                        origin: RequestOrigin::Visible,
+                        visible_artifact_ids: visible_artifact_ids_for_task,
                     },
                     permit,
                     Some(NORMAL_TIMEOUT),
@@ -1272,6 +1603,7 @@ async fn run_thumb_task(
             &shared_for_blocking,
             &generation_for_blocking,
             task_gen,
+            runtime.origin,
         )
     });
 
@@ -1294,20 +1626,34 @@ async fn run_thumb_task(
                         tx: tx_for_watch,
                         repaint: repaint_for_watch,
                         generation: generation_for_watch,
+                        origin: runtime.origin,
                         display: label == "display",
+                        visible_artifact_ids: Arc::clone(&runtime.visible_artifact_ids),
                     },
                 )
                 .await;
             }
             Err(join_err) => {
                 tracing::error!(path = %path_disp_for_watch, "spawn_blocking panic: {join_err}");
-                if thumb_task_file_snapshot_matches(&task) {
-                    let _ = runtime.tx.send(WorkerMsg::FailedWithRevision {
-                        book_id: task.book_id,
-                        expected_size: task.expected_size,
-                        expected_modified: task.expected_modified,
-                    });
-                    runtime.repaint.request_repaint();
+                if task_gen == runtime.generation.load(Ordering::Relaxed)
+                    && thumb_task_file_snapshot_matches(&task)
+                {
+                    let currently_visible = background_artifact_is_visible(
+                        &runtime.visible_artifact_ids,
+                        &task.book_id,
+                    );
+                    let should_notify = runtime.origin.is_visible() || currently_visible;
+                    let should_repaint = label == "display" || currently_visible;
+                    if should_notify {
+                        let _ = runtime.tx.send(WorkerMsg::FailedWithRevision {
+                            book_id: task.book_id.clone(),
+                            expected_size: task.expected_size,
+                            expected_modified: task.expected_modified,
+                        });
+                    }
+                    if should_repaint {
+                        runtime.repaint.request_repaint();
+                    }
                 }
             }
         }
@@ -1341,11 +1687,29 @@ async fn handle_thumb_result(
     if runtime.task_gen != runtime.generation.load(Ordering::Relaxed) {
         return;
     }
+    let currently_visible =
+        background_artifact_is_visible(&runtime.visible_artifact_ids, &task.book_id);
+    let should_notify = runtime.origin.is_visible() || currently_visible;
     match msg {
-        WorkerMsg::Ready(_) => {
+        WorkerMsg::Ready(ready) => {
             clear_thumbnail_failure(&runtime.shared, &task);
-            let _ = runtime.tx.send(msg);
-            runtime.repaint.request_repaint();
+            if currently_visible && !runtime.origin.is_visible() {
+                runtime.shared.mem_cache.put(
+                    task.book_id.clone(),
+                    task.target_width,
+                    Thumbnail {
+                        width: ready.width,
+                        height: ready.height,
+                        pixels: Arc::clone(&ready.pixels),
+                    },
+                );
+            }
+            if should_notify {
+                let _ = runtime.tx.send(WorkerMsg::Ready(ready));
+            }
+            if runtime.display || currently_visible {
+                runtime.repaint.request_repaint();
+            }
             // UI を先に返し、WebP 保存は後段で実行する。
             if let Some(dc) = deferred {
                 tokio::spawn(async move {
@@ -1354,15 +1718,18 @@ async fn handle_thumb_result(
             }
         }
         WorkerMsg::Stale(_) => {
-            if runtime.display {
+            if runtime.display || (runtime.origin == RequestOrigin::Background && currently_visible)
+            {
                 let _ = runtime.tx.send(WorkerMsg::DisplayStale {
-                    book_id: task.book_id,
+                    book_id: task.book_id.clone(),
                     expected_size: task.expected_size,
                     expected_modified: task.expected_modified,
                     target_width: task.target_width,
                     bypass_cache: task.bypass_cache,
                 });
-                runtime.repaint.request_repaint();
+                if runtime.display || currently_visible {
+                    runtime.repaint.request_repaint();
+                }
             }
             // 通常・背景の古い結果は UI に流さない。差分 scan 側の再要求に任せる。
         }
@@ -1386,12 +1753,16 @@ async fn handle_thumb_result(
             debug_assert_eq!(id, task.book_id);
             if thumb_task_file_snapshot_matches(&task) {
                 tracing::warn!(path = %task.path.display(), "thumb task failed");
-                let _ = runtime.tx.send(WorkerMsg::FailedWithRevision {
-                    book_id: task.book_id,
-                    expected_size: task.expected_size,
-                    expected_modified: task.expected_modified,
-                });
-                runtime.repaint.request_repaint();
+                if should_notify {
+                    let _ = runtime.tx.send(WorkerMsg::FailedWithRevision {
+                        book_id: task.book_id.clone(),
+                        expected_size: task.expected_size,
+                        expected_modified: task.expected_modified,
+                    });
+                }
+                if runtime.display || currently_visible {
+                    runtime.repaint.request_repaint();
+                }
             }
         }
         WorkerMsg::FailedPermanent(id) => {
@@ -1399,12 +1770,16 @@ async fn handle_thumb_result(
             if thumb_task_file_snapshot_matches(&task) {
                 tracing::info!(path = %task.path.display(), "thumb task permanent failed");
                 mark_thumbnail_failure(&runtime.shared, &task);
-                let _ = runtime.tx.send(WorkerMsg::FailedPermanentWithRevision {
-                    book_id: task.book_id,
-                    expected_size: task.expected_size,
-                    expected_modified: task.expected_modified,
-                });
-                runtime.repaint.request_repaint();
+                if should_notify {
+                    let _ = runtime.tx.send(WorkerMsg::FailedPermanentWithRevision {
+                        book_id: task.book_id.clone(),
+                        expected_size: task.expected_size,
+                        expected_modified: task.expected_modified,
+                    });
+                }
+                if runtime.display || currently_visible {
+                    runtime.repaint.request_repaint();
+                }
             }
         }
         WorkerMsg::FailedWithRevision { .. } | WorkerMsg::FailedPermanentWithRevision { .. } => {
@@ -1418,6 +1793,8 @@ struct ThumbTaskRuntime {
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
+    origin: RequestOrigin,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
 }
 
 struct ThumbTaskResultContext {
@@ -1426,7 +1803,9 @@ struct ThumbTaskResultContext {
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
+    origin: RequestOrigin,
     display: bool,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
 }
 
 fn mark_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
@@ -2594,33 +2973,44 @@ fn preview_file_snapshot_matches(
 
 async fn video_worker_loop(
     mut rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
+    mut background_rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
     shared: Arc<WorkerShared>,
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
     thumbnail_sem: Arc<Semaphore>,
+    visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
 ) {
     let mut video_tasks = tokio::task::JoinSet::new();
+    let mut background_open = true;
     loop {
         let req = match tokio::select! {
+            biased;
+            req = rx.recv() => VideoLoopEvent::VisibleRequest(req),
+            req = background_rx.recv(), if background_open => VideoLoopEvent::BackgroundRequest(req),
             joined = video_tasks.join_next(), if !video_tasks.is_empty() => {
                 VideoLoopEvent::TaskFinished(joined)
             }
-            req = rx.recv() => VideoLoopEvent::Request(req),
         } {
             VideoLoopEvent::TaskFinished(Some(Err(error))) => {
                 tracing::error!("video task join failed: {error}");
                 continue;
             }
             VideoLoopEvent::TaskFinished(_) => continue,
-            VideoLoopEvent::Request(Some(req)) => req,
-            VideoLoopEvent::Request(None) => break,
+            VideoLoopEvent::VisibleRequest(Some(req))
+            | VideoLoopEvent::BackgroundRequest(Some(req)) => req,
+            VideoLoopEvent::VisibleRequest(None) => break,
+            VideoLoopEvent::BackgroundRequest(None) => {
+                background_open = false;
+                continue;
+            }
         };
 
-        let (task, task_gen, _pending) = match req {
-            VideoReq::Task(task, task_gen) => (
+        let (task, task_gen, origin, _pending) = match req {
+            VideoReq::Task(task, task_gen, origin) => (
                 task,
                 task_gen,
+                origin,
                 PendingRequestGuard::new(Arc::clone(&shared.lanes), ThumbnailLane::Video),
             ),
             VideoReq::ClearCache => {
@@ -2653,6 +3043,7 @@ async fn video_worker_loop(
             &generation,
             task_gen,
             task_artifact_generation,
+            origin,
         ) {
             VideoWorkResult::Ready { ready, .. } => {
                 if shared.artifact_generation.load(Ordering::Relaxed) != task_artifact_generation {
@@ -2668,6 +3059,8 @@ async fn video_worker_loop(
                         generation: &generation,
                         tx: &tx,
                         repaint: &repaint,
+                        origin,
+                        visible_artifact_ids: &visible_artifact_ids,
                     },
                 );
                 continue;
@@ -2676,14 +3069,28 @@ async fn video_worker_loop(
                 if shared.artifact_generation.load(Ordering::Relaxed) != task_artifact_generation {
                     continue;
                 }
-                send_video_stale(&task, task_gen, &tx, &repaint);
+                send_video_stale(
+                    &task,
+                    task_gen,
+                    &tx,
+                    &repaint,
+                    &visible_artifact_ids,
+                    origin,
+                );
                 continue;
             }
             VideoWorkResult::FailedPermanent => {
                 if shared.artifact_generation.load(Ordering::Relaxed) != task_artifact_generation {
                     continue;
                 }
-                emit_video_permanent_failure(&shared, &task, &tx, &repaint);
+                emit_video_permanent_failure(
+                    &shared,
+                    &task,
+                    &tx,
+                    &repaint,
+                    &visible_artifact_ids,
+                    origin,
+                );
                 continue;
             }
             VideoWorkResult::Failed => {}
@@ -2717,6 +3124,7 @@ async fn video_worker_loop(
         let tx_for_task = tx.clone();
         let repaint_for_task = repaint.clone();
         let generation_for_task = Arc::clone(&generation);
+        let visible_artifact_ids_for_task = Arc::clone(&visible_artifact_ids);
         video_tasks.spawn(async move {
             let task_for_blocking = task.clone();
             let generation_for_blocking = Arc::clone(&generation_for_task);
@@ -2739,6 +3147,8 @@ async fn video_worker_loop(
                     generation: &generation_for_task,
                     tx: &tx_for_task,
                     repaint: &repaint_for_task,
+                    origin,
+                    visible_artifact_ids: &visible_artifact_ids_for_task,
                 },
             );
             drop(permit);
@@ -2761,6 +3171,8 @@ struct VideoResultContext<'a> {
     generation: &'a Arc<AtomicU64>,
     tx: &'a std::sync::mpsc::Sender<WorkerMsg>,
     repaint: &'a RepaintNotifier,
+    origin: RequestOrigin,
+    visible_artifact_ids: &'a Arc<Mutex<HashSet<BookId>>>,
 }
 
 fn handle_video_result(
@@ -2775,6 +3187,8 @@ fn handle_video_result(
         generation,
         tx,
         repaint,
+        origin,
+        visible_artifact_ids,
     } = context;
 
     if task_gen != generation.load(Ordering::Relaxed)
@@ -2782,31 +3196,43 @@ fn handle_video_result(
     {
         return;
     }
+    let currently_visible = background_artifact_is_visible(visible_artifact_ids, &task.book_id);
+    let should_notify = origin.is_visible() || currently_visible;
     match result {
         Ok(VideoWorkResult::Ready { ready, webp }) => {
             if !thumb_task_file_snapshot_matches_video(&task) {
-                send_video_stale(&task, task_gen, tx, repaint);
+                send_video_stale(&task, task_gen, tx, repaint, visible_artifact_ids, origin);
                 return;
             }
             let revision =
                 SourceRevision::from_file_state(task.expected_size, task.expected_modified);
-            shared.mem_cache.put_for_revision(
-                task.book_id.clone(),
-                task.target_width,
-                Thumbnail {
-                    width: ready.width,
-                    height: ready.height,
-                    pixels: Arc::clone(&ready.pixels),
-                },
-                revision,
-            );
+            if should_notify {
+                shared.mem_cache.put_for_revision(
+                    task.book_id.clone(),
+                    task.target_width,
+                    Thumbnail {
+                        width: ready.width,
+                        height: ready.height,
+                        pixels: Arc::clone(&ready.pixels),
+                    },
+                    revision,
+                );
+            }
             clear_thumbnail_failure_for_video(shared, &task);
             tracing::debug!(
                 id = %task.book_id.0.to_hex(),
                 path = %task.path.display(),
                 "video thumb success"
             );
-            send_video_ready(&task, ready, task_gen, tx, repaint);
+            send_video_ready(
+                &task,
+                ready,
+                task_gen,
+                tx,
+                repaint,
+                visible_artifact_ids,
+                origin,
+            );
             if let Some(webp) = webp {
                 let deferred = DeferredCache {
                     generation: Arc::clone(generation),
@@ -2828,10 +3254,12 @@ fn handle_video_result(
                 });
             }
         }
-        Ok(VideoWorkResult::Stale) => send_video_stale(&task, task_gen, tx, repaint),
+        Ok(VideoWorkResult::Stale) => {
+            send_video_stale(&task, task_gen, tx, repaint, visible_artifact_ids, origin)
+        }
         Ok(VideoWorkResult::Failed) | Err(_) => {
             if !thumb_task_file_snapshot_matches_video(&task) {
-                send_video_stale(&task, task_gen, tx, repaint);
+                send_video_stale(&task, task_gen, tx, repaint, visible_artifact_ids, origin);
                 return;
             }
             tracing::debug!(
@@ -2839,16 +3267,20 @@ fn handle_video_result(
                 path = %task.path.display(),
                 "video thumbnail failed"
             );
-            let _ = tx.send(WorkerMsg::FailedWithRevision {
-                book_id: task.book_id,
-                expected_size: task.expected_size,
-                expected_modified: task.expected_modified,
-            });
-            repaint.request_repaint();
+            if should_notify {
+                let _ = tx.send(WorkerMsg::FailedWithRevision {
+                    book_id: task.book_id.clone(),
+                    expected_size: task.expected_size,
+                    expected_modified: task.expected_modified,
+                });
+            }
+            if currently_visible {
+                repaint.request_repaint();
+            }
         }
         Ok(VideoWorkResult::FailedPermanent) => {
             if !thumb_task_file_snapshot_matches_video(&task) {
-                send_video_stale(&task, task_gen, tx, repaint);
+                send_video_stale(&task, task_gen, tx, repaint, visible_artifact_ids, origin);
                 return;
             }
             tracing::debug!(
@@ -2856,7 +3288,7 @@ fn handle_video_result(
                 path = %task.path.display(),
                 "video permanent failure"
             );
-            emit_video_permanent_failure(shared, &task, tx, repaint);
+            emit_video_permanent_failure(shared, &task, tx, repaint, visible_artifact_ids, origin);
         }
     }
 }
@@ -2867,6 +3299,7 @@ fn lookup_video_cache(
     generation: &Arc<AtomicU64>,
     task_generation: u64,
     task_artifact_generation: u64,
+    origin: RequestOrigin,
 ) -> VideoWorkResult {
     if task_artifact_generation != shared.artifact_generation.load(Ordering::Relaxed)
         || !thumb_task_file_snapshot_matches_video(task)
@@ -2917,16 +3350,18 @@ fn lookup_video_cache(
                 return VideoWorkResult::Stale;
             }
             let ready = ready_from_decoded(decoded, task.clone());
-            shared.mem_cache.put_for_revision(
-                task.book_id.clone(),
-                task.target_width,
-                Thumbnail {
-                    width: ready.width,
-                    height: ready.height,
-                    pixels: Arc::clone(&ready.pixels),
-                },
-                revision,
-            );
+            if origin.is_visible() {
+                shared.mem_cache.put_for_revision(
+                    task.book_id.clone(),
+                    task.target_width,
+                    Thumbnail {
+                        width: ready.width,
+                        height: ready.height,
+                        pixels: Arc::clone(&ready.pixels),
+                    },
+                    revision,
+                );
+            }
             tracing::debug!(id = %task.book_id.0.to_hex(), "video thumbnail disk hit");
             clear_thumbnail_failure_for_video(shared, task);
             return VideoWorkResult::Ready { ready, webp: None };
@@ -2949,14 +3384,21 @@ fn send_video_ready(
     task_gen: u64,
     tx: &std::sync::mpsc::Sender<WorkerMsg>,
     repaint: &RepaintNotifier,
+    visible_artifact_ids: &Arc<Mutex<HashSet<BookId>>>,
+    origin: RequestOrigin,
 ) {
-    let _ = tx.send(WorkerMsg::VideoReady(VideoReady {
-        ready,
-        expected_size: task.expected_size,
-        expected_modified: task.expected_modified,
-        generation: task_gen,
-    }));
-    repaint.request_repaint();
+    let currently_visible = background_artifact_is_visible(visible_artifact_ids, &task.book_id);
+    if origin.is_visible() || currently_visible {
+        let _ = tx.send(WorkerMsg::VideoReady(VideoReady {
+            ready,
+            expected_size: task.expected_size,
+            expected_modified: task.expected_modified,
+            generation: task_gen,
+        }));
+    }
+    if currently_visible {
+        repaint.request_repaint();
+    }
 }
 
 fn send_video_stale(
@@ -2964,19 +3406,26 @@ fn send_video_stale(
     task_gen: u64,
     tx: &std::sync::mpsc::Sender<WorkerMsg>,
     repaint: &RepaintNotifier,
+    visible_artifact_ids: &Arc<Mutex<HashSet<BookId>>>,
+    origin: RequestOrigin,
 ) {
+    let currently_visible = background_artifact_is_visible(visible_artifact_ids, &task.book_id);
     tracing::debug!(
         id = %task.book_id.0.to_hex(),
         expected_size = task.expected_size,
         "video stale"
     );
-    let _ = tx.send(WorkerMsg::VideoStale {
-        book_id: task.book_id.clone(),
-        expected_size: task.expected_size,
-        expected_modified: task.expected_modified,
-        generation: task_gen,
-    });
-    repaint.request_repaint();
+    if origin.is_visible() || currently_visible {
+        let _ = tx.send(WorkerMsg::VideoStale {
+            book_id: task.book_id.clone(),
+            expected_size: task.expected_size,
+            expected_modified: task.expected_modified,
+            generation: task_gen,
+        });
+    }
+    if currently_visible {
+        repaint.request_repaint();
+    }
 }
 
 fn emit_video_permanent_failure(
@@ -2984,14 +3433,21 @@ fn emit_video_permanent_failure(
     task: &VideoThumbTask,
     tx: &std::sync::mpsc::Sender<WorkerMsg>,
     repaint: &RepaintNotifier,
+    visible_artifact_ids: &Arc<Mutex<HashSet<BookId>>>,
+    origin: RequestOrigin,
 ) {
+    let currently_visible = background_artifact_is_visible(visible_artifact_ids, &task.book_id);
     mark_thumbnail_failure_for_video(shared, task);
-    let _ = tx.send(WorkerMsg::FailedPermanentWithRevision {
-        book_id: task.book_id.clone(),
-        expected_size: task.expected_size,
-        expected_modified: task.expected_modified,
-    });
-    repaint.request_repaint();
+    if origin.is_visible() || currently_visible {
+        let _ = tx.send(WorkerMsg::FailedPermanentWithRevision {
+            book_id: task.book_id.clone(),
+            expected_size: task.expected_size,
+            expected_modified: task.expected_modified,
+        });
+    }
+    if currently_visible {
+        repaint.request_repaint();
+    }
 }
 
 fn process_video_thumb(
@@ -4106,6 +4562,7 @@ fn process_thumb(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    origin: RequestOrigin,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = &task.book_id;
     let source_revision =
@@ -4258,7 +4715,10 @@ fn process_thumb(
                         None
                     };
                     return attach_page_map_cache_hit(
-                        (store_and_ready(decoded, task, shared), deferred),
+                        (
+                            store_and_ready(decoded, task, shared, origin.is_visible()),
+                            deferred,
+                        ),
                         page_map_cache_hit,
                     );
                 }
@@ -4294,13 +4754,20 @@ fn process_thumb(
                     shared,
                     generation,
                     task_generation,
+                    origin.is_visible(),
                     Arc::clone(page_map_cache),
                 ),
                 page_map_cache_hit,
             );
         }
         return attach_page_map_cache_hit(
-            process_folder_thumbnail_only(task, shared, generation, task_generation),
+            process_folder_thumbnail_only(
+                task,
+                shared,
+                generation,
+                task_generation,
+                origin.is_visible(),
+            ),
             page_map_cache_hit,
         );
     }
@@ -4315,13 +4782,20 @@ fn process_thumb(
                     shared,
                     generation,
                     task_generation,
+                    origin.is_visible(),
                     Arc::clone(page_map_cache),
                 ),
                 page_map_cache_hit,
             );
         }
         return attach_page_map_cache_hit(
-            process_zip_thumbnail_only(task, shared, generation, task_generation),
+            process_zip_thumbnail_only(
+                task,
+                shared,
+                generation,
+                task_generation,
+                origin.is_visible(),
+            ),
             page_map_cache_hit,
         );
     }
@@ -4336,13 +4810,20 @@ fn process_thumb(
                     shared,
                     generation,
                     task_generation,
+                    origin.is_visible(),
                     Arc::clone(page_map_cache),
                 ),
                 page_map_cache_hit,
             );
         }
         return attach_page_map_cache_hit(
-            process_epub_thumbnail_only(task, shared, generation, task_generation),
+            process_epub_thumbnail_only(
+                task,
+                shared,
+                generation,
+                task_generation,
+                origin.is_visible(),
+            ),
             page_map_cache_hit,
         );
     }
@@ -4405,7 +4886,7 @@ fn process_thumb(
     }
 
     // decode/resize 完了後は UI を先に返し、WebP 保存は DeferredCache に分離する。
-    let msg = store_and_ready(resized, task.clone(), shared);
+    let msg = store_and_ready(resized, task.clone(), shared, origin.is_visible());
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -4557,6 +5038,7 @@ fn process_zip_thumbnail_only(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    cache_in_memory: bool,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let book_id = task.book_id.clone();
     let zip_scan_started = Instant::now();
@@ -4601,7 +5083,7 @@ fn process_zip_thumbnail_only(
         return (WorkerMsg::Stale(book_id.clone()), None);
     }
 
-    let msg = store_and_ready(resized, task.clone(), shared);
+    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -4649,6 +5131,7 @@ fn process_epub_thumbnail_only(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    cache_in_memory: bool,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let book_id = task.book_id.clone();
     let raw = match read_thumb_source_bytes(&task.path) {
@@ -4692,7 +5175,7 @@ fn process_epub_thumbnail_only(
         return (WorkerMsg::Stale(book_id.clone()), None);
     }
 
-    let msg = store_and_ready(resized, task.clone(), shared);
+    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -4717,6 +5200,7 @@ fn process_epub_book_artifacts(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    cache_in_memory: bool,
     page_map_cache: Arc<PageMapDiskCache>,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = task.book_id.clone();
@@ -4777,7 +5261,7 @@ fn process_epub_book_artifacts(
     }
 
     let webp = img::encode_webp(&decoded).ok();
-    let msg = store_and_ready(decoded, task.clone(), shared);
+    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let page_map_fast_ready = matches!(page_map_result, EpubPageMapFastOutcome::Ready(_));
     let page_map = match page_map_result {
@@ -4868,6 +5352,7 @@ fn process_zip_book_artifacts(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    cache_in_memory: bool,
     page_map_cache: Arc<PageMapDiskCache>,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = task.book_id.clone();
@@ -4995,7 +5480,7 @@ fn process_zip_book_artifacts(
         return (WorkerMsg::Stale(id.clone()), None);
     }
 
-    let msg = store_and_ready(decoded, task.clone(), shared);
+    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let page_map = Some(DeferredPageMap::Fast(PageMapFastPersistRequest {
         book_id: task.book_id.clone(),
@@ -5049,6 +5534,7 @@ fn process_folder_thumbnail_only(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    cache_in_memory: bool,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let book_id = task.book_id.clone();
     let raw = match read_thumb_source_bytes(&task.path) {
@@ -5108,7 +5594,7 @@ fn process_folder_thumbnail_only(
         return (WorkerMsg::Stale(book_id.clone()), None);
     }
 
-    let msg = store_and_ready(resized, task.clone(), shared);
+    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -5133,6 +5619,7 @@ fn process_folder_book_artifacts(
     shared: &WorkerShared,
     generation: &Arc<AtomicU64>,
     task_generation: u64,
+    cache_in_memory: bool,
     page_map_cache: Arc<PageMapDiskCache>,
 ) -> (WorkerMsg, Option<DeferredCache>) {
     let id = task.book_id.clone();
@@ -5199,7 +5686,7 @@ fn process_folder_book_artifacts(
     }
 
     let webp = img::encode_webp(&decoded).ok();
-    let msg = store_and_ready(decoded, task.clone(), shared);
+    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let fast_lane_page_count = fast_lane_pages.len();
 
@@ -5299,19 +5786,22 @@ fn store_and_ready(
     decoded: img::DecodedImage,
     task: ThumbTask,
     shared: &WorkerShared,
+    cache_in_memory: bool,
 ) -> WorkerMsg {
     let pixels: Arc<[u8]> = decoded.pixels.into();
     let (w, h) = (decoded.width as u16, decoded.height as u16);
 
-    shared.mem_cache.put(
-        task.book_id.clone(),
-        task.target_width,
-        Thumbnail {
-            width: w,
-            height: h,
-            pixels: Arc::clone(&pixels),
-        },
-    );
+    if cache_in_memory {
+        shared.mem_cache.put(
+            task.book_id.clone(),
+            task.target_width,
+            Thumbnail {
+                width: w,
+                height: h,
+                pixels: Arc::clone(&pixels),
+            },
+        );
+    }
 
     WorkerMsg::Ready(ReadyThumb {
         book_id: task.book_id,

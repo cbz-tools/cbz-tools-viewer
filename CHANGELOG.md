@@ -44,6 +44,7 @@
 
 ### Fixed
 
+- Reduced unnecessary Library idle CPU/GPU activity by moving rate-limited background artifact scheduling off the UI repaint loop, and improved Animated WebP playback by updating existing textures in place for continuing frames instead of recreating texture handles.
 - Fixed the Library top-bar path input field extending into the `Viewer:` controls.
 - Fixed the viewer opening-page cover-blank layout so Cover Blank now consistently shows a blank page paired with the cover in spread and auto modes.
 - Fixed viewer toolbar page titles for cover-blank spreads, including left-to-right and right-to-left reading directions.

@@ -5,18 +5,17 @@
 
 use parking_lot::RwLock;
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
     time::{Duration, Instant, SystemTime},
 };
 
-// UI が idle 中でも poll_worker が動くようにする repaint 間隔
+// async load / directory scan の結果を確認する UI polling 間隔
 const POLL_INTERVAL_MS: u64 = 80;
 // 1フレームで UI スレッドが反映するサムネイル結果の上限
 const MAX_THUMB_RESULTS_PER_FRAME: usize = 48;
-const BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE: usize = 3_000;
 // visible 範囲を優先して保持する Library thumbnail TextureHandle 上限
 const LIBRARY_THUMB_TEXTURE_KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
@@ -87,8 +86,8 @@ use crate::{
     infra::page_map::coordinator::PageMapStatus,
     infra::web_search::WebSearchMenuItem,
     infra::worker::thumb_worker::{
-        AnimatedPreviewTask, StaticPreviewTask, ThumbTask, ThumbWorker, VideoPreviewTask,
-        VideoThumbTask, WorkerMsg,
+        AnimatedPreviewTask, BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE, BackgroundArtifactJob,
+        StaticPreviewTask, ThumbTask, ThumbWorker, VideoPreviewTask, VideoThumbTask, WorkerMsg,
     },
     repaint::RepaintNotifier,
     util::{
@@ -285,16 +284,6 @@ pub struct LibraryState {
     page_map_failure_cache: Option<ArtifactFailureDiskCache>,
     page_map_failure_revisions: HashMap<BookId, SourceRevision>,
     page_map_failure_checked_revisions: HashMap<BookId, SourceRevision>,
-    /// Non-visible thumbnail/Page Map preparation targets supplied by the
-    /// Library-side fixed-rate pump.
-    background_artifact_targets: VecDeque<BackgroundArtifactTarget>,
-    background_artifact_total: usize,
-    background_artifact_checked: usize,
-    background_artifact_supplied: usize,
-    background_artifact_credit: f64,
-    background_artifact_last_refill_at: Instant,
-    background_artifact_worker_generation: u64,
-    background_artifact_completion_logged: bool,
     thumb_cache: Option<DiskCache>,
     /// Last visible display-thumbnail task identity sequence sent to the worker.
     last_display_set: Option<Vec<DisplayThumbKey>>,
@@ -383,11 +372,6 @@ impl From<&ThumbTask> for DisplayThumbKey {
             bypass_cache: task.bypass_cache,
         }
     }
-}
-
-enum BackgroundArtifactTarget {
-    Book(BookId),
-    Video(BookId),
 }
 
 #[derive(Default)]
@@ -1318,6 +1302,24 @@ impl LibraryState {
             .map(|(target, texture)| (&target.book_id, texture))
     }
 
+    fn update_preview_texture(
+        &mut self,
+        ctx: &egui::Context,
+        label: String,
+        color: egui::ColorImage,
+    ) {
+        match self.preview.preview_texture.as_mut() {
+            Some(texture) if texture.size() == color.size => {
+                texture.set_partial([0, 0], color, egui::TextureOptions::LINEAR);
+            }
+            Some(texture) => texture.set(color, egui::TextureOptions::LINEAR),
+            None => {
+                self.preview.preview_texture =
+                    Some(ctx.load_texture(label, color, egui::TextureOptions::LINEAR));
+            }
+        }
+    }
+
     fn update_preview(
         &mut self,
         ctx: &egui::Context,
@@ -2059,14 +2061,6 @@ impl LibraryState {
             page_map_failure_cache: open_artifact_failure_cache(),
             page_map_failure_revisions: HashMap::new(),
             page_map_failure_checked_revisions: HashMap::new(),
-            background_artifact_targets: VecDeque::new(),
-            background_artifact_total: 0,
-            background_artifact_checked: 0,
-            background_artifact_supplied: 0,
-            background_artifact_credit: 0.0,
-            background_artifact_last_refill_at: Instant::now(),
-            background_artifact_worker_generation: 0,
-            background_artifact_completion_logged: true,
             thumb_cache: open_thumb_cache(),
             last_display_set: None,
             last_display_stale_retry: None,
@@ -2112,7 +2106,6 @@ impl LibraryState {
         self.async_load_rx = Some(rx);
         self.async_loading = true;
         self.worker.clear_pending_tasks();
-        self.reset_background_artifact_pump();
         self.worker.update_global_goal_for_library(&path);
         self.path_input = path.to_string_lossy().into_owned();
         self.current_dir = Some(path);
@@ -3055,8 +3048,11 @@ impl LibraryState {
                 | WorkerMsg::FailedPermanentWithRevision { .. }
                 | WorkerMsg::Stale(_)) => self.handle_thumbnail_failure_or_stale(msg, ctx),
                 WorkerMsg::PageMapStatus(status) => {
+                    let visible = self.worker.is_artifact_visible(&status.book_id);
                     self.apply_page_map_status(status);
-                    ctx.request_repaint();
+                    if visible {
+                        ctx.request_repaint();
+                    }
                     WorkerPollResult::Ignored
                 }
             };
@@ -3102,12 +3098,6 @@ impl LibraryState {
         if reached_limit {
             // 取りこぼしを防ぐため、残りキュー処理を次フレームで継続する。
             ctx.request_repaint();
-        }
-
-        let done = self.ready_texture_count() + self.failed_count();
-        let unreceived = self.requested_count().saturating_sub(done);
-        if unreceived > 0 {
-            ctx.request_repaint_after(Duration::from_millis(POLL_INTERVAL_MS));
         }
     }
 
@@ -3155,15 +3145,14 @@ impl LibraryState {
                     [preview.width as usize, preview.height as usize],
                     &preview.pixels,
                 );
-                let texture = ctx.load_texture(
+                self.update_preview_texture(
+                    ctx,
                     format!(
                         "video-preview-{}-{}",
                         preview.session_id, preview.scene_percent
                     ),
                     img,
-                    egui::TextureOptions::LINEAR,
                 );
-                self.preview.preview_texture = Some(texture);
                 self.preview.decode_in_flight = false;
                 self.preview.in_flight_scene_index = None;
                 self.preview.display_scene_index =
@@ -3269,7 +3258,8 @@ impl LibraryState {
                     [preview.width as usize, preview.height as usize],
                     &preview.pixels,
                 );
-                let texture = ctx.load_texture(
+                self.update_preview_texture(
+                    ctx,
                     format!(
                         "animated-preview-{}-{}-{}",
                         preview.session_id,
@@ -3277,9 +3267,7 @@ impl LibraryState {
                         preview.frame_index
                     ),
                     img,
-                    egui::TextureOptions::LINEAR,
                 );
-                self.preview.preview_texture = Some(texture);
                 self.clear_animated_request_if_matches(preview.scrub_bucket);
                 if preview.scrub_bucket.is_some() {
                     self.preview.animated_display_target_bucket = preview.scrub_bucket;
@@ -3415,15 +3403,14 @@ impl LibraryState {
                     [preview.width as usize, preview.height as usize],
                     &preview.pixels,
                 );
-                let texture = ctx.load_texture(
+                self.update_preview_texture(
+                    ctx,
                     format!(
                         "static-preview-{}-{}",
                         preview.session_id, preview.page_index
                     ),
                     img,
-                    egui::TextureOptions::LINEAR,
                 );
-                self.preview.preview_texture = Some(texture);
                 self.preview.decode_in_flight = false;
                 self.preview.static_in_flight_page_index = None;
                 self.preview.static_display_page_index = Some(preview.page_index);
@@ -3480,10 +3467,11 @@ impl LibraryState {
             WorkerMsg::VideoReady(video) => {
                 let id = video.ready.book_id.clone();
                 let current_state = self.video_states.get(&id);
-                let revision_matches = current_state.is_some_and(|state| {
-                    state.requested_size == Some(video.expected_size)
-                        && state.requested_modified == video.expected_modified
-                        && state.requested_generation == Some(video.generation)
+                let revision_matches = current_state.is_none_or(|state| {
+                    !state.thumb_requested
+                        || (state.requested_size == Some(video.expected_size)
+                            && state.requested_modified == video.expected_modified
+                            && state.requested_generation == Some(video.generation))
                 });
                 let source_matches = self.video_source_matches_revision(
                     &id,
@@ -3526,7 +3514,9 @@ impl LibraryState {
                 state.requested_generation = None;
                 state.texture_size = Some([resp.width as usize, resp.height as usize]);
                 state.texture = Some(handle);
-                ctx.request_repaint();
+                if self.worker.is_artifact_visible(&id) {
+                    ctx.request_repaint();
+                }
                 WorkerPollResult::Received
             }
             WorkerMsg::VideoStale {
@@ -3596,7 +3586,9 @@ impl LibraryState {
             state.texture_size = Some([resp.width as usize, resp.height as usize]);
             state.texture = Some(handle);
         }
-        ctx.request_repaint();
+        if self.worker.is_artifact_visible(&resp.book_id) {
+            ctx.request_repaint();
+        }
         WorkerPollResult::Received
     }
 
@@ -3670,7 +3662,9 @@ impl LibraryState {
             state.thumb_ready = false;
             state.thumb_failed = true;
         }
-        ctx.request_repaint();
+        if self.worker.is_artifact_visible(&id) {
+            ctx.request_repaint();
+        }
         WorkerPollResult::Failed
     }
 
@@ -3707,128 +3701,51 @@ impl LibraryState {
 
     // ── サムネイル一括要求 ────────────────────────────────────────────────────
 
-    // raw_entries 全件を背景対象にし、非可視の cache/request 供給を固定レートで進める。
-    // 可視範囲はこの上限外の即時経路で処理する。
-
     fn request_all_thumbs(&mut self) {
-        self.reset_background_artifact_pump();
+        let target_width = crate::domain::app_settings::AppSettings::storage_width();
+        let mut jobs = Vec::new();
         for entry in &self.raw_entries {
             match entry {
-                LibraryEntry::VideoFile(video) => self
-                    .background_artifact_targets
-                    .push_back(BackgroundArtifactTarget::Video(video.id.clone())),
-                _ => {
-                    if let Some(book_id) = entry.thumb_id_ref() {
-                        self.background_artifact_targets
-                            .push_back(BackgroundArtifactTarget::Book(book_id.clone()));
+                LibraryEntry::VideoFile(video) => {
+                    let Some(snapshot) = self.source_snapshots.get(&video.id) else {
+                        continue;
+                    };
+                    let Some(state) = self.video_states.get(&video.id) else {
+                        continue;
+                    };
+                    if state.thumb_failed || state.thumb_requested || state.texture.is_some() {
+                        continue;
+                    }
+                    let cache_hit = self.thumb_cache.as_ref().is_some_and(|cache| {
+                        cache.has_thumb(&video.id, snapshot.size, snapshot.modified)
+                    });
+                    if !cache_hit {
+                        jobs.push(BackgroundArtifactJob::Video(VideoThumbTask {
+                            book_id: video.id.clone(),
+                            path: Arc::clone(&snapshot.path),
+                            target_width,
+                            expected_size: snapshot.size,
+                            expected_modified: snapshot.modified,
+                        }));
                     }
                 }
-            }
-        }
-        self.background_artifact_total = self.background_artifact_targets.len();
-        self.background_artifact_completion_logged = self.background_artifact_total == 0;
-        log::debug!(
-            "[thumb-prefetch] scan start targets={} rate={}/min (~{}/sec)",
-            self.background_artifact_total,
-            BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE,
-            BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE / 60
-        );
-    }
-
-    fn reset_background_artifact_pump(&mut self) {
-        self.background_artifact_targets.clear();
-        self.background_artifact_total = 0;
-        self.background_artifact_checked = 0;
-        self.background_artifact_supplied = 0;
-        self.background_artifact_credit = 0.0;
-        self.background_artifact_last_refill_at = Instant::now();
-        self.background_artifact_worker_generation = self.worker.current_generation();
-        self.background_artifact_completion_logged = true;
-    }
-
-    fn visible_background_artifact_ids(
-        &self,
-        visible_range: Option<&std::ops::RangeInclusive<usize>>,
-    ) -> HashSet<BookId> {
-        visible_range
-            .into_iter()
-            .flat_map(|range| range.clone())
-            .filter_map(|idx| self.entries.get(idx))
-            .filter_map(|entry| match entry {
-                LibraryEntry::VideoFile(video) => Some(video.id.clone()),
-                _ => entry.thumb_id_ref().cloned(),
-            })
-            .collect()
-    }
-
-    fn pump_background_artifacts(
-        &mut self,
-        visible_range: Option<&std::ops::RangeInclusive<usize>>,
-    ) {
-        let current_generation = self.worker.current_generation();
-        if current_generation != self.background_artifact_worker_generation {
-            // clear_pending_tasks() invalidates the worker generation. Any UI-side
-            // targets planned for the old directory must be discarded as well.
-            self.reset_background_artifact_pump();
-            return;
-        }
-
-        if self.background_artifact_targets.is_empty() {
-            return;
-        }
-
-        let now = Instant::now();
-        let elapsed = now
-            .saturating_duration_since(self.background_artifact_last_refill_at)
-            .as_secs_f64();
-        let rate_per_second = BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE as f64 / 60.0;
-        // Keep a small bounded credit so an idle UI frame cannot turn into an
-        // unbounded burst. At normal 80 ms polling this supplies about four
-        // entries per frame, i.e. 50 entries/sec.
-        self.background_artifact_credit =
-            (self.background_artifact_credit + elapsed * rate_per_second).min(8.0);
-        self.background_artifact_last_refill_at = now;
-        let budget = self.background_artifact_credit.floor() as usize;
-        if budget == 0 {
-            return;
-        }
-
-        let visible_ids = self.visible_background_artifact_ids(visible_range);
-        let target_width = crate::domain::app_settings::AppSettings::storage_width();
-        let mut processed = 0usize;
-        let mut supplied = 0usize;
-
-        for _ in 0..budget {
-            let Some(target) = self.background_artifact_targets.pop_front() else {
-                break;
-            };
-            processed += 1;
-            self.background_artifact_checked += 1;
-
-            let id = match &target {
-                BackgroundArtifactTarget::Book(id) | BackgroundArtifactTarget::Video(id) => id,
-            };
-            if visible_ids.contains(id) {
-                // The visible mailbox/direct request path owns this entry and is
-                // deliberately outside the background rate limit.
-                continue;
-            }
-
-            match target {
-                BackgroundArtifactTarget::Book(book_id) => {
-                    let Some(snapshot) = self.source_snapshots.get(&book_id).cloned() else {
+                _ => {
+                    let Some(book_id) = entry.thumb_id_ref() else {
                         continue;
                     };
-                    let Some(state) = self.book_states.get(&book_id) else {
+                    let Some(snapshot) = self.source_snapshots.get(book_id) else {
                         continue;
                     };
-                    if state.thumb_failed || state.thumb_requested {
+                    let Some(state) = self.book_states.get(book_id) else {
+                        continue;
+                    };
+                    if state.thumb_failed
+                        || state.thumb_requested
+                        || state.texture.is_some() && !state.force_reload
+                    {
                         continue;
                     }
                     let bypass_cache = state.force_reload;
-                    if state.texture.is_some() && !bypass_cache {
-                        continue;
-                    }
                     let task = ThumbTask {
                         book_id: book_id.clone(),
                         path: Arc::clone(&snapshot.path),
@@ -3839,70 +3756,36 @@ impl LibraryState {
                     };
                     let cache_hit = !bypass_cache
                         && self.thumb_cache.as_ref().is_some_and(|cache| {
-                            cache.has_thumb(&book_id, snapshot.size, snapshot.modified)
+                            cache.has_thumb(book_id, snapshot.size, snapshot.modified)
                         });
-                    if cache_hit {
-                        // A thumbnail cache hit still supplies the existing
-                        // Page Map request path at this same entry rate.
-                        self.worker.request_page_map(task);
-                    } else {
-                        let state = self.book_state_mut(&book_id);
-                        state.thumb_requested = true;
-                        if bypass_cache {
-                            state.thumb_ready = false;
-                        }
-                        state.force_reload = false;
-                        self.worker.request(task);
-                    }
-                    supplied += 1;
-                }
-                BackgroundArtifactTarget::Video(video_id) => {
-                    let Some(snapshot) = self.source_snapshots.get(&video_id).cloned() else {
-                        continue;
-                    };
-                    let Some(state) = self.video_states.get(&video_id) else {
-                        continue;
-                    };
-                    if state.thumb_failed || state.thumb_requested || state.texture.is_some() {
-                        continue;
-                    }
-                    let cache_hit = self.thumb_cache.as_ref().is_some_and(|cache| {
-                        cache.has_thumb(&video_id, snapshot.size, snapshot.modified)
+                    jobs.push(BackgroundArtifactJob::Image {
+                        task,
+                        page_map_only: cache_hit,
                     });
-                    if cache_hit {
-                        continue;
-                    }
-                    let request_generation = self.worker.current_generation();
-                    let state = self.video_state_mut(&video_id);
-                    state.thumb_requested = true;
-                    state.requested_size = Some(snapshot.size);
-                    state.requested_modified = snapshot.modified;
-                    state.requested_generation = Some(request_generation);
-                    self.worker.request_video(VideoThumbTask {
-                        book_id: video_id,
-                        path: Arc::clone(&snapshot.path),
-                        target_width,
-                        expected_size: snapshot.size,
-                        expected_modified: snapshot.modified,
-                    });
-                    supplied += 1;
                 }
             }
         }
+        log::debug!(
+            "[thumb-prefetch] scan start targets={} rate={}/min (~{}/sec)",
+            jobs.len(),
+            BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE,
+            BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE / 60
+        );
+        self.worker.replace_background_artifact_jobs(jobs);
+    }
 
-        self.background_artifact_credit -= processed as f64;
-        self.background_artifact_supplied += supplied;
-        if self.background_artifact_targets.is_empty()
-            && !self.background_artifact_completion_logged
-        {
-            self.background_artifact_completion_logged = true;
-            log::debug!(
-                "[thumb-prefetch] scan complete checked={} supplied={} rate={}/min",
-                self.background_artifact_checked,
-                self.background_artifact_supplied,
-                BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE
-            );
-        }
+    fn visible_artifact_ids(
+        &self,
+        visible_range: &std::ops::RangeInclusive<usize>,
+    ) -> HashSet<BookId> {
+        visible_range
+            .clone()
+            .filter_map(|idx| self.entries.get(idx))
+            .filter_map(|entry| match entry {
+                LibraryEntry::VideoFile(video) => Some(video.id.clone()),
+                _ => entry.thumb_id_ref().cloned(),
+            })
+            .collect()
     }
 
     fn request_thumb_for_entry(&mut self, entry: &LibraryEntry, bypass_cache: bool) {
@@ -4463,10 +4346,7 @@ pub fn show(
         if state.preview.target.is_some() {
             state.invalidate_preview();
         }
-        state.pump_background_artifacts(None);
-        if !state.background_artifact_targets.is_empty() {
-            ui.ctx().request_repaint_after(Duration::from_millis(20));
-        }
+        state.worker.set_visible_artifact_ids(HashSet::new());
         return LibraryAction::None;
     }
 
@@ -4547,20 +4427,16 @@ pub fn show(
     );
 
     if let Some(visible_range) = result.visible_range.clone() {
+        state
+            .worker
+            .set_visible_artifact_ids(state.visible_artifact_ids(&visible_range));
         state.refresh_visible_page_map_failures(visible_range.clone(), ui.ctx());
         let keep_indices = state.compute_texture_keep_indices_by_budget(visible_range.clone());
         state.evict_thumb_textures_outside_keep_indices(&keep_indices);
         state.ensure_visible_thumb_textures(&visible_range);
-        state.pump_background_artifacts(Some(&visible_range));
-        if !state.background_artifact_targets.is_empty() {
-            ui.ctx().request_repaint_after(Duration::from_millis(20));
-        }
     } else {
         state.clear_display_tasks_if_needed();
-        state.pump_background_artifacts(None);
-        if !state.background_artifact_targets.is_empty() {
-            ui.ctx().request_repaint_after(Duration::from_millis(20));
-        }
+        state.worker.set_visible_artifact_ids(HashSet::new());
     }
 
     // ── 選択状態を更新 ────────────────────────────────────────────────────────
