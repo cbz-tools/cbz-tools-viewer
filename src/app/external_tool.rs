@@ -186,10 +186,8 @@ impl App {
         (tool_name, background)
     }
 
-    pub(super) fn poll_external_tool_results(&mut self, ctx: &egui::Context) {
-        let mut received_any = false;
+    pub(super) fn poll_external_tool_results(&mut self) {
         while let Some(result) = self.external_tool_worker.try_recv() {
-            received_any = true;
             log::info!(
                 "[external-tool] result received request_id={} tool={} path={} success={} background={} elapsed_ms={}",
                 result.request_id,
@@ -200,9 +198,6 @@ impl App {
                 result.elapsed_ms
             );
             self.handle_external_tool_result(result);
-        }
-        if received_any {
-            ctx.request_repaint();
         }
     }
 
@@ -318,9 +313,6 @@ impl App {
     }
 
     pub(super) fn schedule_external_tool_state_repaint(&self, ctx: &egui::Context) {
-        if self.is_external_tool_busy() {
-            ctx.request_repaint_after(Duration::from_millis(50));
-        }
         if let ExternalToolUiState::Success { until, .. } = self.external_tool_ui_state {
             let now = Instant::now();
             if now < until {
@@ -382,14 +374,14 @@ impl App {
         &mut self,
         tool_index: usize,
         targets: &[usize],
-    ) {
+    ) -> bool {
         if self.is_external_tool_busy() {
             log::warn!(
                 "[external-tool] library ignored busy tool_index={} targets={}",
                 tool_index,
                 targets.len()
             );
-            return;
+            return false;
         }
         let book_paths: Vec<PathBuf> = targets
             .iter()
@@ -397,11 +389,11 @@ impl App {
             .map(|entry| entry.path.as_ref().to_path_buf())
             .collect();
         if book_paths.is_empty() {
-            return;
+            return false;
         }
 
         let trigger = ExternalToolTrigger::Toolbar;
-        let _ = self.request_external_tool_run_paths_from_trigger(tool_index, book_paths, trigger);
+        self.request_external_tool_run_paths_from_trigger(tool_index, book_paths, trigger)
     }
 
     fn is_current_library_selection(&self, path: &std::path::Path) -> bool {

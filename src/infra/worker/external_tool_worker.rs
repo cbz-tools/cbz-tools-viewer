@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Instant;
 
 use crate::domain::app_settings::normalize_external_tool_executable;
+use crate::repaint::RepaintNotifier;
 use serde::Deserialize;
 
 #[cfg(windows)]
@@ -49,13 +50,13 @@ enum ExternalToolWorkerReq {
 }
 
 impl ExternalToolWorker {
-    pub fn spawn() -> Self {
+    pub fn spawn(repaint: RepaintNotifier) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<ExternalToolWorkerReq>();
         let (resp_tx, resp_rx) = mpsc::channel::<ExternalToolRunResult>();
 
         thread::Builder::new()
             .name("external-tool-worker".to_owned())
-            .spawn(move || worker_main(req_rx, resp_tx))
+            .spawn(move || worker_main(req_rx, resp_tx, repaint))
             .map_err(|e| {
                 tracing::error!("failed to spawn external-tool-worker thread: {e}");
                 e
@@ -96,12 +97,14 @@ impl Drop for ExternalToolWorker {
 fn worker_main(
     req_rx: mpsc::Receiver<ExternalToolWorkerReq>,
     resp_tx: mpsc::Sender<ExternalToolRunResult>,
+    repaint: RepaintNotifier,
 ) {
     while let Ok(req) = req_rx.recv() {
         match req {
             ExternalToolWorkerReq::Run(req) => {
                 let result = run_one(req);
                 let _ = resp_tx.send(result);
+                repaint.request_repaint();
             }
             ExternalToolWorkerReq::Shutdown => break,
         }

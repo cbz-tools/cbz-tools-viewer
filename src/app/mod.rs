@@ -5,7 +5,6 @@
 use std::collections::HashMap;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::process::Child;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -34,6 +33,7 @@ use crate::infra::cache::{
     artifact_failure::ArtifactFailureDiskCache, disk::DiskCache, page_map::PageMapDiskCache,
 };
 use crate::infra::worker::external_tool_worker::ExternalToolWorker;
+use crate::repaint::RepaintNotifier;
 use crate::session::{LeftPaneTab, SessionState, sort_key_to_str, sort_order_to_str};
 use crate::ui::{
     about,
@@ -128,7 +128,6 @@ pub struct App {
     pending_toast: Option<(String, std::time::Instant)>,
     pending_error_dialog: Option<String>,
 
-    viewer_processes: Vec<Child>,
     /// 起動初期フレームのウィンドウ状態観測ログ用カウンタ。
     ui_frame_counter: u64,
     external_tool_worker: ExternalToolWorker,
@@ -247,9 +246,11 @@ impl App {
             suppress_next_dropped_files: false,
             pending_toast: None,
             pending_error_dialog: None,
-            viewer_processes: Vec::new(),
             ui_frame_counter: 0,
-            external_tool_worker: ExternalToolWorker::spawn(),
+            external_tool_worker: ExternalToolWorker::spawn(RepaintNotifier::new({
+                let ctx = cc.egui_ctx.clone();
+                move || ctx.request_repaint()
+            })),
             external_tool_running: None,
             external_tool_ui_state: ExternalToolUiState::Idle,
             external_tool_next_request_id: 1,
@@ -281,16 +282,10 @@ impl eframe::App for App {
         if self.suppress_next_dropped_files && ctx.input(|i| i.raw.dropped_files.is_empty()) {
             self.suppress_next_dropped_files = false;
         }
-        self.reap_viewer_processes();
-        if !self.viewer_processes.is_empty() {
-            // IPC 分離後は子プロセス死活監視のためだけに再描画を起こす。
-            // 高頻度ポーリングは不要なので 1 秒間隔で回収する。
-            ctx.request_repaint_after(std::time::Duration::from_secs(1));
-        }
         // 外部ツールトリガーは最優先で排出し、遅延を避ける
         self.drain_pending_external_tool_runs(ctx);
         self.drain_pending_history_paths();
-        self.drain_pending_viewer_sync_events(ctx);
+        self.drain_pending_viewer_sync_events();
         self.drain_pending_rebuilt_viewer_paths(ctx);
         if !self.pending_external_tool_runs.lock().is_empty() {
             ctx.request_repaint();
@@ -309,17 +304,17 @@ impl eframe::App for App {
         if let Some(dir) = self.initial_dir.take() {
             self.library.start_load_dir_async(normalize_dir_path(dir));
         }
-        if self.library.poll_async_load(ctx) {
+        if self.library.poll_async_load() {
             self.resolve_pending_select();
             self.apply_pending_after_load();
             self.resolve_pending_drop_select();
         }
-        self.poll_external_tool_results(ctx);
+        self.poll_external_tool_results();
         self.schedule_external_tool_state_repaint(ctx);
         self.tick_external_tool_ui_state();
         self.drain_pending_external_tool_runs(ctx);
         self.drain_pending_history_paths();
-        self.drain_pending_viewer_sync_events(ctx);
+        self.drain_pending_viewer_sync_events();
         self.drain_pending_rebuilt_viewer_paths(ctx);
         self.library.wheel_scroll_multiplier = self.app_settings.library_wheel_multiplier();
     }
@@ -531,26 +526,6 @@ impl App {
         guard.epoch = guard.epoch.saturating_add(1);
         guard.previous_books = guard.books.clone();
         guard.books = ordered_books;
-    }
-
-    fn reap_viewer_processes(&mut self) {
-        let mut alive = Vec::with_capacity(self.viewer_processes.len());
-        for mut child in self.viewer_processes.drain(..) {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    tracing::debug!(
-                        pid = child.id(),
-                        status = ?status.code(),
-                        "viewer subprocess exited"
-                    );
-                }
-                Ok(None) => alive.push(child),
-                Err(e) => {
-                    tracing::warn!(pid = child.id(), error = %e, "viewer subprocess wait failed");
-                }
-            }
-        }
-        self.viewer_processes = alive;
     }
 
     pub(super) fn push_open_history(&mut self, path: PathBuf) {
@@ -1035,7 +1010,7 @@ impl App {
         }
     }
 
-    fn drain_pending_viewer_sync_events(&mut self, ctx: &egui::Context) {
+    fn drain_pending_viewer_sync_events(&mut self) {
         let mut pending = self.pending_viewer_sync_events.lock();
         if pending.is_empty() {
             return;
@@ -1054,7 +1029,6 @@ impl App {
                     self.library
                         .refresh_reading_hud_state_for_path(book_path.as_path());
                     self.library.mark_filter_dirty();
-                    ctx.request_repaint();
                 }
                 ViewerSyncEvent::Navigated { path } => {
                     self.restore_selection_by_path(Some(path.clone()));
@@ -1106,7 +1080,6 @@ impl App {
                 } => {
                     self.library.apply_filter_token(token);
                     self.left_pane_tab = LeftPaneTab::Library;
-                    ctx.request_repaint();
                     if response_tx.send(ApplyFilterTokenResult::Success).is_err() {
                         tracing::warn!(
                             request_id,
@@ -1120,7 +1093,6 @@ impl App {
                 } => {
                     self.library.clear_filter();
                     self.left_pane_tab = LeftPaneTab::Library;
-                    ctx.request_repaint();
                     if response_tx.send(ApplyFilterTokenResult::Success).is_err() {
                         tracing::warn!(
                             request_id,
@@ -1568,7 +1540,7 @@ impl App {
             self.navigate_parent();
         }
         if topbar_result.nav_reload {
-            self.reload_current_dir(ctx);
+            self.reload_current_dir();
         }
         let sidebar_toggled_this_frame = topbar_result.toggle_sidebar;
         if topbar_result.toggle_sidebar {
@@ -1650,7 +1622,7 @@ impl App {
                 self.navigate_parent();
             }
             if f5 {
-                self.reload_current_dir(ctx);
+                self.reload_current_dir();
             }
         }
     }
@@ -1783,7 +1755,9 @@ impl App {
                 tool_index,
                 targets,
             } if !self.settings_open => {
-                self.trigger_external_tool_from_library(tool_index, &targets);
+                if self.trigger_external_tool_from_library(tool_index, &targets) {
+                    ctx.request_repaint();
+                }
             }
             _ => {}
         }
@@ -1881,7 +1855,7 @@ impl App {
     ) {
         if let Some((message, at)) = self.pending_toast.as_ref() {
             let elapsed = at.elapsed();
-            if elapsed.as_secs_f32() <= 2.0 {
+            if elapsed < std::time::Duration::from_secs(2) {
                 egui::Area::new("path_toast".into())
                     .order(egui::Order::Foreground)
                     .anchor(egui::Align2::RIGHT_TOP, [-16.0, topbar_height + 10.0])
@@ -1895,7 +1869,9 @@ impl App {
                                 ui.label(egui::RichText::new(message).color(egui::Color32::WHITE));
                             });
                     });
-                ctx.request_repaint();
+                ctx.request_repaint_after(
+                    std::time::Duration::from_secs(2).saturating_sub(elapsed),
+                );
             } else {
                 self.pending_toast = None;
             }

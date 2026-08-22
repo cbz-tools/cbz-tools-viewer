@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::Instant;
@@ -110,6 +110,27 @@ pub(super) enum RebuildSelectedImagesAsCbzAndNextResult {
 }
 
 impl App {
+    fn watch_viewer_process(mut child: Child) {
+        let pid = child.id();
+        if let Err(error) = std::thread::Builder::new()
+            .name("viewer-process-wait".to_owned())
+            .spawn(move || match child.wait() {
+                Ok(status) => {
+                    tracing::debug!(
+                        pid,
+                        status = ?status.code(),
+                        "viewer subprocess exited"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(pid, error = %error, "viewer subprocess wait failed");
+                }
+            })
+        {
+            tracing::warn!(pid, error = %error, "failed to spawn viewer process watcher");
+        }
+    }
+
     // 責務境界:
     // - Library 側: viewer subprocess の起動と navigation/delete IPC を担う。
     // - Viewer 側: UI 状態、描画、fullscreen を保持する。
@@ -178,7 +199,7 @@ impl App {
                 }
             }
             let child = cmd.spawn()?;
-            self.viewer_processes.push(child);
+            Self::watch_viewer_process(child);
 
             let library_book_order = Arc::clone(&self.library_book_order);
             let pending_viewer_sync_events = Arc::clone(&self.pending_viewer_sync_events);
@@ -381,6 +402,7 @@ impl App {
                         };
                         if let Some(event) = sync_event {
                             pending_viewer_sync_events.lock().push(event);
+                            repaint_ctx.request_repaint();
                         }
                         if conn.send_to_viewer(&response).is_err() {
                             break;
@@ -436,7 +458,7 @@ impl App {
             }
         }
         let child = cmd.spawn()?;
-        self.viewer_processes.push(child);
+        Self::watch_viewer_process(child);
         Ok(())
     }
 

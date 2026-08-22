@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use eframe::egui;
-
 use crate::domain::archive::{BookId, BookMeta, LibraryEntry};
 use crate::infra::favorite_store::FavoriteState;
 use crate::ui::library::HistoryEntry;
@@ -181,8 +179,8 @@ impl App {
         self.navigate_to_dir_with_history(parent);
     }
 
-    pub(super) fn reload_current_dir(&mut self, ctx: &egui::Context) {
-        self.library.reload_current_dir_diff(ctx);
+    pub(super) fn reload_current_dir(&mut self) {
+        self.library.reload_current_dir_diff();
     }
 
     pub(super) fn toggle_favorite(&mut self, path: &std::path::Path) -> Option<FavoriteState> {

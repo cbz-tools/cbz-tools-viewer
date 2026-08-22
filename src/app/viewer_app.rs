@@ -25,6 +25,7 @@ use crate::infra::page_map::viewer_bootstrap::bootstrap_viewer_page_map;
 use crate::infra::worker::external_tool_worker::{
     ExternalToolRunRequest, ExternalToolRunResult, ExternalToolWorker,
 };
+use crate::repaint::RepaintNotifier;
 use crate::ui::i18n::{TextKey, tr};
 use crate::ui::thumb_cache::load_disk_thumb_texture;
 use crate::ui::viewer::{
@@ -45,7 +46,6 @@ const READING_SESSION_ACK_TIMEOUT: Duration = Duration::from_millis(800);
 const LIBRARY_IPC_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const LIBRARY_ACTION_RETRY_BUDGET: u8 = 1;
 const EXTERNAL_TOOL_SUCCESS_FEEDBACK_DURATION: Duration = Duration::from_secs(3);
-const EXTERNAL_TOOL_UI_REPAINT_INTERVAL: Duration = Duration::from_millis(50);
 const STARTUP_RESTORE_RECT_MAX_ATTEMPTS: u8 = 10;
 const STARTUP_MAXIMIZE_TRIGGER_FRAME: u32 = 1;
 
@@ -663,7 +663,10 @@ impl ViewerApp {
             favorite_state,
             pending_favorite_toggle_previous_state: None,
             map_make_skip: launch.map_make_skip,
-            external_tool_worker: ExternalToolWorker::spawn(),
+            external_tool_worker: ExternalToolWorker::spawn(RepaintNotifier::new({
+                let ctx = cc.egui_ctx.clone();
+                move || ctx.request_repaint()
+            })),
             external_tool_running: None,
             external_tool_queue: VecDeque::new(),
             external_tool_ui_state: ExternalToolUiState::Idle,
@@ -1977,17 +1980,17 @@ impl ViewerApp {
         tool_index: usize,
         target_path: std::path::PathBuf,
         trigger: ExternalToolTrigger,
-    ) {
+    ) -> bool {
         if self.external_tool_request_exists(tool_index, &target_path) {
             tracing::warn!(
                 "[external-tool] request ignored duplicate tool_index={} path={}",
                 tool_index,
                 target_path.display()
             );
-            return;
+            return false;
         }
         let Some(tool) = self.app_settings.external_tools.get(tool_index).cloned() else {
-            return;
+            return false;
         };
         let request_id = self.external_tool_next_request_id;
         self.external_tool_next_request_id = self.external_tool_next_request_id.saturating_add(1);
@@ -2006,9 +2009,10 @@ impl ViewerApp {
             trigger,
         };
         if self.external_tool_running.is_none() {
-            let _ = self.start_external_tool_reservation(reservation);
+            self.start_external_tool_reservation(reservation)
         } else {
             self.external_tool_queue.push_back(reservation);
+            true
         }
     }
 
@@ -2080,14 +2084,9 @@ impl ViewerApp {
         }
     }
 
-    fn poll_external_tool_results(&mut self, ctx: &egui::Context) {
-        let mut got_any = false;
+    fn poll_external_tool_results(&mut self) {
         while let Some(result) = self.external_tool_worker.try_recv() {
-            got_any = true;
             self.handle_external_tool_result(result);
-        }
-        if got_any {
-            ctx.request_repaint();
         }
     }
 
@@ -2126,9 +2125,6 @@ impl ViewerApp {
     }
 
     fn schedule_external_tool_state_repaint(&self, ctx: &egui::Context) {
-        if self.external_tool_running.is_some() {
-            ctx.request_repaint_after(EXTERNAL_TOOL_UI_REPAINT_INTERVAL);
-        }
         if let ExternalToolUiState::Success { until, .. } = self.external_tool_ui_state {
             let now = Instant::now();
             if now < until {
@@ -2333,7 +2329,7 @@ impl eframe::App for ViewerApp {
             }
         }
         self.poll_library_ipc(ctx);
-        self.poll_external_tool_results(ctx);
+        self.poll_external_tool_results();
         self.tick_external_tool_ui_state();
         self.schedule_external_tool_state_repaint(ctx);
     }
@@ -2481,11 +2477,13 @@ impl eframe::App for ViewerApp {
                         target_path,
                         trigger,
                     } => {
-                        self.request_external_tool_run_from_trigger(
+                        if self.request_external_tool_run_from_trigger(
                             tool_index,
                             target_path,
                             trigger,
-                        );
+                        ) {
+                            ctx.request_repaint();
+                        }
                     }
                 }
             });

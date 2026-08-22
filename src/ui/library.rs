@@ -12,8 +12,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-// async load / directory scan の結果を確認する UI polling 間隔
-const POLL_INTERVAL_MS: u64 = 80;
 // 1フレームで UI スレッドが反映するサムネイル結果の上限
 const MAX_THUMB_RESULTS_PER_FRAME: usize = 48;
 // visible 範囲を優先して保持する Library thumbnail TextureHandle 上限
@@ -21,6 +19,7 @@ const LIBRARY_THUMB_TEXTURE_KEEP_MAX_BYTES: usize = 256 * 1024 * 1024;
 const RGBA_BYTES_PER_PIXEL: usize = 4;
 // ライブラリフォルダのリアルタイム追従用ポーリング間隔
 const LIBRARY_DIR_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const KIND_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const PREVIEW_HOVER_DELAY: Duration = Duration::from_millis(300);
 const VIDEO_PREVIEW_CYCLE: Duration = Duration::from_secs(10);
 const VIDEO_PREVIEW_STEP_PERCENT: u8 = 10;
@@ -234,6 +233,7 @@ pub struct LibraryState {
     preview: LibraryPreviewState,
 
     pub worker: ThumbWorker,
+    repaint: RepaintNotifier,
 
     pub current_dir: Option<PathBuf>,
     /// topbar のパス入力欄に表示する文字列（current_dir と独立して編集可能）
@@ -2030,7 +2030,8 @@ impl LibraryState {
             video_states: HashMap::new(),
             preview: LibraryPreviewState::default(),
             artifact_gate: Arc::clone(&artifact_gate),
-            worker: ThumbWorker::spawn(repaint, artifact_gate),
+            worker: ThumbWorker::spawn(repaint.clone(), artifact_gate),
+            repaint,
             current_dir: None,
             path_input: String::new(),
             is_path_editing: false,
@@ -2095,6 +2096,7 @@ impl LibraryState {
         use crate::infra::fs::scanner;
         let generation = self.invalidate_async_load();
         self.invalidate_diff_scan();
+        self.last_dir_poll_at = Instant::now();
         self.filter.scope = LibraryScope::Any;
         log::debug!(
             "[async-load] start generation={} path={}",
@@ -2121,6 +2123,7 @@ impl LibraryState {
         self.select_all_active = false;
         let static_page_map_memo_epoch = self.static_page_map_memo_epoch;
         let previous_static_page_counts = HashMap::new();
+        let repaint = self.repaint.clone();
 
         thread::spawn(move || {
             log::debug!(
@@ -2143,17 +2146,15 @@ impl LibraryState {
                 path: path_for_worker,
                 result,
             });
+            repaint.request_repaint();
         });
     }
 
-    pub fn poll_async_load(&mut self, ctx: &egui::Context) -> bool {
+    pub fn poll_async_load(&mut self) -> bool {
         let Some(rx) = self.async_load_rx.as_ref() else {
             return false;
         };
         let Ok(done) = rx.try_recv() else {
-            if self.async_loading {
-                ctx.request_repaint_after(Duration::from_millis(POLL_INTERVAL_MS));
-            }
             return false;
         };
 
@@ -2181,7 +2182,6 @@ impl LibraryState {
                     scanned.entries.len()
                 );
                 self.apply_loaded_dir(done.path, scanned, done.static_page_map_memo_epoch);
-                ctx.request_repaint();
                 true
             }
             Err(e) => {
@@ -2203,30 +2203,35 @@ impl LibraryState {
     /// - 同一 path/id の置き換え: size/modified 変化を検出し、source change 後の failed state recovery 用に再要求する
     pub fn apply_pending_updates(&mut self, ctx: &egui::Context) {
         self.apply_dir_scan_result(ctx);
-        self.apply_kind_config_result();
     }
 
     pub fn poll_current_dir_changes(&mut self, ctx: &egui::Context) {
         let now = Instant::now();
-        if now.duration_since(self.last_dir_poll_at) < LIBRARY_DIR_POLL_INTERVAL {
-            return;
+        if now.duration_since(self.last_dir_poll_at) >= LIBRARY_DIR_POLL_INTERVAL {
+            self.last_dir_poll_at = now;
+            if let Some(dir) = self.current_dir.clone() {
+                if self.async_loading || self.diff_scan_running {
+                    log::debug!("[diff-scan] skip already running path={}", dir.display());
+                } else {
+                    self.start_diff_scan_async(dir, DiffScanReason::Periodic);
+                }
+            }
         }
-        self.last_dir_poll_at = now;
 
-        let Some(dir) = self.current_dir.clone() else {
-            return;
-        };
-        if self.diff_scan_running {
-            log::debug!("[diff-scan] skip already running path={}", dir.display());
-            return;
+        let kind_config_changed =
+            if self.kind_config_last_poll_at.elapsed() >= KIND_CONFIG_POLL_INTERVAL {
+                self.apply_kind_config_result()
+            } else {
+                false
+            };
+        if kind_config_changed {
+            ctx.request_repaint();
         }
-        self.start_diff_scan_async(dir, DiffScanReason::Periodic);
-        ctx.request_repaint_after(Duration::from_millis(POLL_INTERVAL_MS));
     }
 
-    fn apply_kind_config_result(&mut self) {
-        if self.kind_config_last_poll_at.elapsed() < Duration::from_secs(3) {
-            return;
+    fn apply_kind_config_result(&mut self) -> bool {
+        if self.kind_config_last_poll_at.elapsed() < KIND_CONFIG_POLL_INTERVAL {
+            return false;
         }
         self.kind_config_last_poll_at = Instant::now();
         self.kind_config_poll_generation = self.kind_config_poll_generation.saturating_add(1);
@@ -2239,12 +2244,15 @@ impl LibraryState {
                 current_modified
             );
             self.reload_kind_config();
+            true
+        } else {
+            false
         }
     }
 
     /// current_dir を再スキャンし、差分だけを反映する明示的な reload。
     /// 非同期フルロードと違って thumbnail state を全消去しない。
-    pub fn reload_current_dir_diff(&mut self, ctx: &egui::Context) {
+    pub fn reload_current_dir_diff(&mut self) {
         let Some(dir) = self.current_dir.clone() else {
             return;
         };
@@ -2261,7 +2269,6 @@ impl LibraryState {
             selected_path_before,
             scroll_before,
         });
-        ctx.request_repaint_after(Duration::from_millis(POLL_INTERVAL_MS));
     }
 
     fn apply_scanned_entries_preserving_state(
@@ -2625,6 +2632,7 @@ impl LibraryState {
         let previous_static_page_counts = self.static_page_map_memo_snapshot();
         let (tx, rx) = mpsc::channel();
         let path_for_worker = path.clone();
+        let repaint = self.repaint.clone();
         self.diff_scan_rx = Some(rx);
         self.diff_scan_running = true;
         log::debug!(
@@ -2653,6 +2661,7 @@ impl LibraryState {
                 reason,
                 result,
             });
+            repaint.request_repaint();
         });
         generation
     }
@@ -2662,9 +2671,6 @@ impl LibraryState {
             return;
         };
         let Ok(done) = rx.try_recv() else {
-            if self.diff_scan_running {
-                ctx.request_repaint_after(Duration::from_millis(POLL_INTERVAL_MS));
-            }
             return;
         };
 
@@ -2708,12 +2714,13 @@ impl LibraryState {
                     done.path.display(),
                     scanned.entries.len()
                 );
+                let mut needs_repaint = false;
                 if self.apply_scanned_entries_preserving_state(
                     scanned,
                     done.static_page_map_memo_epoch,
                 ) {
                     self.request_all_thumbs();
-                    ctx.request_repaint();
+                    needs_repaint = true;
                 }
                 if done.reason == DiffScanReason::ManualReload {
                     if let Some(restore) = self.manual_reload_restore.take() {
@@ -2729,8 +2736,12 @@ impl LibraryState {
                                 self.anchor_idx = self.selected_idx;
                             }
                             self.scroll_to_pending = Some(restore.scroll_before);
+                            needs_repaint = true;
                         }
                     }
+                }
+                if needs_repaint {
+                    ctx.request_repaint();
                 }
             }
             Err(e) => {
