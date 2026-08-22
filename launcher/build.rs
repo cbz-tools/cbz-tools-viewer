@@ -32,6 +32,8 @@ fn main() {
             .parent()
             .expect("launcher must be a workspace member")
             .to_path_buf();
+    let icon = workspace_root.join("assets").join("viewer_icon.ico");
+    println!("cargo:rerun-if-changed={}", icon.display());
     let target_dir = match env::var_os("CARGO_TARGET_DIR").map(PathBuf::from) {
         Some(path) if path.is_absolute() => path,
         Some(path) => workspace_root.join(path),
@@ -61,7 +63,8 @@ fn main() {
         .set("FileDescription", "CBZ Viewer")
         .set("OriginalFilename", "cbz-viewer.exe")
         .set("FileVersion", &version)
-        .set("ProductVersion", &version);
+        .set("ProductVersion", &version)
+        .set_icon(icon.to_string_lossy().as_ref());
     res.compile()
         .expect("failed to embed Windows version resource");
 
