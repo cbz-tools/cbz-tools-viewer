@@ -55,6 +55,27 @@ The demo manga assets are also licensed under the MIT License.
 
 ---
 
+# Library and Viewer
+
+The Library and Viewer can run independently and communicate through IPC.
+
+```text
+Library                              Viewer
+┌────────────────────┐              ┌────────────────────┐
+│ Browse / Search    │              │ Read               │
+│ Manage collection  │◀──── IPC ───▶│ Previous / Next    │
+│ Book ordering      │              │ Search / Delete    │
+│ Reading status     │              │ Rebuild archive    │
+└────────────────────┘              └────────────────────┘
+      standalone                          standalone
+```
+
+When connected, the Viewer follows the Library's current book order and shares collection-related actions and reading status.
+
+This separation also works well with multi-monitor setups, with the Library on one display and the Viewer on another.
+
+---
+
 # Why
 
 I used ZipPla for many years.
@@ -84,14 +105,6 @@ CBZ Viewer provides three main workflows:
 * Organizing: rename, copy, delete, open in Explorer, and archive rebuild from selected page ranges.
 
 See the [Operation Guide](docs/operation.md) for details.
-
----
-
-# External tools
-
-CBZ Viewer can launch external tools while you read.
-
-With the companion project [**CBZ Tools Optimizer**](https://github.com/cbz-tools/cbz-tools-optimizer), you can run CBZ / ZIP archive optimization, format conversion, and size reduction workflows.
 
 ---
 

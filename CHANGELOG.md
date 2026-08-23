@@ -2,6 +2,7 @@
 
 ### Added
 
+- Added Library search with space-separated AND terms, uppercase `OR` alternatives, and quoted phrases.
 - Added `Alt+Enter` in the Library to open Properties for the selected item.
 - Added adjacent-book scratchpad preloading for smoother next/previous book navigation.
 - Improved adjacent-book preloading by decoding next and previous books in parallel.

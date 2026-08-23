@@ -208,14 +208,14 @@ pub fn show(
             let settings_resp = settings_resp.on_hover_text(tr(language, TextKey::Settings));
             paint_quiet_hover_border(ui, &settings_resp);
 
-            let prev = state.filter.keyword.clone();
+            let prev = state.filter.keyword().to_owned();
+            let mut keyword = prev.clone();
             let placeholder = search_placeholder_text(language, state.current_dir.as_deref());
             let resp = ui
                 .push_id("filter_input", |ui| {
                     ui.add_sized(
                         [FILTER_INPUT_WIDTH, FILTER_INPUT_HEIGHT],
-                        egui::TextEdit::singleline(&mut state.filter.keyword)
-                            .hint_text(placeholder),
+                        egui::TextEdit::singleline(&mut keyword).hint_text(placeholder),
                     )
                 })
                 .inner;
@@ -224,7 +224,11 @@ pub fn show(
                 state.filter_focus_request = false;
             }
             ui.label(icons::icon(icons::ICON_SEARCH, ICON_SIZE_SEARCH));
-            if !state.filter.keyword.is_empty() {
+            if resp.changed() || keyword != prev {
+                state.filter.set_keyword(keyword);
+                state.mark_filter_dirty();
+            }
+            if !state.filter.keyword().is_empty() {
                 let clear_rect = egui::Rect::from_center_size(
                     egui::pos2(
                         resp.rect.right()
@@ -254,10 +258,6 @@ pub fn show(
                 paint_quiet_hover_border(ui, &clear_resp);
             }
             state.filter_input_focused = resp.has_focus();
-            if resp.changed() || state.filter.keyword != prev {
-                state.mark_filter_dirty();
-            }
-
             ui.separator();
 
             // ── ソートセレクタ ───────────────────────────────────────────

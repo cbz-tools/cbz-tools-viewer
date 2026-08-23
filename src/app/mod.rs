@@ -170,7 +170,7 @@ impl App {
         library.sort_order = session.parse_sort_order();
         library.initial_scroll_y = session.grid_scroll_y;
         library.scroll_restore_pending = true;
-        library.filter.keyword = session.filter_text.clone();
+        library.filter.set_keyword(session.filter_text.clone());
         library.thumb_w = app_settings.thumb_w();
         library.thumb_h = app_settings.thumb_h();
         library.wheel_scroll_multiplier = app_settings.library_wheel_multiplier();
@@ -1019,6 +1019,9 @@ impl App {
         drop(pending);
         for event in events {
             match event {
+                ViewerSyncEvent::SourceChanged { path } => {
+                    self.library.refresh_for_source_changed(path);
+                }
                 ViewerSyncEvent::Deleted {
                     deleted_path,
                     next_path,
@@ -1400,7 +1403,7 @@ impl App {
             .iter()
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
-        state.filter_text = self.library.filter.keyword.clone();
+        state.filter_text = self.library.filter.keyword().to_owned();
         state.viewer_quality = self.app_settings.viewer_quality;
         state.viewer_rgba_cache_max_mb = self.app_settings.viewer_rgba_cache_max_mb;
         state.viewer_background_worker_count = self.app_settings.viewer_background_worker_count;

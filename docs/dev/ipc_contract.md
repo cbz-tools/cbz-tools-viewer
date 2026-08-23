@@ -42,6 +42,8 @@ Viewer は Library 状態を直接変更しない。
 
 ## Viewer → Library
 
+### Commands
+
 ### 状態取得
 
 ```text
@@ -118,6 +120,23 @@ DeleteAndNext
 
 Archive は file delete、
 FolderBook は directory delete とする。
+
+---
+
+### 同期通知（fire-and-forget）
+
+```text
+SourceChanged {
+    path: PathBuf,
+}
+```
+
+Viewer でバックグラウンド外部ツールが成功終了し、対象本のファイルシステム上の内容が
+変化した可能性を Library に通知する。これは Command ではなく純粋な同期通知であり、
+`request_id` を持たず、Library は応答または ACK を返さない。Library は `path` の親が
+現在表示中のディレクトリと一致する場合に限り、既存の current-directory diff scan を
+実行する。Standalone / Detached / SnapshotOnly Viewer、foreground spawn 成功、失敗時は
+送信しない。
 
 ---
 

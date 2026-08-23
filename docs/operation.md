@@ -134,7 +134,7 @@ For multi-page image books with an available Page Map, Static Scrub can be used 
 
 ### Search
 
-Use the search box to filter by book title.
+Use the search box to filter by book title. Separate terms with spaces for an AND search, use uppercase OR for an OR search, and enclose text in double quotes for a phrase search.
 
 ### Favorites
 

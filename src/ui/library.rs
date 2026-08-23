@@ -321,6 +321,8 @@ pub struct LibraryState {
     diff_scan_rx: Option<mpsc::Receiver<AsyncDiffScanResult>>,
     /// 定期差分スキャンの実行中フラグ
     diff_scan_running: bool,
+    /// 外部ツール通知を差分スキャン完了後に一度だけ再確認する対象ディレクトリ。
+    pending_source_changed_refresh: Option<PathBuf>,
     /// 手動リロード結果反映時に復元する選択・スクロール情報
     manual_reload_restore: Option<ManualReloadRestore>,
     // グループ全体管理
@@ -458,13 +460,25 @@ pub enum LibraryScope {
 
 #[derive(Default, Clone)]
 pub struct LibraryFilter {
-    pub keyword: String,
+    keyword: String,
+    query: LibraryQuery,
     pub scope: LibraryScope,
 }
 
 impl LibraryFilter {
+    pub fn keyword(&self) -> &str {
+        &self.keyword
+    }
+
+    pub fn set_keyword(&mut self, keyword: String) {
+        if self.keyword != keyword {
+            self.query = LibraryQuery::parse(&keyword);
+            self.keyword = keyword;
+        }
+    }
+
     pub fn clear_keyword(&mut self) {
-        self.keyword.clear();
+        self.set_keyword(String::new());
     }
 
     pub fn matches(
@@ -486,11 +500,7 @@ impl LibraryFilter {
     }
 
     fn keyword_matches(&self, entry: &LibraryEntry) -> bool {
-        if self.keyword.is_empty() {
-            return true;
-        }
-        let lower = self.keyword.to_ascii_lowercase();
-        entry.title().to_ascii_lowercase().contains(&lower)
+        self.query.matches(entry.title())
     }
 
     fn scope_matches(
@@ -593,6 +603,91 @@ impl LibraryFilter {
             .map(|def| def.children.iter().any(|c| c == kind_group))
             .unwrap_or(false)
     }
+}
+
+#[derive(Default, Clone)]
+struct LibraryQuery {
+    groups: Vec<Vec<String>>,
+}
+
+impl LibraryQuery {
+    fn parse(keyword: &str) -> Self {
+        let tokens = tokenize_keyword(keyword);
+        let mut groups = Vec::new();
+        let mut group = Vec::new();
+
+        for token in tokens {
+            if !token.quoted && token.text == "OR" {
+                if !group.is_empty() {
+                    groups.push(group);
+                    group = Vec::new();
+                }
+            } else if !token.text.is_empty() {
+                group.push(token.text.to_ascii_lowercase());
+            }
+        }
+        if !group.is_empty() {
+            groups.push(group);
+        }
+
+        Self { groups }
+    }
+
+    fn matches(&self, title: &str) -> bool {
+        if self.groups.is_empty() {
+            return true;
+        }
+        let title = title.to_ascii_lowercase();
+        self.groups
+            .iter()
+            .any(|group| group.iter().all(|term| title.contains(term)))
+    }
+}
+
+struct KeywordToken {
+    text: String,
+    quoted: bool,
+}
+
+fn tokenize_keyword(keyword: &str) -> Vec<KeywordToken> {
+    let chars: Vec<char> = keyword.chars().collect();
+    let mut remaining_quotes = chars.iter().filter(|&&ch| ch == '"').count();
+    let mut tokens = Vec::new();
+    let mut text = String::new();
+    let mut quoted = false;
+
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() {
+            if !text.is_empty() {
+                tokens.push(KeywordToken { text, quoted });
+                text = String::new();
+                quoted = false;
+            }
+            index += 1;
+        } else if ch == '"' {
+            remaining_quotes -= 1;
+            if remaining_quotes > 0 {
+                if let Some(offset) = chars[index + 1..].iter().position(|&next| next == '"') {
+                    text.extend(chars[index + 1..index + 1 + offset].iter().copied());
+                    quoted = true;
+                    remaining_quotes -= 1;
+                    index += offset + 2;
+                    continue;
+                }
+            }
+            text.push(ch);
+            index += 1;
+        } else {
+            text.push(ch);
+            index += 1;
+        }
+    }
+    if !text.is_empty() {
+        tokens.push(KeywordToken { text, quoted });
+    }
+    tokens
 }
 
 /// Returns a display-ready, ASCII-case-normalized extension for file entries.
@@ -2080,6 +2175,7 @@ impl LibraryState {
             diff_scan_generation: 0,
             diff_scan_rx: None,
             diff_scan_running: false,
+            pending_source_changed_refresh: None,
             manual_reload_restore: None,
             kind_config,
             kind_config_last_poll_at: Instant::now(),
@@ -2096,6 +2192,7 @@ impl LibraryState {
         use crate::infra::fs::scanner;
         let generation = self.invalidate_async_load();
         self.invalidate_diff_scan();
+        self.pending_source_changed_refresh = None;
         self.last_dir_poll_at = Instant::now();
         self.filter.scope = LibraryScope::Any;
         log::debug!(
@@ -2174,7 +2271,7 @@ impl LibraryState {
             return false;
         }
 
-        match done.result {
+        let applied = match done.result {
             Ok(scanned) => {
                 log::debug!(
                     "[async-load] apply generation={} entries={}",
@@ -2188,11 +2285,34 @@ impl LibraryState {
                 tracing::error!("scan_dir(async): {e}");
                 false
             }
-        }
+        };
+        self.start_pending_source_changed_refresh();
+        applied
     }
 
     pub fn is_async_loading(&self) -> bool {
         self.async_loading
+    }
+
+    /// 外部ツール完了通知を現在ディレクトリの差分スキャンへ接続する。
+    ///
+    /// 通知対象が表示中ディレクトリの直下でない場合は無視する。スキャン中は
+    /// 対象ディレクトリだけを保持し、現在のスキャン完了後に一度だけ再確認する。
+    pub fn refresh_for_source_changed(&mut self, source_path: PathBuf) {
+        let Some(current_dir) = self.current_dir.clone() else {
+            return;
+        };
+        let Some(source_dir) = source_path.parent() else {
+            return;
+        };
+        if !paths_equivalent_for_selection(source_dir, current_dir.as_path()) {
+            return;
+        }
+        if self.async_loading || self.diff_scan_running {
+            self.pending_source_changed_refresh = Some(current_dir);
+        } else {
+            self.reload_current_dir_diff();
+        }
     }
 
     /// 現在開いているフォルダを差分スキャンし、追加/削除/置き換えだけを反映する。
@@ -2256,6 +2376,7 @@ impl LibraryState {
         let Some(dir) = self.current_dir.clone() else {
             return;
         };
+        self.pending_source_changed_refresh = None;
         log::debug!("[diff-scan] manual reload requested path={}", dir.display());
         self.invalidate_diff_scan();
         let selected_path_before = self
@@ -2684,70 +2805,85 @@ impl LibraryState {
                 done.generation,
                 self.diff_scan_generation
             );
-            return;
-        }
-        let Some(current_dir) = self.current_dir.clone() else {
+        } else if let Some(current_dir) = self.current_dir.clone() {
+            if done.path != current_dir {
+                log::debug!(
+                    "[diff-scan] drop stale result reason={:?} path={} generation={} current_dir={}",
+                    done.reason,
+                    done.path.display(),
+                    done.generation,
+                    current_dir.display()
+                );
+            } else {
+                match done.result {
+                    Ok(scanned) => {
+                        log::debug!(
+                            "[diff-scan] apply reason={:?} path={} entries={}",
+                            done.reason,
+                            done.path.display(),
+                            scanned.entries.len()
+                        );
+                        let mut needs_repaint = false;
+                        if self.apply_scanned_entries_preserving_state(
+                            scanned,
+                            done.static_page_map_memo_epoch,
+                        ) {
+                            self.request_all_thumbs();
+                            needs_repaint = true;
+                        }
+                        if done.reason == DiffScanReason::ManualReload {
+                            if let Some(restore) = self.manual_reload_restore.take() {
+                                if restore.generation == done.generation {
+                                    if let Some(target) = restore.selected_path_before {
+                                        self.selected_idx = self.entries.iter().position(|entry| {
+                                            paths_equivalent_for_selection(
+                                                Self::entry_path_ref(entry),
+                                                target.as_path(),
+                                            )
+                                        });
+                                        self.selected_set.clear();
+                                        self.anchor_idx = self.selected_idx;
+                                    }
+                                    self.scroll_to_pending = Some(restore.scroll_before);
+                                    needs_repaint = true;
+                                }
+                            }
+                        }
+                        if needs_repaint {
+                            ctx.request_repaint();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("scan_dir(diff async): {e}");
+                    }
+                }
+            }
+        } else {
             log::debug!(
                 "[diff-scan] drop stale result reason={:?} path={} generation={} current_dir=None",
                 done.reason,
                 done.path.display(),
                 done.generation
             );
+        }
+        self.start_pending_source_changed_refresh();
+    }
+
+    fn start_pending_source_changed_refresh(&mut self) {
+        let Some(pending_dir) = self.pending_source_changed_refresh.take() else {
             return;
         };
-        if done.path != current_dir {
-            log::debug!(
-                "[diff-scan] drop stale result reason={:?} path={} generation={} current_dir={}",
-                done.reason,
-                done.path.display(),
-                done.generation,
-                current_dir.display()
-            );
+        let Some(current_dir) = self.current_dir.clone() else {
+            return;
+        };
+        if !paths_equivalent_for_selection(pending_dir.as_path(), current_dir.as_path()) {
             return;
         }
-
-        match done.result {
-            Ok(scanned) => {
-                log::debug!(
-                    "[diff-scan] apply reason={:?} path={} entries={}",
-                    done.reason,
-                    done.path.display(),
-                    scanned.entries.len()
-                );
-                let mut needs_repaint = false;
-                if self.apply_scanned_entries_preserving_state(
-                    scanned,
-                    done.static_page_map_memo_epoch,
-                ) {
-                    self.request_all_thumbs();
-                    needs_repaint = true;
-                }
-                if done.reason == DiffScanReason::ManualReload {
-                    if let Some(restore) = self.manual_reload_restore.take() {
-                        if restore.generation == done.generation {
-                            if let Some(target) = restore.selected_path_before {
-                                self.selected_idx = self.entries.iter().position(|entry| {
-                                    paths_equivalent_for_selection(
-                                        Self::entry_path_ref(entry),
-                                        target.as_path(),
-                                    )
-                                });
-                                self.selected_set.clear();
-                                self.anchor_idx = self.selected_idx;
-                            }
-                            self.scroll_to_pending = Some(restore.scroll_before);
-                            needs_repaint = true;
-                        }
-                    }
-                }
-                if needs_repaint {
-                    ctx.request_repaint();
-                }
-            }
-            Err(e) => {
-                tracing::error!("scan_dir(diff async): {e}");
-            }
+        if self.async_loading || self.diff_scan_running {
+            self.pending_source_changed_refresh = Some(pending_dir);
+            return;
         }
+        self.reload_current_dir_diff();
     }
 
     fn invalidate_diff_scan(&mut self) {
@@ -2773,12 +2909,12 @@ impl LibraryState {
     }
 
     pub fn apply_filter_token(&mut self, token: String) {
-        self.filter.keyword = token;
+        self.filter.set_keyword(token);
         self.mark_filter_dirty();
     }
 
     pub fn clear_filter(&mut self) {
-        self.filter.keyword.clear();
+        self.filter.clear_keyword();
         self.mark_filter_dirty();
     }
 

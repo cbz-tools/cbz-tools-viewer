@@ -504,6 +504,8 @@ impl ViewerApp {
                             .spawn(move || {
                                 let mut conn = client;
                                 while let Ok(request) = request_rx.recv() {
+                                    let fire_and_forget =
+                                        matches!(&request, ViewerToLibrary::SourceChanged { .. });
                                     tracing::debug!(request = ?request, "viewer.ipc.writer.send.begin");
                                     if conn.send_to_library(&request).is_err() {
                                         tracing::warn!("viewer.ipc.writer.send.failed");
@@ -512,6 +514,9 @@ impl ViewerApp {
                                         break;
                                     }
                                     tracing::debug!(request = ?request, "viewer.ipc.writer.send.done");
+                                    if fire_and_forget {
+                                        continue;
+                                    }
                                     let receive_result = conn.recv_from_library();
                                     match receive_result {
                                         Ok(msg) => {
@@ -2102,6 +2107,21 @@ impl ViewerApp {
         }
         self.external_tool_running = None;
         if result.success {
+            if result.background {
+                if let ViewerMode::Library { request_tx, .. } = &self.mode {
+                    if request_tx
+                        .send(ViewerToLibrary::SourceChanged {
+                            path: result.target_path.clone(),
+                        })
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            path = %result.target_path.display(),
+                            "viewer.ipc.source_changed.send.failed"
+                        );
+                    }
+                }
+            }
             self.external_tool_ui_state = ExternalToolUiState::Success {
                 tool_index: result.tool_index,
                 path: result.target_path,

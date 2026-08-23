@@ -57,6 +57,9 @@ struct ViewerLaunchSpec {
 
 #[derive(Clone, Debug)]
 pub(super) enum ViewerSyncEvent {
+    SourceChanged {
+        path: PathBuf,
+    },
     Deleted {
         deleted_path: PathBuf,
         next_path: Option<PathBuf>,
@@ -220,6 +223,13 @@ impl App {
                             Ok(msg) => msg,
                             Err(_) => break,
                         };
+                        if let ViewerToLibrary::SourceChanged { path } = msg {
+                            pending_viewer_sync_events
+                                .lock()
+                                .push(ViewerSyncEvent::SourceChanged { path });
+                            repaint_ctx.request_repaint();
+                            continue;
+                        }
                         let processed = match msg {
                             ViewerToLibrary::FavoriteToggle {
                                 request_id,
@@ -681,6 +691,7 @@ fn process_viewer_ipc_request(
 ) -> Option<(LibraryToViewer, Option<ViewerSyncEvent>)> {
     let started_at = Instant::now();
     let (response, sync_event) = match msg {
+        ViewerToLibrary::SourceChanged { .. } => return None,
         ViewerToLibrary::RequestViewerState {
             request_id,
             current_path: _,

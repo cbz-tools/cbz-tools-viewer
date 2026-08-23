@@ -7,6 +7,9 @@ use crate::domain::archive_settings::ReadingState;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ViewerToLibrary {
+    SourceChanged {
+        path: PathBuf,
+    },
     RequestViewerState {
         request_id: u64,
         current_path: PathBuf,
