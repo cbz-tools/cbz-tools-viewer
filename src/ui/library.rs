@@ -12,6 +12,11 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+/// NameNatural ordering shared by Library entries and directory-only Tree children.
+pub(crate) fn compare_name_natural(left: &str, right: &str) -> std::cmp::Ordering {
+    natural_sort::compare(left, right)
+}
+
 // 1フレームで UI スレッドが反映するサムネイル結果の上限
 const MAX_THUMB_RESULTS_PER_FRAME: usize = 48;
 // visible 範囲を優先して保持する Library thumbnail TextureHandle 上限
@@ -82,6 +87,7 @@ use crate::{
         disk::DiskCache,
     },
     infra::favorite_store::{FavoriteState, FavoriteStore},
+    infra::library_watch::LibraryChangeWatcher,
     infra::page_map::coordinator::PageMapStatus,
     infra::web_search::WebSearchMenuItem,
     infra::worker::thumb_worker::{
@@ -309,6 +315,8 @@ pub struct LibraryState {
     pub(crate) artifact_gate: Arc<RwLock<()>>,
     /// current_dir の差分ポーリングを最後に実行した時刻
     last_dir_poll_at: Instant,
+    /// Windows の変更通知を集約し、定期差分スキャンの実行条件にする。
+    library_change_watcher: LibraryChangeWatcher,
     /// 起動時 initial_dir スキャンの世代管理（古い結果破棄用）
     async_load_generation: u64,
     /// 起動時 initial_dir 非同期スキャン結果の受信口
@@ -2126,7 +2134,7 @@ impl LibraryState {
             preview: LibraryPreviewState::default(),
             artifact_gate: Arc::clone(&artifact_gate),
             worker: ThumbWorker::spawn(repaint.clone(), artifact_gate),
-            repaint,
+            repaint: repaint.clone(),
             current_dir: None,
             path_input: String::new(),
             is_path_editing: false,
@@ -2169,6 +2177,7 @@ impl LibraryState {
             hud_font_size: theme::FONT_SIZE_BODY,
             favorite_store: Arc::new(RwLock::new(FavoriteStore::load())),
             last_dir_poll_at: Instant::now(),
+            library_change_watcher: LibraryChangeWatcher::new(repaint),
             async_load_generation: 0,
             async_load_rx: None,
             async_loading: false,
@@ -2218,6 +2227,8 @@ impl LibraryState {
         self.selected_set.clear();
         self.anchor_idx = None;
         self.select_all_active = false;
+        self.library_change_watcher
+            .set_path(self.current_dir.as_deref());
         let static_page_map_memo_epoch = self.static_page_map_memo_epoch;
         let previous_static_page_counts = HashMap::new();
         let repaint = self.repaint.clone();
@@ -2325,17 +2336,27 @@ impl LibraryState {
         self.apply_dir_scan_result(ctx);
     }
 
-    pub fn poll_current_dir_changes(&mut self, ctx: &egui::Context) {
+    /// Polls the existing 3-second gate and returns whether a Periodic diff scan
+    /// was started. The caller uses that edge to refresh only the active Tree node.
+    pub fn poll_current_dir_changes(&mut self, ctx: &egui::Context) -> bool {
+        self.library_change_watcher
+            .set_path(self.current_dir.as_deref());
         let now = Instant::now();
-        if now.duration_since(self.last_dir_poll_at) >= LIBRARY_DIR_POLL_INTERVAL {
+        let elapsed = now.duration_since(self.last_dir_poll_at);
+        let mut periodic_scan_started = false;
+        if elapsed >= LIBRARY_DIR_POLL_INTERVAL {
             self.last_dir_poll_at = now;
-            if let Some(dir) = self.current_dir.clone() {
-                if self.async_loading || self.diff_scan_running {
-                    log::debug!("[diff-scan] skip already running path={}", dir.display());
-                } else {
+            if !self.async_loading
+                && !self.diff_scan_running
+                && self.library_change_watcher.take_dirty()
+            {
+                if let Some(dir) = self.current_dir.clone() {
                     self.start_diff_scan_async(dir, DiffScanReason::Periodic);
+                    periodic_scan_started = true;
                 }
             }
+        } else if self.library_change_watcher.has_dirty() {
+            ctx.request_repaint_after(LIBRARY_DIR_POLL_INTERVAL.saturating_sub(elapsed));
         }
 
         let kind_config_changed =
@@ -2347,6 +2368,7 @@ impl LibraryState {
         if kind_config_changed {
             ctx.request_repaint();
         }
+        periodic_scan_started
     }
 
     fn apply_kind_config_result(&mut self) -> bool {
@@ -3108,7 +3130,7 @@ impl LibraryState {
         out.sort_by(|a, b| {
             let ord = match self.sort_key {
                 SortKey::NameNatural => {
-                    natural_sort::compare(Self::entry_title_ref(a), Self::entry_title_ref(b))
+                    compare_name_natural(Self::entry_title_ref(a), Self::entry_title_ref(b))
                 }
                 SortKey::Modified => Self::entry_modified(a).cmp(&Self::entry_modified(b)),
                 SortKey::Size => {

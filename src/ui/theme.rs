@@ -58,6 +58,12 @@ pub const THUMB_W: f32 = 180.0;
 pub const THUMB_H: f32 = 260.0;
 pub const GRID_GAP: f32 = 10.0;
 pub const SIDEBAR_W: f32 = 200.0;
+/// Fixed Library left pane only; common/sidebar controls retain `SIDEBAR_W`.
+pub const LIBRARY_LEFT_PANE_W: f32 = SIDEBAR_W * 1.5;
+/// Minimum native-resizable Library left-pane width.
+pub const LIBRARY_LEFT_PANE_MIN_W: f32 = 240.0;
+/// Minimum central Library body width used by the dynamic pane-width maximum.
+pub const LIBRARY_GRID_MIN_WIDTH: f32 = 320.0;
 pub const SIDEBAR_INNER_MARGIN: f32 = 10.0;
 // 標準コントロール高さ。
 pub const CONTROL_HEIGHT: f32 = 24.0;

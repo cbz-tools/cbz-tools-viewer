@@ -1,6 +1,7 @@
 pub(crate) mod about;
 pub mod common;
 pub(crate) mod filename_token_menu;
+pub mod folder_tree;
 pub mod i18n;
 pub mod icons;
 pub mod library;

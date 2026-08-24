@@ -14,6 +14,7 @@ use crate::{
 
 use super::{
     common::{paint_favorite_star_in_rect, paint_quiet_hover_border},
+    folder_tree::{self, FolderTreeState},
     i18n::{TextKey, tr},
     icons,
     library::{LibraryScope, LibraryState, ReadingHudState},
@@ -24,6 +25,7 @@ use super::{
 #[allow(clippy::enum_variant_names)]
 pub enum SidebarAction {
     OpenFavorite(PathBuf),
+    NavigateTree(PathBuf),
     OpenInExplorer(PathBuf),
     OpenHistory(PathBuf),
 }
@@ -32,13 +34,13 @@ pub struct SidebarViewContext<'a> {
     pub state: &'a mut LibraryState,
     pub favorites: &'a mut Vec<PathBuf>,
     pub left_pane_tab: &'a mut LeftPaneTab,
+    pub folder_tree: &'a mut FolderTreeState,
     pub language: UiLanguage,
     pub history: &'a [HistoryEntry],
     pub history_textures: &'a mut HashMap<String, egui::TextureHandle>,
     pub disk_cache: Option<&'a DiskCache>,
 }
 
-const SIDEBAR_TAB_BUTTON_SIZE: egui::Vec2 = egui::vec2(112.0, 24.0);
 const SIDEBAR_FAVORITE_ROW_HEIGHT: f32 = 24.0;
 const SIDEBAR_HISTORY_ROW_HEIGHT: f32 = 72.0;
 const SIDEBAR_SELECTION_BAR_WIDTH: f32 = 4.0;
@@ -304,6 +306,7 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         state,
         favorites,
         left_pane_tab,
+        folder_tree,
         language,
         history,
         history_textures,
@@ -314,12 +317,14 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
 
     ui.horizontal(|ui| {
         let is_library = *left_pane_tab == LeftPaneTab::Library;
+        let is_tree = *left_pane_tab == LeftPaneTab::Tree;
         let is_history = *left_pane_tab == LeftPaneTab::History;
+        let tab_width =
+            ((ui.available_width() - ui.spacing().item_spacing.x * 2.0).max(0.0) / 3.0).max(0.0);
         if ui
             .add_sized(
-                SIDEBAR_TAB_BUTTON_SIZE,
-                egui::Button::new(format!("📁 {}", tr(language, TextKey::LibraryTab)))
-                    .selected(is_library),
+                egui::vec2(tab_width, 24.0),
+                egui::Button::new(tr(language, TextKey::LibraryTab)).selected(is_library),
             )
             .clicked()
         {
@@ -327,9 +332,17 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         }
         if ui
             .add_sized(
-                SIDEBAR_TAB_BUTTON_SIZE,
-                egui::Button::new(format!("🕐 {}", tr(language, TextKey::HistoryTab)))
-                    .selected(is_history),
+                egui::vec2(tab_width, 24.0),
+                egui::Button::new("Tree").selected(is_tree),
+            )
+            .clicked()
+        {
+            *left_pane_tab = LeftPaneTab::Tree;
+        }
+        if ui
+            .add_sized(
+                egui::vec2(tab_width, 24.0),
+                egui::Button::new(tr(language, TextKey::HistoryTab)).selected(is_history),
             )
             .clicked()
         {
@@ -338,6 +351,10 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
     });
 
     ui.separator();
+    if *left_pane_tab == LeftPaneTab::Tree {
+        return folder_tree::show(ui, folder_tree, state.current_dir.as_deref())
+            .map(SidebarAction::NavigateTree);
+    }
     if *left_pane_tab == LeftPaneTab::History {
         let today = Local::now().date_naive();
         let mut last_group: Option<HistoryDateGroup> = None;
@@ -460,7 +477,7 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
 
     let add_resp = ui
         .add_sized(
-            SIDEBAR_TAB_BUTTON_SIZE,
+            egui::vec2(ui.available_width().min(112.0), 24.0),
             egui::Button::new(tr(language, TextKey::AddFolder))
                 .fill(egui::Color32::TRANSPARENT)
                 .stroke(quiet_stroke),

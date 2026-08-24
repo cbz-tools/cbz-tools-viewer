@@ -5,8 +5,6 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::de::DeserializeOwned;
-
 /// 設定ファイルを同一ディレクトリの一時ファイル経由で置換する。
 ///
 /// 呼出し側の設定所有者や更新タイミングは変えず、保存途中の終了で本体が
@@ -89,70 +87,4 @@ fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
 #[cfg(not(windows))]
 fn replace_file(temp_path: &Path, path: &Path) -> std::io::Result<()> {
     std::fs::rename(temp_path, path)
-}
-
-pub fn load_json_or_default<T>(path: &Path, label: &str) -> T
-where
-    T: DeserializeOwned + Default,
-{
-    match std::fs::read_to_string(path) {
-        Ok(text) => match serde_json::from_str::<T>(&text) {
-            Ok(value) => value,
-            Err(err) => {
-                tracing::warn!(
-                    ?err,
-                    path = %path.display(),
-                    setting = label,
-                    "failed to parse json settings; using default"
-                );
-                T::default()
-            }
-        },
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => T::default(),
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                path = %path.display(),
-                setting = label,
-                "failed to read json settings; using default"
-            );
-            T::default()
-        }
-    }
-}
-
-pub fn load_toml_or_default<T>(path: &Path, label: &str) -> T
-where
-    T: DeserializeOwned + Default,
-{
-    match std::fs::read_to_string(path) {
-        Ok(raw) => {
-            let normalized = raw
-                .trim_start_matches('\u{FEFF}')
-                .replace("\r\n", "\n")
-                .replace('\r', "\n");
-            match toml::from_str::<T>(&normalized) {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::warn!(
-                        ?err,
-                        path = %path.display(),
-                        setting = label,
-                        "failed to parse toml settings; using default"
-                    );
-                    T::default()
-                }
-            }
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => T::default(),
-        Err(err) => {
-            tracing::warn!(
-                ?err,
-                path = %path.display(),
-                setting = label,
-                "failed to read toml settings; using default"
-            );
-            T::default()
-        }
-    }
 }

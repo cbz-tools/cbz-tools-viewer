@@ -75,6 +75,16 @@ The configured destinations are available from the shared filename-token menu in
 
 ## Library screen
 
+### Library left pane
+
+The Library left pane has three tabs: `Library`, `Tree`, and `History`.
+
+* `Library` navigates to registered Library folders and provides the existing library functions, including favorites, filters, and groups.
+* `Tree` shows real directories only. Hidden directories are omitted. Click `▶` / `▼` to expand or collapse a directory, or click a folder name to navigate there. Directory levels are loaded as needed, and the Tree follows changes to the current Library path.
+* `History` provides the existing reading history.
+
+The left pane can be shown or hidden. It consumes part of the Library grid width; drag its divider to resize it. Visibility and width are restored with the session. Double-click the divider to reset the width to its default.
+
 ### Basic actions
 
 | Action | Result |

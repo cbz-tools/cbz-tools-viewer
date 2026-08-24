@@ -1,4 +1,5 @@
 # CBZ Viewer - Kind グループ定義
+schema_version = 1
 #
 # 優先度:
 # 1. [overrides] のファイル個別設定

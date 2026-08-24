@@ -85,7 +85,8 @@ struct EntryProperties {
 pub struct App {
     library: LibraryState,
     favorites: Vec<PathBuf>,
-    sidebar_open: bool,
+    left_pane_visible: bool,
+    left_pane_width: f32,
     initial_dir: Option<PathBuf>,
 
     /// アプリ全体設定（サムネサイズ等）
@@ -141,6 +142,7 @@ pub struct App {
     pending_rebuilt_viewer_paths: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
     library_book_order: Arc<RwLock<LibraryNavSnapshot>>,
     left_pane_tab: LeftPaneTab,
+    folder_tree: crate::ui::folder_tree::FolderTreeState,
     open_history: std::collections::VecDeque<crate::session::HistoryEntry>,
     history_thumb_textures: HashMap<String, egui::TextureHandle>,
     sidebar_disk_cache: Option<DiskCache>,
@@ -208,6 +210,11 @@ impl App {
             "app: restored session state"
         );
         let left_pane_tab = session.left_pane_tab;
+        let left_pane_visible = session.left_pane_visible;
+        let left_pane_width = session
+            .left_pane_width
+            .filter(|width| width.is_finite() && *width >= theme::LIBRARY_LEFT_PANE_MIN_W)
+            .unwrap_or(theme::LIBRARY_LEFT_PANE_W);
         let open_history = session.history;
         let sidebar_disk_cache = DiskCache::open(DiskCache::default_root())
             .or_else(|_| {
@@ -221,7 +228,8 @@ impl App {
         Self {
             library,
             favorites,
-            sidebar_open: false,
+            left_pane_visible,
+            left_pane_width,
             initial_dir,
             app_settings,
             performance_resources,
@@ -260,6 +268,7 @@ impl App {
             pending_rebuilt_viewer_paths: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             library_book_order: Arc::new(RwLock::new(LibraryNavSnapshot::default())),
             left_pane_tab,
+            folder_tree: crate::ui::folder_tree::FolderTreeState::default(),
             open_history,
             history_thumb_textures: HashMap::new(),
             sidebar_disk_cache,
@@ -471,7 +480,10 @@ impl eframe::App for App {
         self.library.apply_pending_updates(&ctx);
         // ライブラリ画面のリアルタイム追従（3秒ポーリング）。
         // 既存サムネイルは保持し、追加/削除/同一パス入れ替えだけを差分反映する。
-        self.library.poll_current_dir_changes(&ctx);
+        if self.library.poll_current_dir_changes(&ctx) {
+            self.folder_tree
+                .refresh_active_node(self.library.current_dir.as_deref());
+        }
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
@@ -1408,6 +1420,8 @@ impl App {
         state.viewer_rgba_cache_max_mb = self.app_settings.viewer_rgba_cache_max_mb;
         state.viewer_background_worker_count = self.app_settings.viewer_background_worker_count;
         state.left_pane_tab = self.left_pane_tab;
+        state.left_pane_visible = self.left_pane_visible;
+        state.left_pane_width = Some(self.left_pane_width);
         state.history = self.open_history.clone();
         tracing::debug!(
             favorites = ?state.favorite_dirs,
@@ -1425,13 +1439,7 @@ impl App {
         let ctx = ui.ctx().clone();
         let ui_language = self.app_settings.ui_language;
 
-        if self.sidebar_open && ctx.input(|i| i.key_pressed(Key::Escape)) {
-            log::debug!("[window] close requested source=esc-sidebar");
-            self.sidebar_open = false;
-        }
-
-        let sidebar_toggled_this_frame =
-            self.render_topbar_and_apply_result(ui, &ctx, ui_language, TOPBAR_H);
+        self.render_topbar_and_apply_result(ui, &ctx, ui_language, TOPBAR_H);
 
         let modal_open = self.renaming.is_some()
             || self.properties_dialog.is_some()
@@ -1456,6 +1464,7 @@ impl App {
         let library_external_tools = self.external_tool_menu_items_for_library();
         let library_external_busy = self.is_external_tool_busy();
 
+        self.render_left_pane_and_dispatch_action(ui, &ctx, ui_language);
         self.render_library_panel_and_dispatch_action(
             ui,
             &ctx,
@@ -1463,12 +1472,6 @@ impl App {
             ui_language,
             &library_external_tools,
             library_external_busy,
-        );
-        self.render_sidebar_overlay_and_dispatch_action(
-            &ctx,
-            ui_language,
-            TOPBAR_H,
-            sidebar_toggled_this_frame,
         );
         self.render_library_feedback_overlays(&ctx, ui_language, TOPBAR_H);
         self.render_library_modals(&ctx, ui_language);
@@ -1480,7 +1483,7 @@ impl App {
         ctx: &egui::Context,
         ui_language: crate::domain::app_settings::UiLanguage,
         topbar_height: f32,
-    ) -> bool {
+    ) {
         let topbar_result = egui::Panel::top("topbar")
             .exact_size(topbar_height)
             .show(ui, |ui| {
@@ -1502,11 +1505,7 @@ impl App {
         self.apply_topbar_result(ctx, topbar_result)
     }
 
-    fn apply_topbar_result(
-        &mut self,
-        ctx: &egui::Context,
-        topbar_result: topbar::TopbarResult,
-    ) -> bool {
+    fn apply_topbar_result(&mut self, ctx: &egui::Context, topbar_result: topbar::TopbarResult) {
         if let Some(path) = topbar_result.breadcrumb_nav {
             self.navigate_to_dir_with_history(path);
         }
@@ -1545,9 +1544,8 @@ impl App {
         if topbar_result.nav_reload {
             self.reload_current_dir();
         }
-        let sidebar_toggled_this_frame = topbar_result.toggle_sidebar;
-        if topbar_result.toggle_sidebar {
-            self.sidebar_open = !self.sidebar_open;
+        if topbar_result.toggle_left_pane {
+            self.left_pane_visible = !self.left_pane_visible;
         }
         if topbar_result.settings_requested {
             self.settings_open = true;
@@ -1577,7 +1575,6 @@ impl App {
             self.app_settings
                 .save_with_resources(&self.performance_resources);
         }
-        sidebar_toggled_this_frame
     }
 
     fn process_library_shortcuts(
@@ -1724,10 +1721,8 @@ impl App {
                 || self.book_settings_clearing.is_some()
                 || self.setting_group_open
                 || self.pending_error_dialog.is_some();
-            let interaction_blocked = modal_open
-                || self.suppress_pointer_until_release
-                || self.sidebar_open
-                || self.settings_open;
+            let interaction_blocked =
+                modal_open || self.suppress_pointer_until_release || self.settings_open;
             let action = library::show(
                 ui,
                 &mut self.library,
@@ -1757,97 +1752,133 @@ impl App {
             LibraryAction::RunExternalTool {
                 tool_index,
                 targets,
-            } if !self.settings_open => {
-                if self.trigger_external_tool_from_library(tool_index, &targets) {
-                    ctx.request_repaint();
-                }
+            } if !self.settings_open
+                && self.trigger_external_tool_from_library(tool_index, &targets) =>
+            {
+                ctx.request_repaint();
             }
             _ => {}
         }
     }
 
-    fn render_sidebar_overlay_and_dispatch_action(
+    fn render_left_pane_and_dispatch_action(
         &mut self,
+        root_ui: &mut egui::Ui,
         ctx: &egui::Context,
         ui_language: crate::domain::app_settings::UiLanguage,
-        topbar_height: f32,
-        sidebar_toggled_this_frame: bool,
     ) {
-        if !self.sidebar_open {
+        if !self.left_pane_visible {
             return;
         }
 
-        let overlay = egui::Area::new("sidebar_overlay".into())
-            .order(egui::Order::Foreground)
-            .fixed_pos(egui::pos2(0.0, topbar_height))
-            .show(ctx, |ui| {
-                let frame = egui::Frame::new()
+        let (min_width, max_width) = self.left_pane_size_range(root_ui.available_width());
+        let panel_id = egui::Id::new("library_left_pane");
+        let pane = egui::Panel::left(panel_id)
+            .resizable(true)
+            .default_size(self.left_pane_width)
+            .size_range(min_width..=max_width)
+            .frame(
+                egui::Frame::new()
                     .fill(theme::SURFACE_BG)
                     .stroke(egui::Stroke::new(1.0_f32, theme::SEPARATOR_WEAK))
-                    .shadow(egui::epaint::Shadow {
-                        offset: [2, 0],
-                        blur: 10,
-                        spread: 0,
-                        color: egui::Color32::from_black_alpha(24),
-                    })
-                    .inner_margin(egui::Margin::same(theme::SIDEBAR_INNER_MARGIN as i8));
-
-                frame.show(ui, |ui| {
-                    ui.set_min_width(theme::SIDEBAR_W);
-                    ui.set_max_width(theme::SIDEBAR_W);
-                    let panel_height = (ctx.content_rect().height()
-                        - topbar_height
-                        - theme::SIDEBAR_INNER_MARGIN * 2.0)
-                        .max(120.0);
-                    ui.set_min_height(panel_height);
-                    ui.set_max_height(panel_height);
-                    sidebar::show(
-                        ui,
-                        sidebar::SidebarViewContext {
-                            state: &mut self.library,
-                            favorites: &mut self.favorites,
-                            left_pane_tab: &mut self.left_pane_tab,
-                            language: ui_language,
-                            history: self.open_history.make_contiguous(),
-                            history_textures: &mut self.history_thumb_textures,
-                            disk_cache: self.sidebar_disk_cache.as_ref(),
-                        },
-                    )
-                })
+                    .inner_margin(egui::Margin::same(theme::SIDEBAR_INNER_MARGIN as i8)),
+            )
+            .show(root_ui, |ui| {
+                // Nested Library, Tree, and History ScrollAreas inherit reserved scrollbar space.
+                ui.style_mut().spacing.scroll.floating = false;
+                let parent_clip = ui.clip_rect();
+                let content_size = ui.available_size();
+                let (content_rect, _) = ui.allocate_exact_size(content_size, egui::Sense::hover());
+                let mut content_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(content_rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                content_ui.set_clip_rect(parent_clip.intersect(content_rect));
+                sidebar::show(
+                    &mut content_ui,
+                    sidebar::SidebarViewContext {
+                        state: &mut self.library,
+                        favorites: &mut self.favorites,
+                        left_pane_tab: &mut self.left_pane_tab,
+                        folder_tree: &mut self.folder_tree,
+                        language: ui_language,
+                        history: self.open_history.make_contiguous(),
+                        history_textures: &mut self.history_thumb_textures,
+                        disk_cache: self.sidebar_disk_cache.as_ref(),
+                    },
+                )
             });
+        let action = pane.inner;
 
-        if !self.settings_open {
-            if let Some(sidebar_action) = overlay.inner.inner {
-                match sidebar_action {
-                    sidebar::SidebarAction::OpenFavorite(path) => {
-                        self.library.history_back.clear();
-                        self.library.history_forward.clear();
-                        self.set_pending_after_load(None, Some(0.0));
-                        self.load_library_dir(path);
-                        self.sidebar_open = false;
-                    }
-                    sidebar::SidebarAction::OpenInExplorer(path) => {
-                        self.open_in_explorer(path.as_path());
-                        self.sidebar_open = false;
-                    }
-                    sidebar::SidebarAction::OpenHistory(path) => {
-                        let _ = self.open_viewer_by_path(path, ctx);
-                        self.sidebar_open = false;
-                    }
+        let pane_width = pane.response.rect.width();
+        if pane_width.is_finite() && pane_width >= 0.0 {
+            self.left_pane_width = pane_width;
+        }
+
+        // Keep reset detection separate from egui's native `__resize` response. A
+        // click-only candidate can observe double-clicks without competing with
+        // the panel's click-and-drag resize interaction.
+        let resize_grab_radius = root_ui.style().interaction.resize_grab_radius_side;
+        let pane_rect = pane.response.rect;
+        let reset_rect = egui::Rect::from_x_y_ranges(
+            egui::Rangef::point(pane_rect.right()),
+            pane_rect.y_range(),
+        )
+        .expand2(egui::vec2(resize_grab_radius, 0.0));
+        let reset_response = root_ui.interact(
+            reset_rect,
+            root_ui.id().with("library_left_pane_reset"),
+            egui::Sense::click(),
+        );
+        if reset_response.hovered() {
+            root_ui
+                .ctx()
+                .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+        }
+        if reset_response.double_clicked() {
+            self.left_pane_width = theme::LIBRARY_LEFT_PANE_W;
+            root_ui.ctx().data_mut(|data| {
+                data.remove::<egui::containers::panel::PanelState>(panel_id);
+            });
+            root_ui.ctx().request_repaint();
+        }
+
+        if self.settings_open {
+            return;
+        }
+        if let Some(sidebar_action) = action {
+            match sidebar_action {
+                sidebar::SidebarAction::OpenFavorite(path) => {
+                    self.library.history_back.clear();
+                    self.library.history_forward.clear();
+                    self.set_pending_after_load(None, Some(0.0));
+                    self.load_library_dir(path);
+                }
+                sidebar::SidebarAction::NavigateTree(path) => {
+                    self.navigate_to_dir_with_history(path);
+                }
+                sidebar::SidebarAction::OpenInExplorer(path) => {
+                    self.open_in_explorer(path.as_path());
+                }
+                sidebar::SidebarAction::OpenHistory(path) => {
+                    let _ = self.open_viewer_by_path(path, ctx);
                 }
             }
         }
+    }
 
-        let should_close = !sidebar_toggled_this_frame
-            && ctx.input(|i| {
-                i.pointer.any_click()
-                    && i.pointer.interact_pos().is_some_and(|pos| {
-                        pos.y < topbar_height || !overlay.response.rect.contains(pos)
-                    })
-            });
-        if should_close {
-            self.sidebar_open = false;
-        }
+    fn left_pane_size_range(&self, available_width: f32) -> (f32, f32) {
+        let available_width = if available_width.is_finite() {
+            available_width.max(0.0)
+        } else {
+            0.0
+        };
+        let effective_min = theme::LIBRARY_LEFT_PANE_MIN_W.min(available_width);
+        let dynamic_max = (available_width - theme::LIBRARY_GRID_MIN_WIDTH)
+            .max(effective_min)
+            .min(available_width);
+        (effective_min, dynamic_max)
     }
 
     fn render_library_feedback_overlays(

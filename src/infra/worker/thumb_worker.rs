@@ -1455,12 +1455,14 @@ fn worker_main(context: WorkerMainContext) {
                 video_worker_loop(
                     video_req_rx,
                     video_background_req_rx,
-                    shared,
-                    tx,
-                    repaint,
-                    generation,
-                    thumbnail_sem,
-                    Arc::clone(&visible_artifact_ids),
+                    VideoWorkerContext {
+                        shared,
+                        tx,
+                        repaint,
+                        generation,
+                        thumbnail_sem,
+                        visible_artifact_ids: Arc::clone(&visible_artifact_ids),
+                    },
                 )
                 .await;
             }
@@ -2971,16 +2973,28 @@ fn preview_file_snapshot_matches(
     }
 }
 
-async fn video_worker_loop(
-    mut rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
-    mut background_rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
+struct VideoWorkerContext {
     shared: Arc<WorkerShared>,
     tx: std::sync::mpsc::Sender<WorkerMsg>,
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
     thumbnail_sem: Arc<Semaphore>,
     visible_artifact_ids: Arc<Mutex<HashSet<BookId>>>,
+}
+
+async fn video_worker_loop(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
+    mut background_rx: tokio::sync::mpsc::UnboundedReceiver<VideoReq>,
+    context: VideoWorkerContext,
 ) {
+    let VideoWorkerContext {
+        shared,
+        tx,
+        repaint,
+        generation,
+        thumbnail_sem,
+        visible_artifact_ids,
+    } = context;
     let mut video_tasks = tokio::task::JoinSet::new();
     let mut background_open = true;
     loop {

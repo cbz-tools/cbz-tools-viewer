@@ -69,13 +69,19 @@ pub struct SessionState {
     #[serde(default)]
     pub left_pane_tab: LeftPaneTab,
     #[serde(default)]
+    pub left_pane_visible: bool,
+    /// Left pane width in logical pixels. Missing or invalid legacy values use the default.
+    #[serde(default)]
+    pub left_pane_width: Option<f32>,
+    #[serde(default)]
     pub history: VecDeque<HistoryEntry>,
 }
 
-#[derive(Default, serde::Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeftPaneTab {
     #[default]
     Library,
+    Tree,
     History,
 }
 
@@ -100,22 +106,89 @@ fn default_viewer_background_worker_count() -> u16 {
 }
 
 impl SessionState {
+    const SCHEMA_VERSION: u16 = 1;
     const DEFAULT_W: f32 = 1200.0;
     const DEFAULT_H: f32 = 800.0;
 
     /// ファイルから読み込む（失敗時はデフォルト）
     pub fn load() -> Self {
-        let mut state = crate::infra::config_io::load_json_or_default::<Self>(
-            &Self::file_path(),
-            "session_state",
-        );
+        let path = Self::file_path();
+        let mut state = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(value) => {
+                    let schema_version = value
+                        .as_object()
+                        .and_then(|object| object.get("schema_version"));
+                    if let Some(version) = schema_version {
+                        if version.as_u64() != Some(Self::SCHEMA_VERSION as u64) {
+                            tracing::warn!(
+                                path = %path.display(),
+                                ?version,
+                                "unsupported session schema version; using default"
+                            );
+                            SessionState::default()
+                        } else {
+                            serde_json::from_value(value).unwrap_or_else(|err| {
+                                tracing::warn!(
+                                    ?err,
+                                    path = %path.display(),
+                                    setting = "session_state",
+                                    "failed to parse json settings; using default"
+                                );
+                                SessionState::default()
+                            })
+                        }
+                    } else {
+                        // v0.4 files did not have a schema_version field.
+                        serde_json::from_value(value).unwrap_or_else(|err| {
+                            tracing::warn!(
+                                ?err,
+                                path = %path.display(),
+                                setting = "session_state",
+                                "failed to parse json settings; using default"
+                            );
+                            SessionState::default()
+                        })
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        ?err,
+                        path = %path.display(),
+                        setting = "session_state",
+                        "failed to parse json settings; using default"
+                    );
+                    SessionState::default()
+                }
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => SessionState::default(),
+            Err(err) => {
+                tracing::warn!(
+                    ?err,
+                    path = %path.display(),
+                    setting = "session_state",
+                    "failed to read json settings; using default"
+                );
+                SessionState::default()
+            }
+        };
         state.sanitize_history_entries();
         state
     }
 
     /// ファイルへ保存する
     pub fn save(&self) {
-        let Ok(json) = serde_json::to_string_pretty(self) else {
+        #[derive(serde::Serialize)]
+        struct SessionFile<'a> {
+            schema_version: u16,
+            #[serde(flatten)]
+            state: &'a SessionState,
+        }
+
+        let Ok(json) = serde_json::to_string_pretty(&SessionFile {
+            schema_version: Self::SCHEMA_VERSION,
+            state: self,
+        }) else {
             return;
         };
         let path = Self::file_path();

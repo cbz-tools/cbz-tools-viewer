@@ -7,6 +7,7 @@ pub mod favorite_store;
 pub mod fs;
 pub mod image;
 pub mod ipc;
+pub(crate) mod library_watch;
 pub mod page_map;
 pub mod system_resources;
 pub mod web_search;

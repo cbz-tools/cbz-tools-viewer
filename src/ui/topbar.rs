@@ -44,8 +44,8 @@ const FILTER_CLEAR_BUTTON_RIGHT_PADDING: f32 = 4.0;
 pub struct TopbarResult {
     /// パス入力でスキャンするディレクトリ（D&D は app.rs 側で集約管理）
     pub scan_dir: Option<PathBuf>,
-    /// ライブラリオーバーレイの開閉要求
-    pub toggle_sidebar: bool,
+    /// 左ペインの表示切替要求
+    pub toggle_left_pane: bool,
     /// ⚙ ボタンが押されたら true
     pub settings_requested: bool,
     /// 設定メニューの言語切替が押されたら true
@@ -74,7 +74,7 @@ pub fn show(
     viewer_open_mode: &mut ViewerOpenMode,
     _ignore_external_drop: bool,
 ) -> TopbarResult {
-    let mut toggle_sidebar = false;
+    let mut toggle_left_pane = false;
     let mut settings_requested = false;
     let mut language_toggle_requested = false;
     let mut about_requested = false;
@@ -107,7 +107,7 @@ pub fn show(
             .on_hover_text(tr(language, TextKey::ShowLibrary));
         paint_quiet_hover_border(ui, &menu_resp);
         if menu_resp.clicked() {
-            toggle_sidebar = true;
+            toggle_left_pane = true;
         }
 
         ui.add_space(TOPBAR_GAP_SMALL);
@@ -544,7 +544,7 @@ pub fn show(
 
     TopbarResult {
         scan_dir: None,
-        toggle_sidebar,
+        toggle_left_pane,
         settings_requested,
         language_toggle_requested,
         about_requested,

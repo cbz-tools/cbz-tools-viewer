@@ -21,11 +21,13 @@ pub struct FavoriteEntry {
     pub modified: u64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 struct FavoriteFile {
     #[serde(default)]
     entries: Vec<FavoriteEntry>,
 }
+
+const FAVORITE_SCHEMA_VERSION: u16 = 1;
 
 /// Library 側の favorites 永続化ストア。
 ///
@@ -39,8 +41,7 @@ impl FavoriteStore {
     /// favorites.json を読み込む。ファイルがなければ空として扱う。
     pub fn load() -> Self {
         let file_path = favorites_json_path();
-        let file =
-            crate::infra::config_io::load_json_or_default::<FavoriteFile>(&file_path, "favorites");
+        let file = load_favorite_file(&file_path);
         let mut store = Self {
             file_path,
             entries: file.entries,
@@ -53,8 +54,15 @@ impl FavoriteStore {
     pub fn save(&mut self) -> bool {
         let _ = self.compact();
 
-        let file = FavoriteFile {
-            entries: self.entries.clone(),
+        #[derive(Serialize)]
+        struct FavoriteFileV1<'a> {
+            schema_version: u16,
+            entries: &'a [FavoriteEntry],
+        }
+
+        let file = FavoriteFileV1 {
+            schema_version: FAVORITE_SCHEMA_VERSION,
+            entries: &self.entries,
         };
 
         if let Ok(json) = serde_json::to_string_pretty(&file) {
@@ -165,6 +173,45 @@ impl FavoriteStore {
 
 fn favorites_json_path() -> PathBuf {
     app_base_dir().join("favorites.json")
+}
+
+fn load_favorite_file(path: &Path) -> FavoriteFile {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return FavoriteFile::default();
+        }
+        Err(error) => {
+            tracing::warn!(
+                ?error,
+                path = %path.display(),
+                setting = "favorites",
+                "failed to read json settings; using default"
+            );
+            return FavoriteFile::default();
+        }
+    };
+    let value = match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(?err, path = %path.display(), setting = "favorites", "failed to parse json settings; using default");
+            return FavoriteFile::default();
+        }
+    };
+
+    if value
+        .as_object()
+        .and_then(|object| object.get("schema_version"))
+        .is_some_and(|version| version.as_u64() != Some(FAVORITE_SCHEMA_VERSION as u64))
+    {
+        tracing::warn!(path = %path.display(), "unsupported favorites schema version; using default");
+        return FavoriteFile::default();
+    }
+
+    serde_json::from_value(value).unwrap_or_else(|err| {
+        tracing::warn!(?err, path = %path.display(), setting = "favorites", "failed to parse json settings; using default");
+        FavoriteFile::default()
+    })
 }
 
 fn read_entry_metadata(path: &Path) -> (u64, u64) {
