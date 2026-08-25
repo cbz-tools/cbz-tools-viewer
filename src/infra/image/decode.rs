@@ -4,6 +4,7 @@
 //! - format ごとに decode 経路を分ける
 //! - viewer 向け経路では `display_w` と `max_tex_side` を反映する
 
+use std::io::Cursor;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
@@ -47,10 +48,174 @@ pub struct ViewerFrames {
     pub orig_h: u32,
 }
 
-/// animated WebP の逐次フレーム供給結果。
+/// Animation source の逐次フレーム供給結果。
 pub struct AnimationFrameChunk {
     pub frames: Vec<FrameData>,
     pub exhausted: bool,
+}
+
+/// GIF の composited RGBA フレームを逐次供給する source。
+///
+/// Decoder は入力バイトを所有する Cursor と static な停止条件だけを借用するため、
+/// self-reference や unsafe を使わずに restart できる。
+pub struct GifAnimFrameSource {
+    raw: bytes::Bytes,
+    decoder: zengif::Decoder<'static, Cursor<bytes::Bytes>>,
+    canvas: (u32, u32),
+    finished: bool,
+}
+
+static GIF_UNSTOPPABLE: zengif::Unstoppable = zengif::Unstoppable;
+
+impl GifAnimFrameSource {
+    pub fn new(data: &[u8]) -> Result<Self> {
+        Self::new_bytes(bytes::Bytes::copy_from_slice(data))
+    }
+
+    pub fn new_bytes(raw: bytes::Bytes) -> Result<Self> {
+        let decoder = Self::new_decoder(raw.clone())?;
+        let canvas = (u32::from(decoder.width()), u32::from(decoder.height()));
+        Ok(Self {
+            raw,
+            decoder,
+            canvas,
+            finished: false,
+        })
+    }
+
+    fn new_decoder(raw: bytes::Bytes) -> Result<zengif::Decoder<'static, Cursor<bytes::Bytes>>> {
+        zengif::Decoder::new(
+            Cursor::new(raw),
+            zengif::Limits::default(),
+            &GIF_UNSTOPPABLE,
+        )
+        .context("GIF decoder")
+    }
+
+    pub fn has_more_frames(&self) -> bool {
+        !self.finished
+    }
+
+    pub fn canvas(&self) -> (u32, u32) {
+        self.canvas
+    }
+
+    pub fn restart(&mut self) -> Result<()> {
+        self.decoder = Self::new_decoder(self.raw.clone())?;
+        self.finished = false;
+        Ok(())
+    }
+
+    fn decode_next_frame(&mut self) -> Result<Option<FrameData>> {
+        let Some(frame) = self.decoder.next_frame().context("GIF frame decode")? else {
+            self.finished = true;
+            return Ok(None);
+        };
+        let pixels = frame
+            .pixels
+            .into_iter()
+            .flat_map(|pixel| [pixel.r, pixel.g, pixel.b, pixel.a])
+            .collect();
+        Ok(Some(FrameData {
+            image: DecodedImage {
+                width: u32::from(frame.width),
+                height: u32::from(frame.height),
+                pixels,
+            },
+            delay_ms: u32::from(frame.delay)
+                .saturating_mul(10)
+                .max(MIN_FRAME_DELAY_MS),
+        }))
+    }
+
+    pub fn next_frame(&mut self) -> Result<Option<FrameData>> {
+        self.decode_next_frame()
+    }
+
+    pub fn decode_chunk(&mut self, frame_limit: usize) -> Result<AnimationFrameChunk> {
+        let limit = frame_limit.max(1);
+        let mut frames = Vec::with_capacity(limit);
+        while frames.len() < limit {
+            let Some(frame) = self.next_frame()? else {
+                break;
+            };
+            frames.push(frame);
+        }
+        Ok(AnimationFrameChunk {
+            frames,
+            exhausted: !self.has_more_frames(),
+        })
+    }
+}
+
+/// WebP/GIF animated source の共通最小 API。
+pub enum AnimationFrameSource {
+    WebP(WebpAnimFrameSource),
+    Gif(Box<GifAnimFrameSource>),
+}
+
+impl AnimationFrameSource {
+    #[allow(dead_code)]
+    pub fn new(data: &[u8], fmt: ImageFormatHint) -> Result<Self> {
+        match fmt {
+            ImageFormatHint::WebP => Ok(Self::WebP(WebpAnimFrameSource::new(data)?)),
+            ImageFormatHint::Gif => Ok(Self::Gif(Box::new(GifAnimFrameSource::new(data)?))),
+            _ => anyhow::bail!("unsupported animated image format: {fmt:?}"),
+        }
+    }
+
+    pub fn new_bytes(data: bytes::Bytes, fmt: ImageFormatHint) -> Result<Self> {
+        match fmt {
+            ImageFormatHint::WebP => Ok(Self::WebP(WebpAnimFrameSource::new_bytes(data)?)),
+            ImageFormatHint::Gif => Ok(Self::Gif(Box::new(GifAnimFrameSource::new_bytes(data)?))),
+            _ => anyhow::bail!("unsupported animated image format: {fmt:?}"),
+        }
+    }
+
+    pub fn has_more_frames(&self) -> bool {
+        match self {
+            Self::WebP(source) => source.has_more_frames(),
+            Self::Gif(source) => source.has_more_frames(),
+        }
+    }
+
+    pub fn next_frame(&mut self) -> Result<Option<FrameData>> {
+        match self {
+            Self::WebP(source) => source.next_frame(),
+            Self::Gif(source) => source.next_frame(),
+        }
+    }
+
+    pub fn decode_chunk(&mut self, frame_limit: usize) -> Result<AnimationFrameChunk> {
+        match self {
+            Self::WebP(source) => source.decode_chunk(frame_limit),
+            Self::Gif(source) => source.decode_chunk(frame_limit),
+        }
+    }
+
+    pub fn restart(&mut self) -> Result<()> {
+        match self {
+            Self::WebP(source) => source.restart(),
+            Self::Gif(source) => source.restart(),
+        }
+    }
+
+    pub fn canvas(&self) -> (u32, u32) {
+        match self {
+            Self::WebP(source) => {
+                let canvas = source.canvas();
+                (canvas.width, canvas.height)
+            }
+            Self::Gif(source) => source.canvas(),
+        }
+    }
+
+    pub fn frame_durations(&self) -> Result<Vec<u32>> {
+        match self {
+            Self::WebP(source) => source.frame_durations(),
+            Self::Gif(_) => anyhow::bail!("GIF frame durations require incremental decoding"),
+        }
+    }
 }
 
 /// 共用 crate の decoder を viewer の再生フレーム型へ適合する。
@@ -63,6 +228,10 @@ impl WebpAnimFrameSource {
         Ok(Self {
             decoder: AnimationDecoder::new(data, DecodeLimits::for_trusted_input())?,
         })
+    }
+
+    pub fn new_bytes(data: bytes::Bytes) -> Result<Self> {
+        Self::new(data.as_ref())
     }
 
     pub fn frame_count(&self) -> u32 {
@@ -92,6 +261,11 @@ impl WebpAnimFrameSource {
 
     pub fn reset(&mut self) {
         self.decoder.reset();
+    }
+
+    pub fn restart(&mut self) -> Result<()> {
+        self.reset();
+        Ok(())
     }
 
     pub fn next_frame(&mut self) -> Result<Option<FrameData>> {
@@ -140,20 +314,8 @@ pub fn decode(data: &[u8], hint: ImageFormatHint) -> Result<DecodedImage> {
     match fmt {
         ImageFormatHint::Jpeg => decode_jpeg(data),
         ImageFormatHint::Png => decode_png_static(data),
-        ImageFormatHint::WebP => {
-            match decode_webp(data) {
-                Ok(decoded) => {
-                    // 静止画 WebP: webp crate（高速）
-                    Ok(decoded)
-                }
-                Err(_) => {
-                    // アニメーション WebP または静止画フォールバック:
-                    // decode_webp_frames は全フレームをデコードするためサムネイル・単フレーム用途には不適。
-                    // image::load_from_memory は先頭フレームのみデコードするため高速・省メモリ。
-                    decode_generic(data)
-                }
-            }
-        }
+        ImageFormatHint::Gif => decode_gif_first_frame(data),
+        ImageFormatHint::WebP => decode_webp(data),
         ImageFormatHint::Avif => decode_avif_static(data),
         _ => decode_generic(data),
     }
@@ -181,23 +343,22 @@ pub fn decode_for_thumb(
     match fmt {
         ImageFormatHint::Jpeg => decode_jpeg(data),
         ImageFormatHint::Avif => decode_avif_static(data),
-        ImageFormatHint::WebP => match decode_webp(data) {
-            Ok(decoded) => Ok(decoded),
-            Err(_) => decode_generic(data),
-        },
+        ImageFormatHint::Gif => decode_gif_first_frame(data),
+        ImageFormatHint::WebP => decode_webp(data),
         _ => decode_generic(data),
     }
 }
 
 // ── 全フレームデコード（アニメーション対応）──────────────────────────────────
 
-/// 全フレームをデコードして返す。
-/// - 静止画: 1 要素のベクタ（delay_ms = 0）
-/// - GIF / アニメ WebP / APNG: 全フレームを delay 付きで返す
+/// 全フレームをデコードして返す既存の非 GIF 経路。
+/// GIF は常時 `AnimationFrameSource` の streaming path を使用する。
 pub fn decode_frames(data: &[u8], hint: ImageFormatHint) -> Result<Vec<FrameData>> {
     let fmt = resolve_fmt(data, hint);
     match fmt {
-        ImageFormatHint::Gif => decode_gif_frames(data),
+        ImageFormatHint::Gif => {
+            anyhow::bail!("GIF frame collection is unsupported; use AnimationFrameSource")
+        }
         ImageFormatHint::WebP => decode_webp_frames(data),
         ImageFormatHint::Png => decode_png_frames(data),
         _ => {
@@ -259,7 +420,7 @@ pub fn decode_webp(data: &[u8]) -> Result<DecodedImage> {
 
 // ── PNG / GIF / AVIF / その他 ─────────────────────────────────────────────────
 
-/// image crate を使って汎用デコード（PNG / GIF / AVIF など）
+/// image crate を使って汎用デコード（PNG / AVIF など）。GIF は専用経路を使う。
 fn decode_generic(data: &[u8]) -> Result<DecodedImage> {
     let img = image::load_from_memory(data).context("image decode")?;
     let rgba = img.to_rgba8();
@@ -269,6 +430,14 @@ fn decode_generic(data: &[u8]) -> Result<DecodedImage> {
         height: h,
         pixels: rgba.into_raw(),
     })
+}
+
+fn decode_gif_first_frame(data: &[u8]) -> Result<DecodedImage> {
+    let mut source = GifAnimFrameSource::new(data)?;
+    let frame = source
+        .next_frame()?
+        .context("GIF has no decodable first frame")?;
+    Ok(frame.image)
 }
 
 fn decode_png_static(data: &[u8]) -> Result<DecodedImage> {
@@ -282,30 +451,6 @@ fn decode_avif_static(data: &[u8]) -> Result<DecodedImage> {
 }
 
 // ── フレームデコード実装 ──────────────────────────────────────────────────────
-
-fn decode_gif_frames(data: &[u8]) -> Result<Vec<FrameData>> {
-    use image::AnimationDecoder as _;
-    use image::codecs::gif::GifDecoder;
-
-    // 現在の Viewer はフレーム列全体を保持して再生するため、GIF は全フレームを
-    // フルサイズで収集してから表示サイズへ縮小する。大判・長尺 GIF では一時メモリが
-    // 大きくなり得る。上限を設ける場合は、途中フレームを欠かさない逐次デコードと
-    // 再生キャッシュの設計を GIF/APNG 共通で導入すること。
-    let decoder = GifDecoder::new(std::io::Cursor::new(data)).context("GIF decoder")?;
-    let frames: Vec<_> = decoder
-        .into_frames()
-        .collect::<image::ImageResult<Vec<_>>>()
-        .map_err(|e| anyhow::anyhow!("GIF frames: {e}"))?;
-
-    if frames.is_empty() {
-        let image = decode_generic(data)?;
-        return Ok(vec![FrameData {
-            image,
-            delay_ms: STATIC_FRAME_DELAY_MS,
-        }]);
-    }
-    Ok(frames.into_iter().map(image_frame_to_frame_data).collect())
-}
 
 fn decode_webp_frames(data: &[u8]) -> Result<Vec<FrameData>> {
     decode_webp_frames_with_libwebp(data, None)
@@ -345,6 +490,33 @@ pub fn is_animated_webp(data: &[u8]) -> Result<bool> {
     ))
 }
 
+/// GIF/WebP の animated 判定。GIF は先頭と次の frame だけを probe し、
+/// 全フレームの RGBA キャッシュを作らない。
+pub fn is_animated_gif(data: &[u8]) -> Result<bool> {
+    is_animated_gif_bytes(bytes::Bytes::copy_from_slice(data))
+}
+
+pub fn is_animated_gif_bytes(data: bytes::Bytes) -> Result<bool> {
+    let mut source = GifAnimFrameSource::new_bytes(data)?;
+    let Some(_) = source.next_frame()? else {
+        return Ok(false);
+    };
+    Ok(source.next_frame()?.is_some())
+}
+
+#[allow(dead_code)]
+pub fn is_animated_image(data: &[u8], hint: ImageFormatHint) -> Result<bool> {
+    is_animated_image_bytes(bytes::Bytes::copy_from_slice(data), hint)
+}
+
+pub fn is_animated_image_bytes(data: bytes::Bytes, hint: ImageFormatHint) -> Result<bool> {
+    match resolve_fmt(&data, hint) {
+        ImageFormatHint::Gif => is_animated_gif_bytes(data),
+        ImageFormatHint::WebP => is_animated_webp(data.as_ref()),
+        _ => Ok(false),
+    }
+}
+
 fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {
     use image::AnimationDecoder as _;
     use image::codecs::png::PngDecoder;
@@ -353,7 +525,7 @@ fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {
 
     // is_apng() は ImageResult<bool> を返す
     if decoder.is_apng().unwrap_or(false) {
-        // GIF と同様に、現在は APNG の全フレームをフルサイズで収集してから縮小する。
+        // APNG は現行どおり全フレームをフルサイズで収集してから縮小する。
         // メモリ上限を導入する場合は、正常なアニメーションを途中で切らないよう、
         // GIF と共通の逐次デコード・再生キャッシュへ移行すること。
         let apng = decoder.apng().context("APNG")?;
@@ -608,7 +780,7 @@ fn resize_to_width_with_filter(
 ///
 /// - **JPEG**: 画質ごとの target / TurboJPEG DCT 縮小方針に従う
 ///   → フルデコードより高速化できるモードを優先
-/// - **PNG / WebP / GIF / APNG など**: `decode_frames()` でデコード後に `max_tex_side` でキャップ
+/// - **PNG / WebP / APNG など**: `decode_frames()` でデコード後に `max_tex_side` でキャップ
 /// - すべてのフォーマットで `max_tex_side` を超えるフレームはリサイズ（GPU panic 防止）
 /// - `ViewerFrames.orig_w/orig_h` にリサイズ前の元サイズを格納
 ///
@@ -646,7 +818,14 @@ pub fn decode_for_viewer_frames(
                 decode_png_for_viewer(data, target, cap, quality)
             }
         }
-        ImageFormatHint::Gif => decode_animated_for_viewer_frames(data, fmt, target),
+        ImageFormatHint::Gif => {
+            if is_animated_gif(data).unwrap_or(false) {
+                anyhow::bail!("animated GIF requires the AnimationFrameSource streaming path")
+            } else {
+                let image = decode_gif_first_frame(data)?;
+                decode_static_image_for_viewer(image, target, cap, &quality)
+            }
+        }
         _ => decode_generic_for_viewer(data, fmt, target, cap, quality),
     }
 }

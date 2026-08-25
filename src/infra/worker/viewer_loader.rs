@@ -44,6 +44,7 @@ pub enum ViewerRequestKind {
     Display,
     AnimationStreamStart,
     AnimationStreamFill,
+    AnimationStreamPrune,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -378,27 +379,47 @@ impl ViewerLoader {
     /// フルデコードリクエストを送信し、割り当てられた ID を返す。
     /// 未処理の古いリクエストは上書きされる（最新勝ち）。
     pub fn send_request(&self, request: ViewerLoadRequest) -> u64 {
-        self.enqueue(Self::build_request(
+        let req = Self::build_request(
             request,
             ViewerRequestKind::Display,
             self.next_id.fetch_add(1, Ordering::Relaxed),
-        ))
+        );
+        self.enqueue(req)
     }
 
     pub fn send_animation_stream_start(&self, request: ViewerLoadRequest) -> u64 {
-        self.enqueue(Self::build_request(
+        let req = Self::build_request(
             request,
             ViewerRequestKind::AnimationStreamStart,
             self.next_id.fetch_add(1, Ordering::Relaxed),
-        ))
+        );
+        self.enqueue(req)
     }
 
     pub fn send_animation_stream_fill(&self, request: ViewerLoadRequest) -> u64 {
-        self.enqueue(Self::build_request(
+        let req = Self::build_request(
             request,
             ViewerRequestKind::AnimationStreamFill,
             self.next_id.fetch_add(1, Ordering::Relaxed),
-        ))
+        );
+        self.enqueue(req)
+    }
+
+    /// Interactive worker-local animation streams are invalid across navigation.
+    /// This is intentionally fire-and-forget and targets both replaceable queues.
+    pub fn send_animation_stream_prune(&self, nav_id: u64, view_idx: u32) {
+        let even = Self::build_animation_stream_prune_request(
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+            nav_id,
+            view_idx,
+        );
+        let odd = Self::build_animation_stream_prune_request(
+            self.next_id.fetch_add(1, Ordering::Relaxed),
+            nav_id,
+            view_idx,
+        );
+        self.enqueue_to_shared(even, &self.interactive_even_shared);
+        self.enqueue_to_shared(odd, &self.interactive_odd_shared);
     }
 
     pub fn send_spad_next_request(&self, request: ViewerLoadRequest) -> u64 {
@@ -439,6 +460,25 @@ impl ViewerLoader {
             enqueued_at: Instant::now(),
             nav_id: request.nav_id,
             interactive: request.interactive,
+        }
+    }
+
+    fn build_animation_stream_prune_request(id: u64, nav_id: u64, view_idx: u32) -> ViewerRequest {
+        ViewerRequest {
+            id,
+            path: Arc::from(Path::new("")),
+            page_left: None,
+            page_right: None,
+            display_w: 0,
+            display_h: 0,
+            quality: ViewerQuality::default(),
+            max_tex_side: 0,
+            frame_cache_cap: 1,
+            kind: ViewerRequestKind::AnimationStreamPrune,
+            view_idx,
+            enqueued_at: Instant::now(),
+            nav_id,
+            interactive: true,
         }
     }
 
@@ -561,14 +601,19 @@ struct CachedReader {
     /// デコード済みフレーム LRU キャッシュ: (page_n, display_w) → Arc<frames>。
     /// キャッシュヒット時はフル ZIP 解凍 + JPEG デコードをスキップ（ページ戻り等に有効）。
     frame_cache: LruCache<PageKey, Arc<Vec<img::FrameData>>>,
-    /// animated WebP の逐次フレーム供給状態。
+    /// animated image の逐次フレーム供給状態。
     animation_streams: HashMap<AnimationStreamKey, CachedAnimationStream>,
+    /// Animation stream request の navigation 世代。古い Start/Fill は復活させない。
+    animation_stream_generation: u64,
 }
 
-type AnimationStreamKey = (u32, u32, u32, ViewerQuality);
+type AnimationStreamKey = (u32, u32);
 
 struct CachedAnimationStream {
-    source: img::WebpAnimFrameSource,
+    source: img::AnimationFrameSource,
+    canvas_w: u32,
+    canvas_h: u32,
+    gpu_safety_side: u32,
 }
 
 const FAILED_PAGE_TEXT: &str = "PAGE LOAD FAILED";
@@ -628,6 +673,40 @@ fn worker_loop(
                 };
             }
         };
+        if req.kind == ViewerRequestKind::AnimationStreamPrune {
+            if let Some(cached) = cache.as_mut() {
+                if req.nav_id > cached.animation_stream_generation {
+                    cached.animation_stream_generation = req.nav_id;
+                    cached.animation_streams.clear();
+                }
+            }
+            tracing::trace!(
+                "[viewer-animation-stream-prune] nav_id={} req={} view={} worker={}",
+                req.nav_id,
+                req.id,
+                req.view_idx,
+                worker_name
+            );
+            continue;
+        }
+        if req.interactive
+            && matches!(
+                req.kind,
+                ViewerRequestKind::AnimationStreamStart | ViewerRequestKind::AnimationStreamFill
+            )
+            && cache
+                .as_ref()
+                .is_some_and(|cached| req.nav_id < cached.animation_stream_generation)
+        {
+            tracing::trace!(
+                "[viewer-animation-stream-skip] nav_id={} req={} view={} reason=stale_generation worker={}",
+                req.nav_id,
+                req.id,
+                req.view_idx,
+                worker_name
+            );
+            continue;
+        }
         if check_superseded {
             let superseded = {
                 let pending_lock = shared.pending.lock();
@@ -753,6 +832,7 @@ fn process_request(
                         NonZeroUsize::new(req.frame_cache_cap.max(1)).unwrap_or(NonZeroUsize::MIN),
                     ),
                     animation_streams: HashMap::new(),
+                    animation_stream_generation: 0,
                 });
             }
             Err(e) => {
@@ -831,6 +911,24 @@ fn process_request(
         if cached.frame_cache.cap() != cap {
             cached.frame_cache.resize(cap);
         }
+        if req.interactive
+            && req.kind == ViewerRequestKind::Display
+            && req.nav_id > cached.animation_stream_generation
+        {
+            cached.animation_stream_generation = req.nav_id;
+            cached.animation_streams.clear();
+        }
+        if req.interactive
+            && matches!(
+                req.kind,
+                ViewerRequestKind::AnimationStreamStart | ViewerRequestKind::AnimationStreamFill
+            )
+        {
+            if req.nav_id > cached.animation_stream_generation {
+                cached.animation_streams.clear();
+            }
+            cached.animation_stream_generation = cached.animation_stream_generation.max(req.nav_id);
+        }
     }
 
     let mut result = ViewerResult {
@@ -873,7 +971,7 @@ fn process_request(
             }
         }
     } else {
-        // ── 表示デコード（animated WebP は初回から stream 開始） ───────────────
+        // ── 表示デコード（animated image は初回から stream 開始） ───────────
 
         if let Some(pn) = req.page_left.filter(|pn| *pn < page_count) {
             let Some(cached) = cache.as_mut() else {
@@ -887,6 +985,7 @@ fn process_request(
                 req.display_h,
                 req.quality,
                 req.max_tex_side,
+                req.interactive,
             ) {
                 Ok(PageLoadOutcome {
                     page: DisplayPage::Static(page),
@@ -924,6 +1023,7 @@ fn process_request(
                 req.display_h,
                 req.quality,
                 req.max_tex_side,
+                req.interactive,
             ) {
                 Ok(PageLoadOutcome {
                     page: DisplayPage::Static(page),
@@ -1007,6 +1107,7 @@ fn process_animation_stream_request(
             req.display_h,
             req.quality,
             req.kind,
+            req.max_tex_side,
         ) {
             Ok(PageLoadOutcome {
                 page: DisplayPage::AnimationStream(chunk),
@@ -1038,6 +1139,7 @@ fn process_animation_stream_request(
             req.display_h,
             req.quality,
             req.kind,
+            req.max_tex_side,
         ) {
             Ok(PageLoadOutcome {
                 page: DisplayPage::AnimationStream(chunk),
@@ -1081,6 +1183,7 @@ fn get_display_page(
     display_h: u32,
     quality: ViewerQuality,
     max_tex_side: u32,
+    interactive: bool,
 ) -> anyhow::Result<DisplayPage> {
     let full_key = (pn, display_w, display_h, quality, ViewerFrameStage::Full);
     if let Some(frames) = cached.frame_cache.get(&full_key) {
@@ -1104,11 +1207,15 @@ fn get_display_page(
     }
 
     let raw_data = get_page_raw(cached, pn)?;
-    if ImageFormatHint::from_magic(&raw_data.raw) == ImageFormatHint::WebP
-        && img::is_animated_webp_fast(&raw_data.raw)
-    {
-        let chunk =
-            start_animation_stream(cached, pn, raw_data.raw, display_w, display_h, quality)?;
+    let fmt = ImageFormatHint::from_magic(&raw_data.raw);
+    let is_animated =
+        img::is_animated_image_bytes(raw_data.raw.clone(), fmt.clone()).unwrap_or(false);
+    if is_animated {
+        let chunk = if interactive {
+            start_animation_stream(cached, pn, raw_data.raw, fmt, max_tex_side)?
+        } else {
+            decode_animation_probe(raw_data.raw, fmt, max_tex_side)?
+        };
         return Ok(DisplayPage::AnimationStream(chunk));
     }
 
@@ -1132,8 +1239,17 @@ fn get_display_page_or_failed(
     display_h: u32,
     quality: ViewerQuality,
     max_tex_side: u32,
+    interactive: bool,
 ) -> anyhow::Result<PageLoadOutcome> {
-    match get_display_page(cached, pn, display_w, display_h, quality, max_tex_side) {
+    match get_display_page(
+        cached,
+        pn,
+        display_w,
+        display_h,
+        quality,
+        max_tex_side,
+        interactive,
+    ) {
         Ok(page) => Ok(PageLoadOutcome { page }),
         Err(e) => {
             tracing::warn!("viewer_loader: decode page {pn} failed, using synthetic page: {e:#}");
@@ -1146,19 +1262,87 @@ fn get_display_page_or_failed(
     }
 }
 
+fn effective_max_tex_side(max_tex_side: u32) -> u32 {
+    let cap = if max_tex_side > 0 {
+        max_tex_side
+    } else {
+        img::DEFAULT_MAX_TEXTURE_SIDE
+    };
+    cap.max(1)
+}
+
+pub(crate) fn animation_gpu_safety_side(canvas_w: u32, canvas_h: u32, max_tex_side: u32) -> u32 {
+    canvas_w
+        .max(canvas_h)
+        .min(effective_max_tex_side(max_tex_side))
+        .max(1)
+}
+
+fn resize_animation_frames_for_gpu(
+    frames: Vec<img::FrameData>,
+    canvas_w: u32,
+    canvas_h: u32,
+    gpu_safety_side: u32,
+) -> anyhow::Result<Vec<img::FrameData>> {
+    if canvas_w.max(canvas_h) <= gpu_safety_side {
+        return Ok(frames);
+    }
+    frames
+        .into_iter()
+        .map(|frame| {
+            let image = img::resize_to_max_side(frame.image, gpu_safety_side)?;
+            Ok(img::FrameData {
+                image,
+                delay_ms: frame.delay_ms,
+            })
+        })
+        .collect()
+}
+
+fn decode_animation_probe(
+    raw: Bytes,
+    fmt: ImageFormatHint,
+    max_tex_side: u32,
+) -> anyhow::Result<AnimationStreamChunkPage> {
+    let mut source = img::AnimationFrameSource::new_bytes(raw, fmt)?;
+    let chunk = source.decode_chunk(1)?;
+    let (canvas_w, canvas_h) = source.canvas();
+    let gpu_safety_side = animation_gpu_safety_side(canvas_w, canvas_h, max_tex_side);
+    let frames =
+        resize_animation_frames_for_gpu(chunk.frames, canvas_w, canvas_h, gpu_safety_side)?;
+    if frames.is_empty() {
+        anyhow::bail!("animated image yielded no frames");
+    }
+    Ok(AnimationStreamChunkPage {
+        frames: Arc::new(frames),
+        exhausted: chunk.exhausted,
+        orig_w: canvas_w,
+        orig_h: canvas_h,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn start_animation_stream(
     cached: &mut CachedReader,
     pn: u32,
     raw: Bytes,
-    display_w: u32,
-    display_h: u32,
-    quality: ViewerQuality,
+    fmt: ImageFormatHint,
+    max_tex_side: u32,
 ) -> anyhow::Result<AnimationStreamChunkPage> {
-    let source = img::WebpAnimFrameSource::new(raw.as_ref())?;
-    let key = (pn, display_w, display_h, quality);
-    cached
-        .animation_streams
-        .insert(key, CachedAnimationStream { source });
+    let source = img::AnimationFrameSource::new_bytes(raw, fmt)?;
+    let (canvas_w, canvas_h) = source.canvas();
+    let gpu_safety_side = animation_gpu_safety_side(canvas_w, canvas_h, max_tex_side);
+    let key = (pn, gpu_safety_side);
+    cached.animation_streams.retain(|(page, _), _| *page != pn);
+    cached.animation_streams.insert(
+        key,
+        CachedAnimationStream {
+            source,
+            canvas_w,
+            canvas_h,
+            gpu_safety_side,
+        },
+    );
     read_animation_stream_chunk(cached, &key)
 }
 
@@ -1172,7 +1356,20 @@ fn read_animation_stream_chunk(
             .get_mut(key)
             .context("animation stream missing")?;
         let chunk = stream.source.decode_chunk(ANIMATION_STREAM_CHUNK_FRAMES)?;
-        (chunk, stream.source.canvas())
+        let canvas = stream.source.canvas();
+        let frames = resize_animation_frames_for_gpu(
+            chunk.frames,
+            stream.canvas_w,
+            stream.canvas_h,
+            stream.gpu_safety_side,
+        )?;
+        (
+            img::AnimationFrameChunk {
+                frames,
+                exhausted: chunk.exhausted,
+            },
+            canvas,
+        )
     };
 
     if chunk.exhausted {
@@ -1182,28 +1379,42 @@ fn read_animation_stream_chunk(
     Ok(AnimationStreamChunkPage {
         frames: Arc::new(chunk.frames),
         exhausted: chunk.exhausted,
-        orig_w: original_canvas.width,
-        orig_h: original_canvas.height,
+        orig_w: original_canvas.0,
+        orig_h: original_canvas.1,
+    })
+}
+
+fn find_animation_stream_key(
+    cached: &CachedReader,
+    pn: u32,
+    max_tex_side: u32,
+) -> Option<AnimationStreamKey> {
+    cached.animation_streams.iter().find_map(|(key, stream)| {
+        let current_side =
+            animation_gpu_safety_side(stream.canvas_w, stream.canvas_h, max_tex_side);
+        (key.0 == pn && key.1 == current_side).then_some(*key)
     })
 }
 
 fn get_animation_stream_chunk(
     cached: &mut CachedReader,
     pn: u32,
-    display_w: u32,
-    display_h: u32,
-    quality: ViewerQuality,
     kind: ViewerRequestKind,
+    max_tex_side: u32,
 ) -> anyhow::Result<AnimationStreamChunkPage> {
-    let key = (pn, display_w, display_h, quality);
-
-    if kind == ViewerRequestKind::AnimationStreamStart
-        || !cached.animation_streams.contains_key(&key)
+    if kind == ViewerRequestKind::AnimationStreamFill {
+        if let Some(key) = find_animation_stream_key(cached, pn, max_tex_side) {
+            return read_animation_stream_chunk(cached, &key);
+        }
+    }
     {
         let raw = get_page_raw(cached, pn)?.raw;
-        return start_animation_stream(cached, pn, raw, display_w, display_h, quality);
+        let fmt = ImageFormatHint::from_magic(&raw);
+        if !img::is_animated_image_bytes(raw.clone(), fmt.clone()).unwrap_or(false) {
+            anyhow::bail!("requested animation stream for a static image");
+        }
+        start_animation_stream(cached, pn, raw, fmt, max_tex_side)
     }
-    read_animation_stream_chunk(cached, &key)
 }
 
 fn get_animation_stream_chunk_or_failed(
@@ -1213,14 +1424,14 @@ fn get_animation_stream_chunk_or_failed(
     display_h: u32,
     quality: ViewerQuality,
     kind: ViewerRequestKind,
+    max_tex_side: u32,
 ) -> anyhow::Result<PageLoadOutcome> {
-    match get_animation_stream_chunk(cached, pn, display_w, display_h, quality, kind) {
+    match get_animation_stream_chunk(cached, pn, kind, max_tex_side) {
         Ok(chunk) => Ok(PageLoadOutcome {
             page: DisplayPage::AnimationStream(chunk),
         }),
         Err(e) => {
-            let key = (pn, display_w, display_h, quality);
-            cached.animation_streams.remove(&key);
+            cached.animation_streams.retain(|(page, _), _| *page != pn);
             tracing::warn!(
                 "viewer_loader: animation page {pn} failed, using synthetic page: {e:#}"
             );

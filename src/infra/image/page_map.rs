@@ -2,6 +2,7 @@ use std::io::Cursor;
 
 use anyhow::{Context, Result};
 use image::{ImageFormat, ImageReader};
+use webp_anim::{InspectLimits, WebpKind, inspect};
 
 use crate::domain::page_map::PageImageFormat;
 
@@ -238,6 +239,15 @@ pub fn read_jpeg_metadata(data: &[u8]) -> Result<(PageImageFormat, u32, u32)> {
 }
 
 pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, u32)>> {
+    if is_webp_signature(data) {
+        let kind = inspect(data, InspectLimits::for_trusted_input()).context("WebP metadata")?;
+        let canvas = match kind {
+            WebpKind::Static(info) => info.canvas,
+            WebpKind::Animated(info) => info.canvas,
+        };
+        return Ok(Some((PageImageFormat::WebP, canvas.width, canvas.height)));
+    }
+
     let reader = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .context("image guess format")?;
@@ -253,6 +263,10 @@ pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, 
     }
     let (width, height) = reader.into_dimensions().context("image dimensions")?;
     Ok(Some((format, width, height)))
+}
+
+fn is_webp_signature(data: &[u8]) -> bool {
+    data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP"
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -303,7 +317,6 @@ fn image_format_to_page_image_format(format: ImageFormat) -> Option<PageImageFor
     match format {
         ImageFormat::Jpeg => Some(PageImageFormat::Jpeg),
         ImageFormat::Png => Some(PageImageFormat::Png),
-        ImageFormat::WebP => Some(PageImageFormat::WebP),
         ImageFormat::Avif => Some(PageImageFormat::Avif),
         ImageFormat::Bmp => Some(PageImageFormat::Bmp),
         ImageFormat::Tiff => Some(PageImageFormat::Tiff),

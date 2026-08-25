@@ -17,7 +17,7 @@ use crate::infra::image::decode as img;
 use crate::infra::page_map::viewer_bootstrap::ViewerPageMapMode;
 use crate::infra::page_map::viewer_bootstrap::try_load_existing_viewer_page_map_for_spad;
 use crate::infra::worker::viewer_loader::{
-    ViewerLoadRequest, ViewerLoader, ViewerResult, ViewerResultKind,
+    ViewerLoadRequest, ViewerLoader, ViewerResult, ViewerResultKind, animation_gpu_safety_side,
 };
 use crate::repaint::RepaintNotifier;
 use crate::ui::thumb_cache::LoadedDiskThumb;
@@ -1760,6 +1760,9 @@ impl ViewerState {
         let nav_id = self.request.next_nav_id;
         self.request.next_nav_id = self.request.next_nav_id.saturating_add(1);
         self.request.active_nav_id = Some(nav_id);
+        self.request
+            .loader
+            .send_animation_stream_prune(nav_id, to_view);
         self.request.nav_traces.insert(
             nav_id,
             NavTrace {
@@ -5952,6 +5955,7 @@ impl ViewerState {
         result: crate::infra::worker::viewer_loader::ViewerResult,
         request_slot: usize,
         ctx: &egui::Context,
+        max_tex_side: u32,
     ) -> bool {
         self.request.animation_stream_request_ids[request_slot] = None;
         if self.request.active_animation_stream_view != Some(self.active_animation_view())
@@ -5967,38 +5971,88 @@ impl ViewerState {
             );
             return false;
         }
+        let left_signature = (
+            result.left_orig_w,
+            result.left_orig_h,
+            animation_gpu_safety_side(
+                result.left_orig_w,
+                result.left_orig_h,
+                result.request_max_tex_side,
+            ),
+        );
+        let right_signature = (
+            result.right_orig_w,
+            result.right_orig_h,
+            animation_gpu_safety_side(
+                result.right_orig_w,
+                result.right_orig_h,
+                result.request_max_tex_side,
+            ),
+        );
         if let Some(frames) = result.left {
-            match self.display_assets.content_left.as_mut() {
-                Some(PageContent::AnimatedStream { .. }) => {
-                    if let Some(content) = self.display_assets.content_left.as_mut() {
-                        content.append_stream_chunk(frames, result.left_stream_exhausted);
-                    }
+            let target_changed = self
+                .display_assets
+                .content_left
+                .as_ref()
+                .and_then(PageContent::stream_signature)
+                .is_some_and(|current| current != left_signature);
+            if animation_gpu_safety_side(result.left_orig_w, result.left_orig_h, max_tex_side)
+                != left_signature.2
+            {
+                return false;
+            }
+            if !target_changed
+                && matches!(
+                    self.display_assets.content_left.as_ref(),
+                    Some(PageContent::AnimatedStream { .. })
+                )
+            {
+                if let Some(content) = self.display_assets.content_left.as_mut() {
+                    content.append_stream_chunk(frames, result.left_stream_exhausted);
                 }
-                _ => {
-                    self.display_assets.content_left = Some(PageContent::from_stream_chunk(
-                        frames,
-                        result.left_stream_exhausted,
-                        "viewer_left_stream",
-                        ctx,
-                    ));
-                }
+            } else {
+                self.display_assets.content_left = Some(PageContent::from_stream_chunk(
+                    frames,
+                    result.left_stream_exhausted,
+                    left_signature.0,
+                    left_signature.1,
+                    left_signature.2,
+                    "viewer_left_stream",
+                    ctx,
+                ));
             }
         }
         if let Some(frames) = result.right {
-            match self.display_assets.content_right.as_mut() {
-                Some(PageContent::AnimatedStream { .. }) => {
-                    if let Some(content) = self.display_assets.content_right.as_mut() {
-                        content.append_stream_chunk(frames, result.right_stream_exhausted);
-                    }
+            let target_changed = self
+                .display_assets
+                .content_right
+                .as_ref()
+                .and_then(PageContent::stream_signature)
+                .is_some_and(|current| current != right_signature);
+            if animation_gpu_safety_side(result.right_orig_w, result.right_orig_h, max_tex_side)
+                != right_signature.2
+            {
+                return false;
+            }
+            if !target_changed
+                && matches!(
+                    self.display_assets.content_right.as_ref(),
+                    Some(PageContent::AnimatedStream { .. })
+                )
+            {
+                if let Some(content) = self.display_assets.content_right.as_mut() {
+                    content.append_stream_chunk(frames, result.right_stream_exhausted);
                 }
-                _ => {
-                    self.display_assets.content_right = Some(PageContent::from_stream_chunk(
-                        frames,
-                        result.right_stream_exhausted,
-                        "viewer_right_stream",
-                        ctx,
-                    ));
-                }
+            } else {
+                self.display_assets.content_right = Some(PageContent::from_stream_chunk(
+                    frames,
+                    result.right_stream_exhausted,
+                    right_signature.0,
+                    right_signature.1,
+                    right_signature.2,
+                    "viewer_right_stream",
+                    ctx,
+                ));
             }
         }
         true
@@ -6104,6 +6158,13 @@ impl ViewerState {
                 PageContent::from_stream_chunk(
                     frames,
                     result.left_stream_exhausted,
+                    result.left_orig_w,
+                    result.left_orig_h,
+                    animation_gpu_safety_side(
+                        result.left_orig_w,
+                        result.left_orig_h,
+                        result.request_max_tex_side,
+                    ),
                     "viewer_left",
                     ctx,
                 )
@@ -6116,6 +6177,13 @@ impl ViewerState {
                 PageContent::from_stream_chunk(
                     frames,
                     result.right_stream_exhausted,
+                    result.right_orig_w,
+                    result.right_orig_h,
+                    animation_gpu_safety_side(
+                        result.right_orig_w,
+                        result.right_orig_h,
+                        result.request_max_tex_side,
+                    ),
                     "viewer_right",
                     ctx,
                 )
@@ -6568,7 +6636,12 @@ impl ViewerState {
                 .iter()
                 .position(|id| *id == Some(result.request_id))
             {
-                return self.apply_animation_stream_chunk_result(result, request_slot, ctx);
+                return self.apply_animation_stream_chunk_result(
+                    result,
+                    request_slot,
+                    ctx,
+                    max_tex_side,
+                );
             }
             tracing::trace!(
                 "[viewer-result-drop] nav_id={} req={} current_req={} view={} reason=stale_noninteractive_result worker={} page_left={:?} page_right={:?}",
@@ -6664,18 +6737,50 @@ impl ViewerState {
             self.request.animation_stream_request_ids[ANIMATION_STREAM_LEFT_SLOT].is_none();
         let right_slot_empty =
             self.request.animation_stream_request_ids[ANIMATION_STREAM_RIGHT_SLOT].is_none();
-        let left_needs_restart = left_slot_empty
+        let layout = self.view_layout_for_with_caller(view_idx, display_w, display_h, false);
+        self.log_view_layout("request", &layout);
+        let full_left = layout.page_left;
+        let full_right = layout.page_right;
+        let request_display_w = layout.page_decode_w;
+        let request_display_h = layout.page_decode_h;
+        let left_gpu_safety_changed = left_slot_empty
             && self
                 .display_assets
                 .content_left
                 .as_ref()
-                .is_some_and(PageContent::stream_should_restart);
-        let right_needs_restart = right_slot_empty
+                .is_some_and(|content| {
+                    content
+                        .stream_signature()
+                        .is_some_and(|(canvas_w, canvas_h, current)| {
+                            animation_gpu_safety_side(canvas_w, canvas_h, max_tex_side) != current
+                        })
+                });
+        let right_gpu_safety_changed = right_slot_empty
             && self
                 .display_assets
                 .content_right
                 .as_ref()
-                .is_some_and(PageContent::stream_should_restart);
+                .is_some_and(|content| {
+                    content
+                        .stream_signature()
+                        .is_some_and(|(canvas_w, canvas_h, current)| {
+                            animation_gpu_safety_side(canvas_w, canvas_h, max_tex_side) != current
+                        })
+                });
+        let left_needs_restart = left_slot_empty
+            && (left_gpu_safety_changed
+                || self
+                    .display_assets
+                    .content_left
+                    .as_ref()
+                    .is_some_and(PageContent::stream_should_restart));
+        let right_needs_restart = right_slot_empty
+            && (right_gpu_safety_changed
+                || self
+                    .display_assets
+                    .content_right
+                    .as_ref()
+                    .is_some_and(PageContent::stream_should_restart));
         let left_needs_fill = left_slot_empty
             && !left_needs_restart
             && self
@@ -6693,13 +6798,6 @@ impl ViewerState {
         if !left_needs_restart && !right_needs_restart && !left_needs_fill && !right_needs_fill {
             return false;
         }
-
-        let layout = self.view_layout_for_with_caller(view_idx, display_w, display_h, false);
-        self.log_view_layout("request", &layout);
-        let full_left = layout.page_left;
-        let full_right = layout.page_right;
-        let request_display_w = layout.page_decode_w;
-        let request_display_h = layout.page_decode_h;
         let nav_id = self.request.active_nav_id.unwrap_or(0);
         let frame_cache_cap = self.frame_cache_cap();
         if left_needs_restart || left_needs_fill {

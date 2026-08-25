@@ -71,8 +71,9 @@ unrar             = { version = "0.5", optional = true }   # feature "rar" で�
 unrar_sys         = { version = "0.5", optional = true }   # feature "rar" で有効化
 
 # --- 画像 (§11, §8) ---
-image             = { version = "0.25", default-features = false, features = ["png", "gif", "webp", "bmp", "tiff"] }
-webp              = "0.3"   # libwebp-sys（bundled C）経由の WebP デコード／エンコード
+image             = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff"] }
+zengif            = { version = "=0.7.3", default-features = false, features = ["std"] }
+webp              = { version = "0.3", default-features = false }   # libwebp-sys（bundled C）経由の WebP デコード／エンコード
 webp-anim         = "0.1.1"                      # crates.io animated WebP inspect / decoder API
 ff-decode         = { version = "=0.15.1", default-features = false } # Software FFmpeg frame decode for VideoFile thumbnails
 ff-format         = "=0.15.1" # FFmpeg video frame/pixel format types

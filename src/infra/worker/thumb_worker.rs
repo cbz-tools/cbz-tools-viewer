@@ -53,6 +53,7 @@ const THUMB_MEM_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 /// 動画代表フレームを取得する位置の割合。
 const VIDEO_THUMB_POSITION_RATIO: f64 = 0.05;
 const ANIMATED_PREVIEW_SCRUB_BUCKET_SLOTS: usize = 16;
+const ANIMATED_PREVIEW_SCRUB_FRAMES_PER_TURN: usize = 8;
 pub(crate) const BACKGROUND_ARTIFACT_CHECKS_PER_MINUTE: usize = 3_000;
 const BACKGROUND_ARTIFACT_MAX_CREDIT: f64 = 8.0;
 
@@ -94,7 +95,7 @@ pub struct VideoPreviewTask {
     pub scene_percent: u8,
 }
 
-/// Runtime-only animated WebP preview request. It never enters the thumbnail
+/// Runtime-only animated image preview request. It never enters the thumbnail
 /// lanes or caches and is served by the existing preview worker thread.
 #[derive(Clone)]
 pub struct AnimatedPreviewTask {
@@ -1943,8 +1944,10 @@ struct AnimatedPreviewSnapshot {
 struct AnimatedPreviewSession {
     task: AnimatedPreviewTask,
     raw: bytes::Bytes,
-    source: img::WebpAnimFrameSource,
-    scrub_source: Option<img::WebpAnimFrameSource>,
+    source: img::AnimationFrameSource,
+    scrub_source: Option<img::AnimationFrameSource>,
+    scrub_timeline_source: Option<img::AnimationFrameSource>,
+    scrub_timeline_builder: Option<AnimatedPreviewTimelineBuilder>,
     scrub_timeline: Option<AnimatedPreviewTimeline>,
     scrub_next_frame_index: u64,
     scrub_snapshots: [Option<AnimatedPreviewSnapshot>; ANIMATED_PREVIEW_SCRUB_BUCKET_SLOTS],
@@ -1954,11 +1957,22 @@ struct AnimatedPreviewSession {
 }
 
 /// Time-scrub metadata retains only frame start times and total duration; it is
-/// collected from the WebP container without decoding frame pixels.
+/// collected from the animation source without retaining frame pixels.
 #[derive(Debug, PartialEq, Eq)]
 struct AnimatedPreviewTimeline {
     frame_starts_ms: Vec<u64>,
     total_duration_ms: u64,
+}
+
+struct AnimatedPreviewTimelineBuilder {
+    frame_starts_ms: Vec<u64>,
+    total_duration_ms: u64,
+}
+
+enum ScrubTimelineProgress {
+    Ready,
+    Continue,
+    Command(PreviewCommand),
 }
 
 impl AnimatedPreviewTimeline {
@@ -2283,11 +2297,12 @@ fn open_animated_preview_session(
         send_animated_preview_stale(&task, 0, animated_result, repaint);
         return None;
     }
-    if !img::is_animated_webp_fast(raw.as_ref()) {
+    let fmt = ImageFormatHint::from_magic(raw.as_ref());
+    if !img::is_animated_image_bytes(raw.clone(), fmt.clone()).unwrap_or(false) {
         send_animated_preview_unavailable(&task, animated_result, repaint);
         return None;
     }
-    let source = match img::WebpAnimFrameSource::new(raw.as_ref()) {
+    let source = match img::AnimationFrameSource::new_bytes(raw.clone(), fmt) {
         Ok(source) => source,
         Err(error) => {
             tracing::debug!(
@@ -2305,6 +2320,8 @@ fn open_animated_preview_session(
         raw,
         source,
         scrub_source: None,
+        scrub_timeline_source: None,
+        scrub_timeline_builder: None,
         scrub_timeline: None,
         scrub_next_frame_index: 0,
         scrub_snapshots: std::array::from_fn(|_| None),
@@ -2368,36 +2385,114 @@ fn scrub_snapshot_slot(bucket: u16, bucket_count: u16) -> Option<usize> {
 fn ensure_animated_preview_scrub_timeline(
     session: &mut AnimatedPreviewSession,
     control: &PreviewControl,
-) -> anyhow::Result<Option<PreviewCommand>> {
-    if session.scrub_source.is_none() {
-        session.scrub_source = Some(img::WebpAnimFrameSource::new(session.raw.as_ref())?);
-    }
+) -> anyhow::Result<ScrubTimelineProgress> {
     if session.scrub_timeline.is_some() {
-        return Ok(None);
+        return Ok(ScrubTimelineProgress::Ready);
     }
 
-    let durations = session
-        .scrub_source
-        .as_ref()
-        .expect("scrub source exists before timeline metadata lookup")
-        .frame_durations()?;
-    let mut frame_starts_ms = Vec::with_capacity(durations.len());
-    let mut total_duration_ms = 0_u64;
-    for delay_ms in durations {
-        frame_starts_ms.push(total_duration_ms);
-        total_duration_ms = total_duration_ms
-            .checked_add(u64::from(delay_ms))
-            .ok_or_else(|| anyhow::anyhow!("animated WebP timeline duration overflowed"))?;
+    if session.scrub_timeline_source.is_none() {
+        let fmt = ImageFormatHint::from_magic(session.raw.as_ref());
+        session.scrub_timeline_source = Some(img::AnimationFrameSource::new_bytes(
+            session.raw.clone(),
+            fmt,
+        )?);
     }
-    if frame_starts_ms.is_empty() || total_duration_ms == 0 {
-        return Err(anyhow::anyhow!("animated WebP has no usable timeline"));
+
+    if matches!(
+        session.scrub_timeline_source.as_ref(),
+        Some(img::AnimationFrameSource::WebP(_))
+    ) {
+        // WebP exposes delay metadata without decoding frames; preserve that
+        // fast path rather than routing it through the GIF incremental builder.
+        let durations = session
+            .scrub_timeline_source
+            .as_ref()
+            .expect("scrub timeline source exists before metadata lookup")
+            .frame_durations()?;
+        let mut frame_starts_ms = Vec::with_capacity(durations.len());
+        let mut total_duration_ms = 0_u64;
+        for delay_ms in durations {
+            frame_starts_ms.push(total_duration_ms);
+            total_duration_ms = total_duration_ms
+                .checked_add(u64::from(delay_ms))
+                .ok_or_else(|| anyhow::anyhow!("animated image timeline duration overflowed"))?;
+        }
+        if frame_starts_ms.is_empty() || total_duration_ms == 0 {
+            return Err(anyhow::anyhow!("animated image has no usable timeline"));
+        }
+        session.scrub_timeline = Some(AnimatedPreviewTimeline {
+            frame_starts_ms,
+            total_duration_ms,
+        });
+        session.scrub_timeline_source = None;
+        return Ok(control
+            .take_pending()
+            .map_or(ScrubTimelineProgress::Ready, ScrubTimelineProgress::Command));
+    }
+
+    // zengif does not expose delay-only metadata. Decode one composited GIF
+    // frame, retain only its delay, and discard its pixels at this boundary.
+    let frame = session
+        .scrub_timeline_source
+        .as_mut()
+        .expect("scrub timeline source exists before GIF frame decode")
+        .next_frame()?;
+    let Some(frame) = frame else {
+        let builder = session
+            .scrub_timeline_builder
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("animated image has no usable timeline"))?;
+        if builder.frame_starts_ms.is_empty() || builder.total_duration_ms == 0 {
+            return Err(anyhow::anyhow!("animated image has no usable timeline"));
+        }
+        session.scrub_timeline = Some(AnimatedPreviewTimeline {
+            frame_starts_ms: builder.frame_starts_ms,
+            total_duration_ms: builder.total_duration_ms,
+        });
+        session.scrub_timeline_source = None;
+        return Ok(ScrubTimelineProgress::Ready);
+    };
+    let delay_ms = frame.delay_ms;
+    drop(frame);
+
+    let builder =
+        session
+            .scrub_timeline_builder
+            .get_or_insert_with(|| AnimatedPreviewTimelineBuilder {
+                frame_starts_ms: Vec::new(),
+                total_duration_ms: 0,
+            });
+    builder.frame_starts_ms.push(builder.total_duration_ms);
+    builder.total_duration_ms = builder
+        .total_duration_ms
+        .checked_add(u64::from(delay_ms))
+        .ok_or_else(|| anyhow::anyhow!("animated image timeline duration overflowed"))?;
+
+    if let Some(command) = control.take_pending() {
+        return Ok(ScrubTimelineProgress::Command(command));
+    }
+    let has_more_frames = session
+        .scrub_timeline_source
+        .as_ref()
+        .expect("scrub timeline source exists after GIF frame decode")
+        .has_more_frames();
+    if has_more_frames {
+        return Ok(ScrubTimelineProgress::Continue);
+    }
+
+    let builder = session
+        .scrub_timeline_builder
+        .take()
+        .expect("GIF timeline builder exists after decoding a frame");
+    if builder.frame_starts_ms.is_empty() || builder.total_duration_ms == 0 {
+        return Err(anyhow::anyhow!("animated image has no usable timeline"));
     }
     session.scrub_timeline = Some(AnimatedPreviewTimeline {
-        frame_starts_ms,
-        total_duration_ms,
+        frame_starts_ms: builder.frame_starts_ms,
+        total_duration_ms: builder.total_duration_ms,
     });
-    session.scrub_next_frame_index = 0;
-    Ok(control.take_pending())
+    session.scrub_timeline_source = None;
+    Ok(ScrubTimelineProgress::Ready)
 }
 
 fn publish_animated_preview_snapshot(
@@ -2451,14 +2546,28 @@ fn decode_animated_preview_scrub(
         return;
     }
     match ensure_animated_preview_scrub_timeline(session, control) {
-        Ok(Some(command)) => {
+        Ok(ScrubTimelineProgress::Command(command)) => {
             *deferred_command = Some(command);
             return;
         }
-        Ok(None) => {}
+        Ok(ScrubTimelineProgress::Continue) => {
+            *deferred_command = Some(PreviewCommand::AnimatedScrub(task));
+            return;
+        }
+        Ok(ScrubTimelineProgress::Ready) => {}
         Err(_) => {
             send_animated_preview_failed(&task, 0, animated_result, repaint);
             return;
+        }
+    }
+    if session.scrub_source.is_none() {
+        let fmt = ImageFormatHint::from_magic(session.raw.as_ref());
+        match img::AnimationFrameSource::new_bytes(session.raw.clone(), fmt) {
+            Ok(source) => session.scrub_source = Some(source),
+            Err(_) => {
+                send_animated_preview_failed(&task, 0, animated_result, repaint);
+                return;
+            }
         }
     }
     let Some(bucket_slot) = scrub_snapshot_slot(bucket, task.scrub_bucket_count) else {
@@ -2481,14 +2590,20 @@ fn decode_animated_preview_scrub(
     };
 
     if frame_index < session.scrub_next_frame_index {
-        session
+        if session
             .scrub_source
             .as_mut()
             .expect("scrub source exists after timeline initialization")
-            .reset();
+            .restart()
+            .is_err()
+        {
+            send_animated_preview_failed(&task, frame_index, animated_result, repaint);
+            return;
+        }
         session.scrub_next_frame_index = 0;
     }
 
+    let mut decoded_this_turn = 0usize;
     while session.scrub_next_frame_index <= frame_index {
         if !animated_preview_file_snapshot_matches(&task) {
             send_animated_preview_stale(
@@ -2559,9 +2674,18 @@ fn decode_animated_preview_scrub(
             drop(frame.image);
         }
         session.scrub_next_frame_index = current_frame_index.saturating_add(1);
+        decoded_this_turn = decoded_this_turn.saturating_add(1);
 
         if let Some(command) = control.take_pending() {
             *deferred_command = Some(command);
+            return;
+        }
+        if decoded_this_turn >= ANIMATED_PREVIEW_SCRUB_FRAMES_PER_TURN
+            && session.scrub_next_frame_index <= frame_index
+        {
+            // Bound GIF compositing work per worker turn so a far scrub target
+            // cannot monopolize the preview worker while the pointer moves.
+            *deferred_command = Some(PreviewCommand::AnimatedScrub(task));
             return;
         }
     }
@@ -2589,29 +2713,35 @@ fn decode_animated_preview_frame(
     }
 
     if !session.source.has_more_frames() {
-        match img::WebpAnimFrameSource::new(session.raw.as_ref()) {
-            Ok(source) => {
-                session.source = source;
-            }
-            Err(_) => {
+        if session.source.restart().is_err() {
+            send_animated_preview_failed(task, frame_index, animated_result, repaint);
+            session.next_due = None;
+            return;
+        }
+    }
+
+    let frame = match session.source.next_frame() {
+        Ok(Some(frame)) => frame,
+        Ok(None) => {
+            if session.source.restart().is_err() {
                 send_animated_preview_failed(task, frame_index, animated_result, repaint);
                 session.next_due = None;
                 return;
             }
+            match session.source.next_frame() {
+                Ok(Some(frame)) => frame,
+                Ok(None) | Err(_) => {
+                    send_animated_preview_failed(task, frame_index, animated_result, repaint);
+                    session.next_due = None;
+                    return;
+                }
+            }
         }
-    }
-
-    let Some(frame) = (match session.source.next_frame() {
-        Ok(frame) => frame,
         Err(_) => {
             send_animated_preview_failed(task, frame_index, animated_result, repaint);
             session.next_due = None;
             return;
         }
-    }) else {
-        send_animated_preview_failed(task, frame_index, animated_result, repaint);
-        session.next_due = None;
-        return;
     };
     let delay_ms = frame.delay_ms;
     let resized = match img::resize_to_width(frame.image, task.target_width as u32) {

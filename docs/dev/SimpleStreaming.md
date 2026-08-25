@@ -79,7 +79,7 @@ L2はL1へTextureを供給する中間キャッシュである。
 CPUデコード結果が直接表示に使われるinteractive経路は存在するが、
 本書ではストリーミングキャッシュのL1 / L2構成を対象とする。
 
-Visible spreadのAnimated WebP stream requestは左右を分離し、既存の`interactive-even` / `interactive-odd` workerでside別に処理する。左右は独立してin-flight / refillでき、left/right barrierは設けない。初回display start synchronizationは別責務であり、UI側の`ColorImage`生成とtexture uploadはUI threadで行う。Animated WebP全体をUI thread外へ移すものではない。
+Visible spreadのAnimation stream requestは左右を分離し、既存の`interactive-even` / `interactive-odd` workerでside別に処理する。左右は独立してin-flight / refillでき、left/right barrierは設けない。初回display start synchronizationは別責務であり、左右の初回チャンクがdisplay commitまでに揃った場合だけ同一baselineを共有する。UI側の`ColorImage`生成とtexture uploadはUI threadで行う。Animation全体をUI thread外へ移すものではない。WebPは`WebpAnimFrameSource`（`webp-anim`）、GIFは`GifAnimFrameSource`（`zengif`）を使う。
 
 ---
 

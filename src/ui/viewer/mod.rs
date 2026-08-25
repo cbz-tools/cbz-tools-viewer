@@ -403,6 +403,9 @@ pub enum PageContent {
         queue: VecDeque<img::FrameData>,
         next_frame_at: Instant,
         texture: egui::TextureHandle,
+        canvas_w: u32,
+        canvas_h: u32,
+        gpu_safety_side: u32,
         exhausted: bool,
         fill_in_flight: bool,
     },
@@ -616,6 +619,9 @@ impl PageContent {
     pub fn from_stream_chunk(
         frames: Arc<Vec<img::FrameData>>,
         exhausted: bool,
+        canvas_w: u32,
+        canvas_h: u32,
+        gpu_safety_side: u32,
         label: &str,
         ctx: &egui::Context,
     ) -> Self {
@@ -637,6 +643,9 @@ impl PageContent {
                 queue,
                 next_frame_at: Instant::now() + Duration::from_secs(3600),
                 texture,
+                canvas_w,
+                canvas_h,
+                gpu_safety_side,
                 exhausted,
                 fill_in_flight: false,
             };
@@ -648,6 +657,9 @@ impl PageContent {
                 queue,
                 next_frame_at: Instant::now() + Duration::from_secs(3600),
                 texture,
+                canvas_w,
+                canvas_h,
+                gpu_safety_side,
                 exhausted,
                 fill_in_flight: false,
             };
@@ -666,6 +678,9 @@ impl PageContent {
             queue,
             next_frame_at: Instant::now() + Duration::from_millis(delay),
             texture,
+            canvas_w,
+            canvas_h,
+            gpu_safety_side,
             exhausted,
             fill_in_flight: false,
         }
@@ -738,6 +753,18 @@ impl PageContent {
                 !*exhausted && !*fill_in_flight && queue.len() <= ANIMATED_STREAM_FILL_LOW_WATERMARK
             }
             _ => false,
+        }
+    }
+
+    pub fn stream_signature(&self) -> Option<(u32, u32, u32)> {
+        match self {
+            Self::AnimatedStream {
+                canvas_w,
+                canvas_h,
+                gpu_safety_side,
+                ..
+            } => Some((*canvas_w, *canvas_h, *gpu_safety_side)),
+            _ => None,
         }
     }
 
@@ -847,6 +874,13 @@ pub fn show(
     let content = ui.available_rect_before_wrap();
     let slider_h = if is_fullscreen { 0.0 } else { SLIDER_H };
     let img_h = (content.height() - slider_h).max(0.0);
+    let boundary_preview_thumb_size = if boundary_preview_thumb_size.y > 0.0 {
+        let max_h = img_h * 0.5;
+        let scale = (max_h / boundary_preview_thumb_size.y).min(1.0);
+        boundary_preview_thumb_size * scale
+    } else {
+        egui::Vec2::ZERO
+    };
     let measured_display_h = img_h as u32;
     let in_fullscreen_transition = state.ui_runtime.fullscreen_transition_frames > 0;
     if state.ui_runtime.fullscreen_transition_frames > 0 {

@@ -2,6 +2,7 @@
 
 ### Added
 
+- Added Animated GIF support for Viewer streaming playback and Library AUTO/Scrub previews.
 - Added filesystem Tree navigation to the Library left pane.
 - Added Library search with space-separated AND terms, uppercase `OR` alternatives, and quoted phrases.
 - Added `Alt+Enter` in the Library to open Properties for the selected item.
@@ -19,6 +20,7 @@
 
 ### Changed
 
+- Migrated GIF decoding to `zengif` and routed animated GIFs through the shared animation source and streaming paths.
 - Changed Viewer External Tools to queue requests for other books while a tool is running, process them in order, and show the request count on tool buttons.
 - Changed the adjacent-book/SPAD preload gate to require a stable display and use 30% L2 usage or Page Map retention thresholds; once L2 is settled, the full dispatch scope is allowed.
 - Changed visible spread Animated WebP stream requests to split left and right sides and handle each side independently on the existing `interactive-even` and `interactive-odd` workers.
