@@ -3,6 +3,7 @@
 ### Added
 
 - Added Animated GIF support for Viewer streaming playback and Library AUTO/Scrub previews.
+- Extended per-book settings clear to invalidate that book's thumbnails, Page Map state, and cached artifact failures for regeneration.
 - Added filesystem Tree navigation to the Library left pane.
 - Added Library search with space-separated AND terms, uppercase `OR` alternatives, and quoted phrases.
 - Added `Alt+Enter` in the Library to open Properties for the selected item.

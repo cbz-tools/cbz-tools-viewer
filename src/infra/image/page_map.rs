@@ -5,6 +5,7 @@ use image::{ImageFormat, ImageReader};
 use webp_anim::{InspectLimits, WebpKind, inspect};
 
 use crate::domain::page_map::PageImageFormat;
+use crate::infra::image::decode::GifAnimFrameSource;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MetadataProbeResult {
@@ -248,6 +249,12 @@ pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, 
         return Ok(Some((PageImageFormat::WebP, canvas.width, canvas.height)));
     }
 
+    if is_gif_signature(data) {
+        let source = GifAnimFrameSource::new(data).context("GIF metadata")?;
+        let (width, height) = source.canvas();
+        return Ok(Some((PageImageFormat::Gif, width, height)));
+    }
+
     let reader = ImageReader::new(Cursor::new(data))
         .with_guessed_format()
         .context("image guess format")?;
@@ -267,6 +274,10 @@ pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, 
 
 fn is_webp_signature(data: &[u8]) -> bool {
     data.len() >= 12 && &data[..4] == b"RIFF" && &data[8..12] == b"WEBP"
+}
+
+fn is_gif_signature(data: &[u8]) -> bool {
+    data.len() >= 6 && (&data[..6] == b"GIF87a" || &data[..6] == b"GIF89a")
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

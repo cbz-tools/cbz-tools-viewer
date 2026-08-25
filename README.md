@@ -41,7 +41,7 @@ The demo manga assets are also licensed under the MIT License.
 
 * Predictive loading and caching help reduce page-turn latency, even in large books. Pages from the next and previous books are also prepared in the background to reduce delays when moving between books.
 * In the Viewer, you can move between adjacent books while deleting unwanted books, and remove unwanted page ranges by rebuilding the archive.
-* Animated WebP and GIF streaming playback is supported, with seamless page navigation just like regular pages. APNG playback and spread view are also supported.
+* Animated WebP and GIF can be played directly inside archives using streaming playback, including spread view, with page navigation just like regular images. APNG playback is also supported.
 * Filename tokens can be used from both the Library and Viewer for filtering, copying, and web searches.
 * The Library provides collection management features such as search, favorites, groups, rename, and delete.
 * Registered external tools can be launched from both the Library and Viewer. With the companion project [**CBZ Tools Optimizer**](https://github.com/cbz-tools/cbz-tools-optimizer), archives can be optimized, converted, and reduced in size.
@@ -94,18 +94,6 @@ CBZ Viewer focuses on reducing page-turn latency.
 It uses CPU, RAM, and VRAM-aware settings for background predictive loading, caching, and thumbnail generation, so that even large books remain comfortable to read.
 
 It is also an offline application that does not require an internet connection.
-
----
-
-# Features
-
-CBZ Viewer provides three main workflows:
-
-* Reading: page navigation, spread view, slideshow, progress display, and predictive cache.
-* Managing: library, search, history, favorites, groups, and book navigation.
-* Organizing: rename, copy, delete, open in Explorer, and archive rebuild from selected page ranges.
-
-See the [Operation Guide](docs/operation.md) for details.
 
 ---
 

@@ -328,26 +328,43 @@ impl App {
         let mut clear_idxs = idxs;
         clear_idxs.sort_unstable();
         clear_idxs.dedup();
-        let mut targets: Vec<PathBuf> = Vec::new();
+        let mut targets = Vec::new();
         for idx in clear_idxs {
-            if let Some(LibraryEntry::Archive(_) | LibraryEntry::FolderBook(_)) =
-                self.library.entries.get(idx)
-            {
-                if let Some(path) = self.entry_path_at(idx) {
-                    targets.push(path);
-                }
+            let Some(entry) = self.library.entries.get(idx) else {
+                continue;
+            };
+            if !matches!(
+                entry,
+                LibraryEntry::Archive(_) | LibraryEntry::FolderBook(_)
+            ) {
+                continue;
             }
+            let Some(book_id) = entry.thumb_id() else {
+                continue;
+            };
+            if targets.iter().any(|(id, _)| id == &book_id) {
+                continue;
+            }
+            targets.push((book_id, entry.path().to_owned()));
         }
-        targets.sort();
-        targets.dedup();
         if targets.is_empty() {
             return;
         }
 
-        for path in &targets {
+        for (book_id, path) in &targets {
             crate::domain::archive_settings::SettingsStore::remove_path_from_disk(path.as_path());
             self.library
                 .remove_reading_hud_state_for_path(path.as_path());
+            self.library.clear_book_artifact_state(book_id);
+            self.remove_worker_book_cache(book_id);
+        }
+        {
+            let _artifact_guard = self.library.artifact_gate.write();
+            for (book_id, _) in &targets {
+                self.remove_disk_thumbs_by_id(book_id);
+                self.remove_disk_page_maps_by_id(book_id);
+                self.remove_artifact_failures_by_id(book_id);
+            }
         }
         self.library.mark_filter_dirty();
         self.library.reset_context_menu_cache = true;

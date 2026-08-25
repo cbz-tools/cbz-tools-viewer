@@ -310,10 +310,12 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::Copy => "Copy",
         TextKey::Delete => "Delete",
         TextKey::ClearBookSettings => "Clear Book Settings",
-        TextKey::ClearBookSettingsQuestion => "Reset this book's settings?",
-        TextKey::ClearBookSettingsQuestionMultiple => "Reset settings for {} selected books?",
+        TextKey::ClearBookSettingsQuestion => "Reset this book's settings and cached artifacts?",
+        TextKey::ClearBookSettingsQuestionMultiple => {
+            "Reset settings and cached artifacts for {} selected books?"
+        }
         TextKey::ClearBookSettingsNote => {
-            "Reading state, resume position, and display settings return to defaults. The book, thumbnails, Page Map, favorites, and groups are not deleted."
+            "Reading state, resume position, and display settings for each selected book return to defaults. Each selected book's memory/disk thumbnails, Page Map, and cached artifact failures are invalidated and regenerate when needed. The books, favorites, and groups are not deleted."
         }
         TextKey::Reset => "Reset",
         TextKey::ExternalToolsMenu => "External Tools >",
@@ -588,12 +590,14 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::Copy => Some("コピー"),
         TextKey::Delete => Some("削除"),
         TextKey::ClearBookSettings => Some("本固有設定をクリア"),
-        TextKey::ClearBookSettingsQuestion => Some("この本の本固有設定を初期化しますか？"),
+        TextKey::ClearBookSettingsQuestion => {
+            Some("この本の本固有設定とキャッシュ済み成果物をクリアしますか？")
+        }
         TextKey::ClearBookSettingsQuestionMultiple => {
-            Some("選択した {} 冊の本固有設定を初期化しますか？")
+            Some("選択した {} 冊の本固有設定とキャッシュ済み成果物をクリアしますか？")
         }
         TextKey::ClearBookSettingsNote => Some(
-            "読書状態、再開位置、表示設定が既定値に戻ります。\n本、サムネイル、Page Map、お気に入り、グループは削除されません。",
+            "選択した各本の読書状態、再開位置、表示設定が既定値に戻ります。\n各本のメモリ／ディスク上のサムネイル、Page Map、成果物失敗キャッシュが無効化され、必要に応じて再生成されます。\n本、お気に入り、グループは削除されません。",
         ),
         TextKey::Reset => Some("初期化"),
         TextKey::ExternalToolsMenu => Some("外部ツール >"),

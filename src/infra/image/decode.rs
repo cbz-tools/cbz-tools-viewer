@@ -344,7 +344,7 @@ pub fn decode_for_thumb(
         ImageFormatHint::Jpeg => decode_jpeg(data),
         ImageFormatHint::Avif => decode_avif_static(data),
         ImageFormatHint::Gif => decode_gif_first_frame(data),
-        ImageFormatHint::WebP => decode_webp(data),
+        ImageFormatHint::WebP => decode_webp_first_frame(data),
         _ => decode_generic(data),
     }
 }
@@ -416,6 +416,18 @@ pub fn decode_webp(data: &[u8]) -> Result<DecodedImage> {
         height: h,
         pixels,
     })
+}
+
+fn decode_webp_first_frame(data: &[u8]) -> Result<DecodedImage> {
+    if !is_animated_webp_fast(data) {
+        return decode_webp(data);
+    }
+
+    let mut source = WebpAnimFrameSource::new(data)?;
+    let frame = source
+        .next_frame()?
+        .context("WebP has no decodable first frame")?;
+    Ok(frame.image)
 }
 
 // ── PNG / GIF / AVIF / その他 ─────────────────────────────────────────────────

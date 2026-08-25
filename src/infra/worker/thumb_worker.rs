@@ -3,7 +3,7 @@
 //! UI には先にサムネイルを返し、永続化と Page Map 反映は後段で処理する。
 //! complete / slow Page Map の実処理は `PageMapCoordinator` に委譲する。
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -37,8 +37,9 @@ use crate::infra::cache::memory::ThumbMemCache;
 use crate::infra::cache::page_map::PageMapDiskCache;
 use crate::infra::image::decode as img;
 use crate::infra::page_map::coordinator::{
-    PageMapCompleteRequest, PageMapCoordinator, PageMapFastPersistRequest,
-    PageMapReadyPersistRequest, PageMapStatus,
+    BookArtifactGenerations, PageMapCompleteRequest, PageMapCoordinator, PageMapFastPersistRequest,
+    PageMapReadyPersistRequest, PageMapStatus, current_book_artifact_generation,
+    invalidate_book_artifact_generation,
 };
 use crate::infra::page_map::viewer_bootstrap::try_load_existing_viewer_page_map_for_spad;
 use crate::repaint::RepaintNotifier;
@@ -71,6 +72,7 @@ pub struct ThumbTask {
     pub expected_modified: Option<SystemTime>,
     /// 同一 path/id のファイル内容が変わった場合、古い memory/disk thumb cache を使わず再生成する。
     pub bypass_cache: bool,
+    pub(crate) book_artifact_generation: u64,
 }
 
 /// UI → Worker への動画サムネイル要求。normal task/cache とは別経路で扱う。
@@ -81,6 +83,7 @@ pub struct VideoThumbTask {
     pub target_width: u16,
     pub expected_size: u64,
     pub expected_modified: Option<SystemTime>,
+    pub(crate) book_artifact_generation: u64,
 }
 
 /// Runtime-only video preview request. It never enters the thumbnail lanes or caches.
@@ -132,6 +135,7 @@ pub struct StaticPreviewTask {
 /// Worker → UI への成功レスポンス
 pub struct ReadyThumb {
     pub book_id: BookId,
+    pub book_artifact_generation: u64,
     pub pixels: Arc<[u8]>,
     pub width: u16,
     pub height: u16,
@@ -245,6 +249,7 @@ pub enum WorkerMsg {
         book_id: BookId,
         expected_size: u64,
         expected_modified: Option<SystemTime>,
+        book_artifact_generation: u64,
     },
     /// サムネイル生成の恒久失敗。UI へ FailedPermanent として返す。
     /// rar / avif feature 無効時や、内容として確定的に失敗しているケースを含む。
@@ -253,6 +258,7 @@ pub enum WorkerMsg {
         book_id: BookId,
         expected_size: u64,
         expected_modified: Option<SystemTime>,
+        book_artifact_generation: u64,
     },
     /// 要求後に同じ path/id のファイル内容が変わった古いタスク。UI へ失敗状態としては反映しない。
     Stale(BookId),
@@ -305,6 +311,7 @@ pub struct ThumbWorker {
     resp_rx: std::sync::Mutex<std::sync::mpsc::Receiver<WorkerMsg>>,
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
+    book_artifact_generations: BookArtifactGenerations,
     lanes: Arc<ThumbnailLaneState>,
     display_mailbox: Arc<DisplayThumbMailbox>,
     preview_control: Arc<PreviewControl>,
@@ -393,6 +400,29 @@ impl DisplayThumbMailbox {
 
     fn clear(&self) {
         self.replace(Vec::new());
+    }
+
+    fn remove_by_book_id(&self, id: &BookId) {
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return;
+        }
+        let removed = state
+            .pending
+            .iter()
+            .filter(|(task, _)| task.book_id == *id)
+            .count();
+        let retained = state
+            .pending
+            .drain(..)
+            .filter(|(task, _)| task.book_id != *id)
+            .collect::<Vec<_>>();
+        for _ in 0..removed {
+            self.lanes.retire_request_pending(ThumbnailLane::Image);
+        }
+        state.pending = retained;
+        drop(state);
+        self.wake.notify_waiters();
     }
 
     fn close(&self) {
@@ -794,6 +824,7 @@ impl ThumbWorker {
             std::sync::mpsc::channel::<BackgroundSchedulerCommand>();
         let generation = Arc::new(AtomicU64::new(0));
         let artifact_generation = Arc::new(AtomicU64::new(0));
+        let book_artifact_generations = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let lanes = Arc::new(ThumbnailLaneState::new(base_goal));
         let display_mailbox = Arc::new(DisplayThumbMailbox::new(Arc::clone(&lanes)));
         let preview_control = Arc::new(PreviewControl::new());
@@ -831,6 +862,7 @@ impl ThumbWorker {
             .spawn({
                 let generation = Arc::clone(&generation);
                 let artifact_generation = Arc::clone(&artifact_generation);
+                let book_artifact_generations = Arc::clone(&book_artifact_generations);
                 let artifact_gate = Arc::clone(&artifact_gate);
                 let lanes = Arc::clone(&lanes);
                 let display_mailbox = Arc::clone(&display_mailbox);
@@ -846,6 +878,7 @@ impl ThumbWorker {
                         repaint: normal_repaint,
                         generation,
                         artifact_generation,
+                        book_artifact_generations,
                         artifact_gate,
                         lanes,
                         display_mailbox,
@@ -880,6 +913,7 @@ impl ThumbWorker {
             resp_rx: std::sync::Mutex::new(resp_rx),
             generation,
             artifact_generation,
+            book_artifact_generations,
             lanes,
             display_mailbox,
             preview_control,
@@ -891,7 +925,9 @@ impl ThumbWorker {
         }
     }
 
-    pub fn request(&self, task: ThumbTask) {
+    pub fn request(&self, mut task: ThumbTask) {
+        task.book_artifact_generation =
+            current_book_artifact_generation(&self.book_artifact_generations, &task.book_id);
         let generation = self.generation.load(Ordering::Relaxed);
         self.lanes.mark_request_pending(ThumbnailLane::Image);
         if self
@@ -905,12 +941,42 @@ impl ThumbWorker {
 
     pub fn replace_display_tasks(&self, tasks: Vec<ThumbTask>) {
         let generation = self.generation.load(Ordering::Relaxed);
+        let tasks: Vec<ThumbTask> = tasks
+            .into_iter()
+            .map(|mut task| {
+                task.book_artifact_generation = current_book_artifact_generation(
+                    &self.book_artifact_generations,
+                    &task.book_id,
+                );
+                task
+            })
+            .collect();
         self.display_mailbox
             .replace(tasks.into_iter().map(|task| (task, generation)).collect());
     }
 
     pub(crate) fn replace_background_artifact_jobs(&self, jobs: Vec<BackgroundArtifactJob>) {
         let generation = self.generation.load(Ordering::Relaxed);
+        let jobs = jobs
+            .into_iter()
+            .map(|mut job| {
+                match &mut job {
+                    BackgroundArtifactJob::Image { task, .. } => {
+                        task.book_artifact_generation = current_book_artifact_generation(
+                            &self.book_artifact_generations,
+                            &task.book_id,
+                        );
+                    }
+                    BackgroundArtifactJob::Video(task) => {
+                        task.book_artifact_generation = current_book_artifact_generation(
+                            &self.book_artifact_generations,
+                            &task.book_id,
+                        );
+                    }
+                }
+                job
+            })
+            .collect();
         self.background_scheduler_ready
             .store(false, Ordering::Release);
         let _ = self
@@ -933,7 +999,13 @@ impl ThumbWorker {
         background_artifact_is_visible(&self.visible_artifact_ids, id)
     }
 
-    pub fn request_video(&self, task: VideoThumbTask) {
+    pub(crate) fn is_book_artifact_current(&self, id: &BookId, expected: u64) -> bool {
+        current_book_artifact_generation(&self.book_artifact_generations, id) == expected
+    }
+
+    pub fn request_video(&self, mut task: VideoThumbTask) {
+        task.book_artifact_generation =
+            current_book_artifact_generation(&self.book_artifact_generations, &task.book_id);
         let generation = self.generation.load(Ordering::Relaxed);
         tracing::debug!(
             id = %task.book_id.0.to_hex(),
@@ -1063,12 +1135,13 @@ impl ThumbWorker {
     }
 
     pub fn remove_book_cache(&self, id: BookId) {
-        self.artifact_generation.fetch_add(1, Ordering::SeqCst);
+        invalidate_book_artifact_generation(&self.book_artifact_generations, &id);
+        self.display_mailbox.remove_by_book_id(&id);
         let _ = self.req_tx.send(WorkerReq::RemoveArchiveCache(id));
     }
 
     pub fn remove_video_cache(&self, id: BookId) {
-        self.artifact_generation.fetch_add(1, Ordering::SeqCst);
+        invalidate_book_artifact_generation(&self.book_artifact_generations, &id);
         self.stop_preview();
         let _ = self.req_tx.send(WorkerReq::RemoveVideoCache(id.clone()));
         let _ = self.video_req_tx.send(VideoReq::RemoveCache(id.clone()));
@@ -1130,6 +1203,7 @@ struct WorkerMainContext {
     repaint: RepaintNotifier,
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
+    book_artifact_generations: BookArtifactGenerations,
     artifact_gate: Arc<RwLock<()>>,
     lanes: Arc<ThumbnailLaneState>,
     display_mailbox: Arc<DisplayThumbMailbox>,
@@ -1147,6 +1221,7 @@ fn worker_main(context: WorkerMainContext) {
         repaint,
         generation,
         artifact_generation,
+        book_artifact_generations,
         artifact_gate,
         lanes,
         display_mailbox,
@@ -1217,6 +1292,7 @@ fn worker_main(context: WorkerMainContext) {
         Arc::clone(&artifact_generation),
         Arc::clone(&artifact_gate),
         artifact_failure_cache.as_ref().map(Arc::clone),
+        Arc::clone(&book_artifact_generations),
         Some(page_map_status_notifier),
     ));
     let shared = Arc::new(WorkerShared {
@@ -1226,6 +1302,7 @@ fn worker_main(context: WorkerMainContext) {
         artifact_failure_cache,
         page_map_coordinator,
         artifact_generation: Arc::clone(&artifact_generation),
+        book_artifact_generations: Arc::clone(&book_artifact_generations),
         artifact_gate: Arc::clone(&artifact_gate),
         lanes,
         next_flight_id: AtomicU64::new(0),
@@ -1639,6 +1716,9 @@ async fn run_thumb_task(
             Err(join_err) => {
                 tracing::error!(path = %path_disp_for_watch, "spawn_blocking panic: {join_err}");
                 if task_gen == runtime.generation.load(Ordering::Relaxed)
+                    && runtime
+                        .shared
+                        .is_book_artifact_current(&task.book_id, task.book_artifact_generation)
                     && thumb_task_file_snapshot_matches(&task)
                 {
                     let currently_visible = background_artifact_is_visible(
@@ -1652,6 +1732,7 @@ async fn run_thumb_task(
                             book_id: task.book_id.clone(),
                             expected_size: task.expected_size,
                             expected_modified: task.expected_modified,
+                            book_artifact_generation: task.book_artifact_generation,
                         });
                     }
                     if should_repaint {
@@ -1690,6 +1771,12 @@ async fn handle_thumb_result(
     if runtime.task_gen != runtime.generation.load(Ordering::Relaxed) {
         return;
     }
+    if !runtime
+        .shared
+        .is_book_artifact_current(&task.book_id, task.book_artifact_generation)
+    {
+        return;
+    }
     let currently_visible =
         background_artifact_is_visible(&runtime.visible_artifact_ids, &task.book_id);
     let should_notify = runtime.origin.is_visible() || currently_visible;
@@ -1697,15 +1784,21 @@ async fn handle_thumb_result(
         WorkerMsg::Ready(ready) => {
             clear_thumbnail_failure(&runtime.shared, &task);
             if currently_visible && !runtime.origin.is_visible() {
-                runtime.shared.mem_cache.put(
-                    task.book_id.clone(),
-                    task.target_width,
-                    Thumbnail {
-                        width: ready.width,
-                        height: ready.height,
-                        pixels: Arc::clone(&ready.pixels),
-                    },
-                );
+                let _gate = runtime.shared.artifact_gate.read();
+                if runtime
+                    .shared
+                    .is_book_artifact_current(&task.book_id, task.book_artifact_generation)
+                {
+                    runtime.shared.mem_cache.put(
+                        task.book_id.clone(),
+                        task.target_width,
+                        Thumbnail {
+                            width: ready.width,
+                            height: ready.height,
+                            pixels: Arc::clone(&ready.pixels),
+                        },
+                    );
+                }
             }
             if should_notify {
                 let _ = runtime.tx.send(WorkerMsg::Ready(ready));
@@ -1761,6 +1854,7 @@ async fn handle_thumb_result(
                         book_id: task.book_id.clone(),
                         expected_size: task.expected_size,
                         expected_modified: task.expected_modified,
+                        book_artifact_generation: task.book_artifact_generation,
                     });
                 }
                 if runtime.display || currently_visible {
@@ -1778,6 +1872,7 @@ async fn handle_thumb_result(
                         book_id: task.book_id.clone(),
                         expected_size: task.expected_size,
                         expected_modified: task.expected_modified,
+                        book_artifact_generation: task.book_artifact_generation,
                     });
                 }
                 if runtime.display || currently_visible {
@@ -1812,7 +1907,10 @@ struct ThumbTaskResultContext {
 }
 
 fn mark_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
-    if !thumb_task_file_snapshot_matches(task) {
+    let _gate = shared.artifact_gate.read();
+    if !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation)
+        || !thumb_task_file_snapshot_matches(task)
+    {
         return;
     }
     let revision = SourceRevision::from_file_state(task.expected_size, task.expected_modified);
@@ -1839,6 +1937,10 @@ fn mark_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
 }
 
 fn clear_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
+    let _gate = shared.artifact_gate.read();
+    if !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation) {
+        return;
+    }
     let revision = SourceRevision::from_file_state(task.expected_size, task.expected_modified);
     if let Some(cache) = shared.artifact_failure_cache.as_ref() {
         match cache.clear_failure_for_revision(&task.book_id, &revision, ArtifactKind::Thumbnail) {
@@ -1863,7 +1965,10 @@ fn clear_thumbnail_failure(shared: &WorkerShared, task: &ThumbTask) {
 }
 
 fn mark_thumbnail_failure_for_video(shared: &WorkerShared, task: &VideoThumbTask) {
-    if !thumb_task_file_snapshot_matches_video(task) {
+    let _gate = shared.artifact_gate.read();
+    if !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation)
+        || !thumb_task_file_snapshot_matches_video(task)
+    {
         return;
     }
     let revision = SourceRevision::from_file_state(task.expected_size, task.expected_modified);
@@ -1886,6 +1991,10 @@ fn mark_thumbnail_failure_for_video(shared: &WorkerShared, task: &VideoThumbTask
 }
 
 fn clear_thumbnail_failure_for_video(shared: &WorkerShared, task: &VideoThumbTask) {
+    let _gate = shared.artifact_gate.read();
+    if !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation) {
+        return;
+    }
     let revision = SourceRevision::from_file_state(task.expected_size, task.expected_modified);
     if let Some(cache) = shared.artifact_failure_cache.as_ref() {
         match cache.clear_failure_for_revision(&task.book_id, &revision, ArtifactKind::Thumbnail) {
@@ -3337,6 +3446,7 @@ fn handle_video_result(
 
     if task_gen != generation.load(Ordering::Relaxed)
         || task_artifact_generation != shared.artifact_generation.load(Ordering::Relaxed)
+        || !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation)
     {
         return;
     }
@@ -3351,16 +3461,19 @@ fn handle_video_result(
             let revision =
                 SourceRevision::from_file_state(task.expected_size, task.expected_modified);
             if should_notify {
-                shared.mem_cache.put_for_revision(
-                    task.book_id.clone(),
-                    task.target_width,
-                    Thumbnail {
-                        width: ready.width,
-                        height: ready.height,
-                        pixels: Arc::clone(&ready.pixels),
-                    },
-                    revision,
-                );
+                let _gate = shared.artifact_gate.read();
+                if shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation) {
+                    shared.mem_cache.put_for_revision(
+                        task.book_id.clone(),
+                        task.target_width,
+                        Thumbnail {
+                            width: ready.width,
+                            height: ready.height,
+                            pixels: Arc::clone(&ready.pixels),
+                        },
+                        revision,
+                    );
+                }
             }
             clear_thumbnail_failure_for_video(shared, &task);
             tracing::debug!(
@@ -3381,10 +3494,12 @@ fn handle_video_result(
                 let deferred = DeferredCache {
                     generation: Arc::clone(generation),
                     artifact_generation: Arc::clone(&shared.artifact_generation),
+                    book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
                     artifact_gate: Arc::clone(&shared.artifact_gate),
                     page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
                     task_generation: task_gen,
                     task_artifact_generation,
+                    task_book_artifact_generation: task.book_artifact_generation,
                     disk_cache: Arc::clone(&shared.disk_cache),
                     id: task.book_id.clone(),
                     source_path: Arc::clone(&task.path),
@@ -3416,6 +3531,7 @@ fn handle_video_result(
                     book_id: task.book_id.clone(),
                     expected_size: task.expected_size,
                     expected_modified: task.expected_modified,
+                    book_artifact_generation: task.book_artifact_generation,
                 });
             }
             if currently_visible {
@@ -3446,6 +3562,7 @@ fn lookup_video_cache(
     origin: RequestOrigin,
 ) -> VideoWorkResult {
     if task_artifact_generation != shared.artifact_generation.load(Ordering::Relaxed)
+        || !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation)
         || !thumb_task_file_snapshot_matches_video(task)
     {
         tracing::debug!(id = %task.book_id.0.to_hex(), "video thumbnail stale before cache lookup");
@@ -3463,6 +3580,7 @@ fn lookup_video_cache(
     {
         if generation.load(Ordering::Relaxed) != task_generation
             || shared.artifact_generation.load(Ordering::Relaxed) != task_artifact_generation
+            || !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation)
             || !thumb_task_file_snapshot_matches_video(task)
         {
             return VideoWorkResult::Stale;
@@ -3472,6 +3590,7 @@ fn lookup_video_cache(
         return VideoWorkResult::Ready {
             ready: ReadyThumb {
                 book_id: task.book_id.clone(),
+                book_artifact_generation: task.book_artifact_generation,
                 pixels: thumb.pixels,
                 width: thumb.width,
                 height: thumb.height,
@@ -3489,6 +3608,7 @@ fn lookup_video_cache(
         if let Ok(decoded) = img::decode_webp(&webp) {
             if generation.load(Ordering::Relaxed) != task_generation
                 || shared.artifact_generation.load(Ordering::Relaxed) != task_artifact_generation
+                || !shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation)
                 || !thumb_task_file_snapshot_matches_video(task)
             {
                 return VideoWorkResult::Stale;
@@ -3587,6 +3707,7 @@ fn emit_video_permanent_failure(
             book_id: task.book_id.clone(),
             expected_size: task.expected_size,
             expected_modified: task.expected_modified,
+            book_artifact_generation: task.book_artifact_generation,
         });
     }
     if currently_visible {
@@ -4206,6 +4327,7 @@ struct WorkerShared {
     artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
     page_map_coordinator: Arc<PageMapCoordinator>,
     artifact_generation: Arc<AtomicU64>,
+    book_artifact_generations: BookArtifactGenerations,
     artifact_gate: Arc<RwLock<()>>,
     lanes: Arc<ThumbnailLaneState>,
     next_flight_id: AtomicU64,
@@ -4216,6 +4338,10 @@ struct WorkerShared {
 }
 
 impl WorkerShared {
+    fn is_book_artifact_current(&self, id: &BookId, expected: u64) -> bool {
+        current_book_artifact_generation(&self.book_artifact_generations, id) == expected
+    }
+
     fn begin_task(&self, task: &ThumbTask) -> Option<TaskFlightGuard> {
         let key = ThumbTaskKey::from_task(task);
         let mut guard = match self.in_flight.lock() {
@@ -4597,10 +4723,12 @@ enum DeferredPageMap {
 struct DeferredCache {
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
+    book_artifact_generations: BookArtifactGenerations,
     artifact_gate: Arc<RwLock<()>>,
     page_map_coordinator: Arc<PageMapCoordinator>,
     task_generation: u64,
     task_artifact_generation: u64,
+    task_book_artifact_generation: u64,
     disk_cache: Arc<DiskCache>,
     id: BookId,
     source_path: Arc<Path>,
@@ -4615,10 +4743,12 @@ impl DeferredCache {
         let DeferredCache {
             generation,
             artifact_generation,
+            book_artifact_generations,
             artifact_gate,
             page_map_coordinator,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
             disk_cache,
             id,
             source_path,
@@ -4633,6 +4763,7 @@ impl DeferredCache {
             let disk_cache = Arc::clone(&disk_cache);
             let generation = Arc::clone(&generation);
             let artifact_generation = Arc::clone(&artifact_generation);
+            let book_artifact_generations = Arc::clone(&book_artifact_generations);
             let artifact_gate = Arc::clone(&artifact_gate);
             let source_path = Arc::clone(&source_path);
             let webp = thumb.webp;
@@ -4643,6 +4774,11 @@ impl DeferredCache {
                     return;
                 }
                 if artifact_generation.load(Ordering::Relaxed) != task_artifact_generation {
+                    return;
+                }
+                if current_book_artifact_generation(&book_artifact_generations, &id)
+                    != task_book_artifact_generation
+                {
                     return;
                 }
                 let Ok(snapshot) = FileSnapshot::read(&source_path) else {
@@ -4681,6 +4817,11 @@ impl DeferredCache {
             .await;
         }
 
+        if current_book_artifact_generation(&book_artifact_generations, &id)
+            != task_book_artifact_generation
+        {
+            return;
+        }
         match page_map {
             Some(DeferredPageMap::Cached(status)) => {
                 page_map_coordinator.notify_page_map_cache_hit(status);
@@ -4711,6 +4852,10 @@ fn process_thumb(
     let id = &task.book_id;
     let source_revision =
         SourceRevision::from_file_state(task.expected_size, task.expected_modified);
+
+    if !shared.is_book_artifact_current(id, task.book_artifact_generation) {
+        return (WorkerMsg::Stale(task.book_id.clone()), None);
+    }
 
     // 要求後に差し替わった古い結果は UI に返さない。
     if !thumb_task_file_snapshot_matches(&task) {
@@ -4753,6 +4898,7 @@ fn process_thumb(
         source_revision: source_revision.clone(),
         task_generation,
         task_artifact_generation: shared.artifact_generation.load(Ordering::Relaxed),
+        task_book_artifact_generation: task.book_artifact_generation,
         failed: false,
         page_count: Some(page_count),
     });
@@ -4768,10 +4914,12 @@ fn process_thumb(
                 (None, Some(status)) => Some(DeferredCache {
                     generation: Arc::clone(generation),
                     artifact_generation: Arc::clone(&shared.artifact_generation),
+                    book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
                     artifact_gate: Arc::clone(&shared.artifact_gate),
                     page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
                     task_generation,
                     task_artifact_generation: status.task_artifact_generation,
+                    task_book_artifact_generation: status.task_book_artifact_generation,
                     disk_cache: Arc::clone(&shared.disk_cache),
                     id: task_for_page_map_cache_hit.book_id.clone(),
                     source_path: Arc::clone(&task_for_page_map_cache_hit.path),
@@ -4820,6 +4968,7 @@ fn process_thumb(
                 (
                     WorkerMsg::Ready(ReadyThumb {
                         book_id: id.clone(),
+                        book_artifact_generation: task.book_artifact_generation,
                         pixels: thumb.pixels,
                         width: thumb.width,
                         height: thumb.height,
@@ -5035,10 +5184,12 @@ fn process_thumb(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: task.book_id.clone(),
         source_path: Arc::clone(&task.path),
@@ -5094,10 +5245,12 @@ fn page_map_cache_miss_deferred(
     Some(DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation: request.task_artifact_generation,
+        task_book_artifact_generation: request.task_book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: task.book_id.clone(),
         source_path: Arc::clone(&task.path),
@@ -5171,6 +5324,7 @@ fn build_page_map_complete_request(
         source_revision: source_revision.clone(),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         page_count: None,
         reason: None,
         page_map_cache,
@@ -5232,10 +5386,12 @@ fn process_zip_thumbnail_only(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: book_id.clone(),
         source_path: Arc::clone(&task.path),
@@ -5324,10 +5480,12 @@ fn process_epub_thumbnail_only(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: book_id,
         source_path: Arc::clone(&task.path),
@@ -5416,6 +5574,7 @@ fn process_epub_book_artifacts(
                 source_revision: source_revision.clone(),
                 task_generation,
                 task_artifact_generation,
+                task_book_artifact_generation: task.book_artifact_generation,
                 page_map,
                 page_map_cache: Arc::clone(&page_map_cache),
             }))
@@ -5453,10 +5612,12 @@ fn process_epub_book_artifacts(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: id.clone(),
         source_path: Arc::clone(&task.path),
@@ -5632,6 +5793,7 @@ fn process_zip_book_artifacts(
         source_revision: source_revision.clone(),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         page_count,
         fast_lane_status,
         fast_lane_pages: page_map_pages,
@@ -5640,10 +5802,12 @@ fn process_zip_book_artifacts(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: id.clone(),
         source_path: Arc::clone(&task.path),
@@ -5743,10 +5907,12 @@ fn process_folder_thumbnail_only(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: book_id,
         source_path: Arc::clone(&task.path),
@@ -5842,6 +6008,7 @@ fn process_folder_book_artifacts(
                 source_revision: source_revision.clone(),
                 task_generation,
                 task_artifact_generation,
+                task_book_artifact_generation: task.book_artifact_generation,
                 page_map: BookPageMap::new(source_revision.clone(), fast_lane_pages),
                 page_map_cache: Arc::clone(&page_map_cache),
             }))
@@ -5871,6 +6038,7 @@ fn process_folder_book_artifacts(
                     &source_revision,
                     task_generation,
                     task_artifact_generation,
+                    task.book_artifact_generation,
                 );
             None
         }
@@ -5890,10 +6058,12 @@ fn process_folder_book_artifacts(
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
         artifact_generation: Arc::clone(&shared.artifact_generation),
+        book_artifact_generations: Arc::clone(&shared.book_artifact_generations),
         artifact_gate: Arc::clone(&shared.artifact_gate),
         page_map_coordinator: Arc::clone(&shared.page_map_coordinator),
         task_generation,
         task_artifact_generation,
+        task_book_artifact_generation: task.book_artifact_generation,
         disk_cache: Arc::clone(&shared.disk_cache),
         id: id.clone(),
         source_path: Arc::clone(&task.path),
@@ -5936,19 +6106,23 @@ fn store_and_ready(
     let (w, h) = (decoded.width as u16, decoded.height as u16);
 
     if cache_in_memory {
-        shared.mem_cache.put(
-            task.book_id.clone(),
-            task.target_width,
-            Thumbnail {
-                width: w,
-                height: h,
-                pixels: Arc::clone(&pixels),
-            },
-        );
+        let _gate = shared.artifact_gate.read();
+        if shared.is_book_artifact_current(&task.book_id, task.book_artifact_generation) {
+            shared.mem_cache.put(
+                task.book_id.clone(),
+                task.target_width,
+                Thumbnail {
+                    width: w,
+                    height: h,
+                    pixels: Arc::clone(&pixels),
+                },
+            );
+        }
     }
 
     WorkerMsg::Ready(ReadyThumb {
         book_id: task.book_id,
+        book_artifact_generation: task.book_artifact_generation,
         pixels,
         width: w,
         height: h,
@@ -5961,6 +6135,7 @@ fn ready_from_decoded(decoded: img::DecodedImage, task: VideoThumbTask) -> Ready
     let pixels: Arc<[u8]> = decoded.pixels.into();
     ReadyThumb {
         book_id: task.book_id,
+        book_artifact_generation: task.book_artifact_generation,
         pixels,
         width: decoded.width as u16,
         height: decoded.height as u16,

@@ -27,14 +27,55 @@ use crate::infra::cache::artifact_failure::{ArtifactFailureDiskCache, ArtifactKi
 use crate::infra::cache::page_map::PageMapDiskCache;
 use crate::infra::page_map::build::{PageMapBuildStatus, assemble_zip_fast_page_map};
 
+pub(crate) type BookArtifactGenerations = Arc<Mutex<HashMap<BookId, u64>>>;
+
+pub(crate) fn current_book_artifact_generation(
+    generations: &BookArtifactGenerations,
+    id: &BookId,
+) -> u64 {
+    generations
+        .lock()
+        .ok()
+        .and_then(|values| values.get(id).copied())
+        .unwrap_or(0)
+}
+
+pub(crate) fn invalidate_book_artifact_generation(
+    generations: &BookArtifactGenerations,
+    id: &BookId,
+) {
+    if let Ok(mut values) = generations.lock() {
+        let generation = values.entry(id.clone()).or_insert(0);
+        *generation = generation.saturating_add(1);
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PageMapStatus {
     pub book_id: BookId,
     pub source_revision: SourceRevision,
     pub task_generation: u64,
     pub task_artifact_generation: u64,
+    pub task_book_artifact_generation: u64,
     pub failed: bool,
     pub page_count: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PageMapTaskGenerations {
+    generation: u64,
+    artifact_generation: u64,
+    book_artifact_generation: u64,
+}
+
+impl PageMapTaskGenerations {
+    fn new(generation: u64, artifact_generation: u64, book_artifact_generation: u64) -> Self {
+        Self {
+            generation,
+            artifact_generation,
+            book_artifact_generation,
+        }
+    }
 }
 
 type PageMapStatusNotifier = Arc<dyn Fn(PageMapStatus) + Send + Sync>;
@@ -46,6 +87,7 @@ pub struct PageMapCoordinator {
     artifact_generation: Arc<AtomicU64>,
     artifact_gate: Arc<RwLock<()>>,
     artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
+    book_artifact_generations: BookArtifactGenerations,
     status_notifier: Option<PageMapStatusNotifier>,
     page_map_slow_states: Arc<Mutex<HashMap<PageMapTaskKey, PageMapSlowState>>>,
     page_map_complete_permit: Arc<Semaphore>,
@@ -57,6 +99,7 @@ impl PageMapCoordinator {
         artifact_generation: Arc<AtomicU64>,
         artifact_gate: Arc<RwLock<()>>,
         artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
+        book_artifact_generations: BookArtifactGenerations,
         status_notifier: Option<PageMapStatusNotifier>,
     ) -> Self {
         Self {
@@ -64,6 +107,7 @@ impl PageMapCoordinator {
             artifact_generation,
             artifact_gate,
             artifact_failure_cache,
+            book_artifact_generations,
             status_notifier,
             page_map_slow_states: Arc::new(Mutex::new(HashMap::new())),
             page_map_complete_permit: Arc::new(Semaphore::new(1)),
@@ -72,7 +116,9 @@ impl PageMapCoordinator {
 
     /// 同一 task の slow / complete を 1 回に絞る。persistable でない revision は予約しない。
     pub fn reserve_page_map_slow(&self, key: &PageMapTaskKey) -> bool {
-        if !key.source_revision.is_persistable() {
+        if !key.source_revision.is_persistable()
+            || !self.is_book_artifact_current(&key.book_id, key.task_book_artifact_generation)
+        {
             return false;
         }
         let mut guard = match self.page_map_slow_states.lock() {
@@ -119,16 +165,29 @@ impl PageMapCoordinator {
         revision: &SourceRevision,
         task_generation: u64,
         task_artifact_generation: u64,
+        task_book_artifact_generation: u64,
     ) {
-        self.mark_page_map_failure(id, revision, task_generation, task_artifact_generation);
+        self.mark_page_map_failure(
+            id,
+            revision,
+            task_generation,
+            task_artifact_generation,
+            task_book_artifact_generation,
+        );
     }
 
     pub fn notify_page_map_cache_hit(&self, status: PageMapStatus) {
+        if !self.is_book_artifact_current(&status.book_id, status.task_book_artifact_generation) {
+            return;
+        }
         self.notify_status(
             &status.book_id,
             &status.source_revision,
-            status.task_generation,
-            status.task_artifact_generation,
+            PageMapTaskGenerations::new(
+                status.task_generation,
+                status.task_artifact_generation,
+                status.task_book_artifact_generation,
+            ),
             status.failed,
             status.page_count,
         );
@@ -213,6 +272,7 @@ impl PageMapCoordinator {
             request.source_revision.clone(),
             request.task_generation,
             request.task_artifact_generation,
+            request.task_book_artifact_generation,
         );
         let book_id = request.book_id.clone();
         let source_path = request.source_path.clone();
@@ -236,6 +296,7 @@ impl PageMapCoordinator {
                         request.source_revision.clone(),
                         request.task_generation,
                         request.task_artifact_generation,
+                        request.task_book_artifact_generation,
                     ),
                     PageMapSlowState::Failed,
                 );
@@ -275,6 +336,7 @@ impl PageMapCoordinator {
             source_revision,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
             page_count,
             fast_lane_status,
             fast_lane_pages,
@@ -289,8 +351,10 @@ impl PageMapCoordinator {
             return PageMapFastPersistOutcome::Failed;
         }
         if let Some(stale_reason) = self.page_map_stale_reason(
+            &book_id,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
             &source_path,
             &source_revision,
         ) {
@@ -317,8 +381,10 @@ impl PageMapCoordinator {
                 };
 
                 if let Some(stale_reason) = self.page_map_stale_reason(
+                    &book_id,
                     task_generation,
                     task_artifact_generation,
+                    task_book_artifact_generation,
                     &source_path,
                     &source_revision,
                 ) {
@@ -328,8 +394,10 @@ impl PageMapCoordinator {
 
                 let _gate = self.artifact_gate.read();
                 if let Some(stale_reason) = self.page_map_stale_reason(
+                    &book_id,
                     task_generation,
                     task_artifact_generation,
+                    task_book_artifact_generation,
                     &source_path,
                     &source_revision,
                 ) {
@@ -350,6 +418,7 @@ impl PageMapCoordinator {
                             &source_revision,
                             task_generation,
                             task_artifact_generation,
+                            task_book_artifact_generation,
                             page_map_page_count,
                         );
                         tracing::debug!(
@@ -388,6 +457,7 @@ impl PageMapCoordinator {
                     source_revision,
                     task_generation,
                     task_artifact_generation,
+                    task_book_artifact_generation,
                     page_count: Some(page_count),
                     reason: Some(reason),
                     page_map_cache,
@@ -405,6 +475,7 @@ impl PageMapCoordinator {
                     &source_revision,
                     task_generation,
                     task_artifact_generation,
+                    task_book_artifact_generation,
                 );
                 PageMapFastPersistOutcome::Failed
             }
@@ -418,6 +489,7 @@ impl PageMapCoordinator {
             source_revision,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
             page_map,
             page_map_cache,
         } = request;
@@ -432,8 +504,10 @@ impl PageMapCoordinator {
 
         let started = Instant::now();
         if let Some(stale_reason) = self.page_map_stale_reason(
+            &book_id,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
             &source_path,
             &source_revision,
         ) {
@@ -443,8 +517,10 @@ impl PageMapCoordinator {
 
         let _gate = self.artifact_gate.read();
         if let Some(stale_reason) = self.page_map_stale_reason(
+            &book_id,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
             &source_path,
             &source_revision,
         ) {
@@ -465,6 +541,7 @@ impl PageMapCoordinator {
                     &source_revision,
                     task_generation,
                     task_artifact_generation,
+                    task_book_artifact_generation,
                     page_map_page_count,
                 );
                 tracing::debug!(
@@ -498,6 +575,7 @@ impl PageMapCoordinator {
             source_revision.clone(),
             request.task_generation,
             request.task_artifact_generation,
+            request.task_book_artifact_generation,
         );
         if !source_revision.is_persistable() {
             tracing::debug!(
@@ -718,6 +796,7 @@ impl PageMapCoordinator {
                     source_revision,
                     request.task_generation,
                     request.task_artifact_generation,
+                    request.task_book_artifact_generation,
                     page_map_page_count,
                 );
                 if let Some(page_count) = page_count_for_log {
@@ -762,6 +841,7 @@ impl PageMapCoordinator {
             &request.source_revision,
             request.task_generation,
             request.task_artifact_generation,
+            request.task_book_artifact_generation,
         );
         let _ = self.finish_page_map_slow_state(key, PageMapSlowState::Failed);
     }
@@ -772,7 +852,12 @@ impl PageMapCoordinator {
         revision: &SourceRevision,
         task_generation: u64,
         task_artifact_generation: u64,
+        task_book_artifact_generation: u64,
     ) {
+        let _gate = self.artifact_gate.read();
+        if !self.is_book_artifact_current(id, task_book_artifact_generation) {
+            return;
+        }
         if let Some(cache) = self.artifact_failure_cache.as_ref() {
             match cache.mark_failure_for_revision(id, revision, ArtifactKind::PageMap) {
                 Ok(true) => {
@@ -796,8 +881,11 @@ impl PageMapCoordinator {
         self.notify_status(
             id,
             revision,
-            task_generation,
-            task_artifact_generation,
+            PageMapTaskGenerations::new(
+                task_generation,
+                task_artifact_generation,
+                task_book_artifact_generation,
+            ),
             true,
             None,
         );
@@ -832,14 +920,18 @@ impl PageMapCoordinator {
         revision: &SourceRevision,
         task_generation: u64,
         task_artifact_generation: u64,
+        task_book_artifact_generation: u64,
         page_count: usize,
     ) {
         self.clear_page_map_failure(id, revision);
         self.notify_status(
             id,
             revision,
-            task_generation,
-            task_artifact_generation,
+            PageMapTaskGenerations::new(
+                task_generation,
+                task_artifact_generation,
+                task_book_artifact_generation,
+            ),
             false,
             Some(page_count),
         );
@@ -849,17 +941,20 @@ impl PageMapCoordinator {
         &self,
         id: &BookId,
         revision: &SourceRevision,
-        task_generation: u64,
-        task_artifact_generation: u64,
+        task_generations: PageMapTaskGenerations,
         failed: bool,
         page_count: Option<usize>,
     ) {
         if let Some(notifier) = self.status_notifier.as_ref() {
+            if !self.is_book_artifact_current(id, task_generations.book_artifact_generation) {
+                return;
+            }
             notifier(PageMapStatus {
                 book_id: id.clone(),
                 source_revision: revision.clone(),
-                task_generation,
-                task_artifact_generation,
+                task_generation: task_generations.generation,
+                task_artifact_generation: task_generations.artifact_generation,
+                task_book_artifact_generation: task_generations.book_artifact_generation,
                 failed,
                 page_count,
             });
@@ -890,8 +985,10 @@ impl PageMapCoordinator {
 
     fn page_map_stale_reason(
         &self,
+        id: &BookId,
         task_generation: u64,
         task_artifact_generation: u64,
+        task_book_artifact_generation: u64,
         source_path: &Path,
         source_revision: &SourceRevision,
     ) -> Option<PageMapStaleReason> {
@@ -900,6 +997,9 @@ impl PageMapCoordinator {
         }
         if self.artifact_generation.load(Ordering::Relaxed) != task_artifact_generation {
             return Some(PageMapStaleReason::ArtifactGenerationChanged);
+        }
+        if !self.is_book_artifact_current(id, task_book_artifact_generation) {
+            return Some(PageMapStaleReason::BookArtifactGenerationChanged);
         }
         if !source_path.exists() {
             return Some(PageMapStaleReason::SourceDeleted);
@@ -932,8 +1032,10 @@ impl PageMapCoordinator {
         request: &PageMapCompleteRequest,
     ) -> Option<PageMapStaleReason> {
         self.page_map_stale_reason(
+            &request.book_id,
             request.task_generation,
             request.task_artifact_generation,
+            request.task_book_artifact_generation,
             &request.source_path,
             &request.source_revision,
         )
@@ -962,6 +1064,10 @@ impl PageMapCoordinator {
         self.log_page_map_stale(&request.book_id, &request.source_path, reason);
         let _ = self.finish_page_map_slow_state(key, PageMapSlowState::Stale);
     }
+
+    fn is_book_artifact_current(&self, id: &BookId, expected: u64) -> bool {
+        current_book_artifact_generation(&self.book_artifact_generations, id) == expected
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -970,6 +1076,7 @@ pub struct PageMapTaskKey {
     pub source_revision: SourceRevision,
     pub task_generation: u64,
     pub task_artifact_generation: u64,
+    pub task_book_artifact_generation: u64,
 }
 
 impl PageMapTaskKey {
@@ -978,12 +1085,14 @@ impl PageMapTaskKey {
         source_revision: SourceRevision,
         task_generation: u64,
         task_artifact_generation: u64,
+        task_book_artifact_generation: u64,
     ) -> Self {
         Self {
             book_id,
             source_revision,
             task_generation,
             task_artifact_generation,
+            task_book_artifact_generation,
         }
     }
 
@@ -993,6 +1102,7 @@ impl PageMapTaskKey {
             request.source_revision.clone(),
             request.task_generation,
             request.task_artifact_generation,
+            request.task_book_artifact_generation,
         )
     }
 }
@@ -1011,6 +1121,7 @@ pub enum PageMapSlowState {
 enum PageMapStaleReason {
     GlobalGenerationChanged,
     ArtifactGenerationChanged,
+    BookArtifactGenerationChanged,
     SourceChanged,
     SourceDeleted,
 }
@@ -1022,6 +1133,7 @@ pub struct PageMapFastPersistRequest {
     pub source_revision: SourceRevision,
     pub task_generation: u64,
     pub task_artifact_generation: u64,
+    pub task_book_artifact_generation: u64,
     pub page_count: u32,
     pub fast_lane_status: ZipPageMapFastStatus,
     pub fast_lane_pages: Vec<PageDescriptor>,
@@ -1041,6 +1153,7 @@ pub struct PageMapReadyPersistRequest {
     pub source_revision: SourceRevision,
     pub task_generation: u64,
     pub task_artifact_generation: u64,
+    pub task_book_artifact_generation: u64,
     pub page_map: BookPageMap,
     pub page_map_cache: Arc<PageMapDiskCache>,
 }
@@ -1052,6 +1165,7 @@ pub struct PageMapCompleteRequest {
     pub source_revision: SourceRevision,
     pub task_generation: u64,
     pub task_artifact_generation: u64,
+    pub task_book_artifact_generation: u64,
     pub page_count: Option<u32>,
     pub reason: Option<ZipPageMapSlowReason>,
     pub page_map_cache: Arc<PageMapDiskCache>,

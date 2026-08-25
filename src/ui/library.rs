@@ -1125,6 +1125,9 @@ impl LibraryState {
     fn apply_page_map_status(&mut self, status: PageMapStatus) {
         if status.task_generation != self.worker.current_generation()
             || status.task_artifact_generation != self.worker.current_artifact_generation()
+            || !self
+                .worker
+                .is_book_artifact_current(&status.book_id, status.task_book_artifact_generation)
         {
             return;
         }
@@ -1997,6 +2000,35 @@ impl LibraryState {
 
     pub fn remove_book(&mut self, id: &BookId) {
         self.book_states.remove(id);
+        self.recompute_group_counts();
+    }
+
+    /// 本固有設定のクリア後に、対象本だけの表示・runtime artifact state を捨てる。
+    pub(crate) fn clear_book_artifact_state(&mut self, id: &BookId) {
+        self.book_states.remove(id);
+        self.prefill_kind_groups();
+        self.static_page_map_counts.remove(id);
+        self.page_map_failure_revisions.remove(id);
+        self.page_map_failure_checked_revisions.remove(id);
+        self.static_page_map_memo_epoch = self.static_page_map_memo_epoch.saturating_add(1);
+        if let Some(display_keys) = self.last_display_set.as_mut() {
+            display_keys.retain(|key| key.book_id != *id);
+        }
+        if self
+            .last_display_stale_retry
+            .as_ref()
+            .is_some_and(|key| key.book_id == *id)
+        {
+            self.last_display_stale_retry = None;
+        }
+        if self
+            .preview
+            .target
+            .as_ref()
+            .is_some_and(|target| target.book_id == *id)
+        {
+            self.invalidate_preview();
+        }
         self.recompute_group_counts();
     }
 
@@ -3635,6 +3667,12 @@ impl LibraryState {
         match msg {
             WorkerMsg::VideoReady(video) => {
                 let id = video.ready.book_id.clone();
+                if !self
+                    .worker
+                    .is_book_artifact_current(&id, video.ready.book_artifact_generation)
+                {
+                    return WorkerPollResult::StaleAndContinue;
+                }
                 let current_state = self.video_states.get(&id);
                 let revision_matches = current_state.is_none_or(|state| {
                     !state.thumb_requested
@@ -3716,6 +3754,12 @@ impl LibraryState {
         resp: crate::infra::worker::thumb_worker::ReadyThumb,
         ctx: &egui::Context,
     ) -> WorkerPollResult {
+        if !self
+            .worker
+            .is_book_artifact_current(&resp.book_id, resp.book_artifact_generation)
+        {
+            return WorkerPollResult::StaleAndContinue;
+        }
         if !self.thumbnail_source_matches_revision(
             &resp.book_id,
             resp.expected_size,
@@ -3775,12 +3819,22 @@ impl LibraryState {
                 book_id,
                 expected_size,
                 expected_modified,
+                book_artifact_generation,
             }
             | WorkerMsg::FailedPermanentWithRevision {
                 book_id,
                 expected_size,
                 expected_modified,
-            } => (book_id, expected_size, expected_modified),
+                book_artifact_generation,
+            } => {
+                if !self
+                    .worker
+                    .is_book_artifact_current(&book_id, book_artifact_generation)
+                {
+                    return WorkerPollResult::StaleAndContinue;
+                }
+                (book_id, expected_size, expected_modified)
+            }
             WorkerMsg::Stale(id) => {
                 // 同じ path/id のファイル差し替え前に開始された古いタスク。
                 // 新しいタスク側で再生成されるため、状態を変更しない。
@@ -3895,6 +3949,7 @@ impl LibraryState {
                             target_width,
                             expected_size: snapshot.size,
                             expected_modified: snapshot.modified,
+                            book_artifact_generation: 0,
                         }));
                     }
                 }
@@ -3922,6 +3977,7 @@ impl LibraryState {
                         expected_size: snapshot.size,
                         expected_modified: snapshot.modified,
                         bypass_cache,
+                        book_artifact_generation: 0,
                     };
                     let cache_hit = !bypass_cache
                         && self.thumb_cache.as_ref().is_some_and(|cache| {
@@ -3993,6 +4049,7 @@ impl LibraryState {
             expected_size,
             expected_modified,
             bypass_cache: should_bypass_cache,
+            book_artifact_generation: 0,
         });
     }
 
@@ -4018,6 +4075,7 @@ impl LibraryState {
             target_width: crate::domain::app_settings::AppSettings::storage_width(),
             expected_size,
             expected_modified,
+            book_artifact_generation: 0,
         });
     }
 
@@ -4191,6 +4249,7 @@ impl LibraryState {
             expected_size,
             expected_modified,
             bypass_cache,
+            book_artifact_generation: 0,
         })
     }
 
