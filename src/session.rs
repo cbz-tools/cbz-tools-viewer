@@ -81,7 +81,8 @@ pub struct SessionState {
 pub enum LeftPaneTab {
     #[default]
     Library,
-    Tree,
+    #[serde(alias = "Tree")]
+    Filter,
     History,
 }
 

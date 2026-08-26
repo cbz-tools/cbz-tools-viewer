@@ -21,6 +21,8 @@
 
 ### Changed
 
+- Integrated the Library, Filter, and History views into the shared sidebar tab organization and Library scroll structure.
+- Changed Tree synchronization to reveal the active directory without auto-scrolling, and simplified folder context menus to one normalized Add to Library or Remove from Library action.
 - Migrated GIF decoding to `zengif` and routed animated GIFs through the shared animation source and streaming paths.
 - Changed Viewer External Tools to queue requests for other books while a tool is running, process them in order, and show the request count on tool buttons.
 - Changed the adjacent-book/SPAD preload gate to require a stable display and use 30% L2 usage or Page Map retention thresholds; once L2 is settled, the full dispatch scope is allowed.

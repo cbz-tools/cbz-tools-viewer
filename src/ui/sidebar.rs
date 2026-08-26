@@ -10,6 +10,7 @@ use crate::{
     infra::cache::disk::DiskCache,
     session::{HistoryEntry, LeftPaneTab, unix_ns_to_system_time},
     ui::thumb_cache::{LoadedDiskThumb, load_disk_thumb_texture},
+    util::path_eq::normalize_path_for_selection,
 };
 
 use super::{
@@ -317,7 +318,7 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
 
     ui.horizontal(|ui| {
         let is_library = *left_pane_tab == LeftPaneTab::Library;
-        let is_tree = *left_pane_tab == LeftPaneTab::Tree;
+        let is_filter = *left_pane_tab == LeftPaneTab::Filter;
         let is_history = *left_pane_tab == LeftPaneTab::History;
         let tab_width =
             ((ui.available_width() - ui.spacing().item_spacing.x * 2.0).max(0.0) / 3.0).max(0.0);
@@ -333,11 +334,11 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         if ui
             .add_sized(
                 egui::vec2(tab_width, 24.0),
-                egui::Button::new("Tree").selected(is_tree),
+                egui::Button::new(tr(language, TextKey::FilterTab)).selected(is_filter),
             )
             .clicked()
         {
-            *left_pane_tab = LeftPaneTab::Tree;
+            *left_pane_tab = LeftPaneTab::Filter;
         }
         if ui
             .add_sized(
@@ -351,10 +352,6 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
     });
 
     ui.separator();
-    if *left_pane_tab == LeftPaneTab::Tree {
-        return folder_tree::show(ui, folder_tree, state.current_dir.as_deref())
-            .map(SidebarAction::NavigateTree);
-    }
     if *left_pane_tab == LeftPaneTab::History {
         let today = Local::now().date_naive();
         let mut last_group: Option<HistoryDateGroup> = None;
@@ -475,25 +472,8 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         return action;
     }
 
-    let add_resp = ui
-        .add_sized(
-            egui::vec2(ui.available_width().min(112.0), 24.0),
-            egui::Button::new(tr(language, TextKey::AddFolder))
-                .fill(egui::Color32::TRANSPARENT)
-                .stroke(quiet_stroke),
-        )
-        .on_hover_text(tr(language, TextKey::AddFolderHint));
-    paint_quiet_hover_border(ui, &add_resp);
-    if add_resp.clicked() {
-        if let Some(dir) = &state.current_dir {
-            if !favorites.contains(dir) {
-                favorites.push(dir.clone());
-            }
-        }
-    }
-
-    ui.separator();
     let mut remove_idx: Option<usize> = None;
+    let mut tree_action = None;
     let favorite_drag_id = ui.id().with("library_favorite_drag");
     let extensions_collapsed_id = ui.id().with("library_extensions_collapsed");
     let groups_collapsed_id = ui.id().with("library_groups_collapsed");
@@ -509,116 +489,151 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         .ctx()
         .data(|data| data.get_temp::<usize>(favorite_drag_id));
     let mut favorite_drop_index: Option<usize> = None;
-    egui::ScrollArea::vertical()
-        .id_salt("library_sidebar_scroll")
-        .show(ui, |ui| {
-            if favorites.is_empty() {
-                ui.label(
-                    egui::RichText::new(tr(language, TextKey::FolderDropHint))
-                        .size(theme::FONT_SIZE_SMALL)
-                        .color(theme::TEXT_SUBTLE),
-                );
-            } else {
-                for (i, path) in favorites.iter().enumerate() {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| path.to_string_lossy().into_owned());
-
-                    let is_current = state.current_dir.as_deref() == Some(path.as_path());
-                    let row_width = ui.available_width().max(0.0);
-                    let resp = ui
-                        .add_sized(
-                            [row_width, SIDEBAR_FAVORITE_ROW_HEIGHT],
-                            egui::Button::new("")
-                                .fill(egui::Color32::TRANSPARENT)
-                                .stroke(quiet_stroke),
-                        )
-                        .on_hover_text(path.to_string_lossy())
-                        .interact(egui::Sense::click_and_drag());
-                    if resp.drag_started() {
-                        favorite_drag_source = Some(i);
-                        ui.ctx()
-                            .data_mut(|data| data.insert_temp(favorite_drag_id, i));
-                    }
-                    paint_sidebar_data_row_state(ui, resp.rect, is_current, resp.hovered());
-
-                    if let (Some(source), Some(pointer_pos)) = (
-                        favorite_drag_source,
-                        ui.ctx().input(|input| input.pointer.interact_pos()),
-                    ) {
-                        if source != i && resp.rect.contains(pointer_pos) {
-                            let insert_before = pointer_pos.y < resp.rect.center().y;
-                            favorite_drop_index = Some(i + usize::from(!insert_before));
-                            let y = if insert_before {
-                                resp.rect.top()
-                            } else {
-                                resp.rect.bottom()
-                            };
-                            ui.painter().line_segment(
-                                [
-                                    egui::pos2(resp.rect.left(), y),
-                                    egui::pos2(resp.rect.right(), y),
-                                ],
-                                egui::Stroke::new(2.0, theme::ACCENT_ACTIVE),
-                            );
-                        }
-                    }
-                    let text_pos = resp.rect.left_center() + egui::vec2(22.0, 0.0);
-                    let icon_rect = egui::Rect::from_min_size(
-                        resp.rect.left_center() + egui::vec2(4.0, -6.0),
-                        egui::vec2(12.0, 12.0),
-                    );
-                    paint_folder_icon(ui, icon_rect, is_current, resp.hovered());
-                    ui.painter().text(
-                        text_pos,
-                        egui::Align2::LEFT_CENTER,
-                        &name,
-                        egui::FontId::proportional(14.0),
-                        ui.visuals().text_color(),
-                    );
-
-                    if resp.clicked() {
-                        action = Some(SidebarAction::OpenFavorite(path.clone()));
-                    }
-
-                    resp.context_menu(|ui| {
-                        ui.label(
-                            egui::RichText::new(path.to_string_lossy())
-                                .size(theme::FONT_SIZE_SMALL)
-                                .color(theme::TEXT_SUBTLE),
-                        );
-                        ui.separator();
-                        if ui
-                            .button(icons::icon_label(
-                                ui,
-                                icons::ICON_FOLDER_OPEN,
-                                15.0,
-                                tr(language, TextKey::OpenInExplorer),
-                            ))
-                            .clicked()
-                        {
-                            action = Some(SidebarAction::OpenInExplorer(path.clone()));
-                            ui.close();
-                        }
-                        ui.separator();
-                        if ui
-                            .button(icons::icon_label(
-                                ui,
-                                icons::ICON_DELETE,
-                                15.0,
-                                tr(language, TextKey::RemoveFromFavorites),
-                            ))
-                            .clicked()
-                        {
-                            remove_idx = Some(i);
-                            ui.close();
-                        }
-                    });
+    if *left_pane_tab == LeftPaneTab::Library {
+        let add_resp = ui
+            .add_sized(
+                egui::vec2(ui.available_width().min(112.0), 24.0),
+                egui::Button::new(tr(language, TextKey::AddFolder))
+                    .fill(egui::Color32::TRANSPARENT)
+                    .stroke(quiet_stroke),
+            )
+            .on_hover_text(tr(language, TextKey::AddFolderHint));
+        paint_quiet_hover_border(ui, &add_resp);
+        if add_resp.clicked() {
+            if let Some(dir) = &state.current_dir {
+                if !favorites.iter().any(|favorite| {
+                    normalize_path_for_selection(favorite) == normalize_path_for_selection(dir)
+                }) {
+                    favorites.push(dir.clone());
                 }
             }
+        }
 
-            ui.separator();
+        ui.separator();
+        if favorites.is_empty() {
+            ui.label(
+                egui::RichText::new(tr(language, TextKey::FolderDropHint))
+                    .size(theme::FONT_SIZE_SMALL)
+                    .color(theme::TEXT_SUBTLE),
+            );
+        } else {
+            for (i, path) in favorites.iter().enumerate() {
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.to_string_lossy().into_owned());
+
+                let is_current = state.current_dir.as_deref() == Some(path.as_path());
+                let row_width = ui.available_width().max(0.0);
+                let resp = ui
+                    .add_sized(
+                        [row_width, SIDEBAR_FAVORITE_ROW_HEIGHT],
+                        egui::Button::new("")
+                            .fill(egui::Color32::TRANSPARENT)
+                            .stroke(quiet_stroke),
+                    )
+                    .on_hover_text(path.to_string_lossy())
+                    .interact(egui::Sense::click_and_drag());
+                if resp.drag_started() {
+                    favorite_drag_source = Some(i);
+                    ui.ctx()
+                        .data_mut(|data| data.insert_temp(favorite_drag_id, i));
+                }
+                paint_sidebar_data_row_state(ui, resp.rect, is_current, resp.hovered());
+
+                if let (Some(source), Some(pointer_pos)) = (
+                    favorite_drag_source,
+                    ui.ctx().input(|input| input.pointer.interact_pos()),
+                ) {
+                    if source != i && resp.rect.contains(pointer_pos) {
+                        let insert_before = pointer_pos.y < resp.rect.center().y;
+                        favorite_drop_index = Some(i + usize::from(!insert_before));
+                        let y = if insert_before {
+                            resp.rect.top()
+                        } else {
+                            resp.rect.bottom()
+                        };
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(resp.rect.left(), y),
+                                egui::pos2(resp.rect.right(), y),
+                            ],
+                            egui::Stroke::new(2.0, theme::ACCENT_ACTIVE),
+                        );
+                    }
+                }
+                let text_pos = resp.rect.left_center() + egui::vec2(22.0, 0.0);
+                let icon_rect = egui::Rect::from_min_size(
+                    resp.rect.left_center() + egui::vec2(4.0, -6.0),
+                    egui::vec2(12.0, 12.0),
+                );
+                paint_folder_icon(ui, icon_rect, is_current, resp.hovered());
+                ui.painter().text(
+                    text_pos,
+                    egui::Align2::LEFT_CENTER,
+                    &name,
+                    egui::FontId::proportional(14.0),
+                    ui.visuals().text_color(),
+                );
+
+                if resp.clicked() {
+                    action = Some(SidebarAction::OpenFavorite(path.clone()));
+                }
+
+                resp.context_menu(|ui| {
+                    ui.label(
+                        egui::RichText::new(path.to_string_lossy())
+                            .size(theme::FONT_SIZE_SMALL)
+                            .color(theme::TEXT_SUBTLE),
+                    );
+                    ui.separator();
+                    if ui
+                        .button(icons::icon_label(
+                            ui,
+                            icons::ICON_FOLDER_OPEN,
+                            15.0,
+                            tr(language, TextKey::OpenInExplorer),
+                        ))
+                        .clicked()
+                    {
+                        action = Some(SidebarAction::OpenInExplorer(path.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui
+                        .button(icons::icon_label(
+                            ui,
+                            icons::ICON_DELETE,
+                            15.0,
+                            tr(language, TextKey::RemoveFromFavorites),
+                        ))
+                        .clicked()
+                    {
+                        remove_idx = Some(i);
+                        ui.close();
+                    }
+                });
+            }
+        }
+
+        ui.separator();
+        folder_tree::show_header(ui, folder_tree, state.current_dir.as_deref());
+        egui::ScrollArea::vertical()
+            .id_salt("library_tree_scroll")
+            .auto_shrink([false, false])
+            .show(ui, |tree_ui| {
+                tree_action = folder_tree::show_rows(
+                    tree_ui,
+                    folder_tree,
+                    state.current_dir.as_deref(),
+                    favorites,
+                    language,
+                );
+            });
+    } else {
+        egui::ScrollArea::vertical()
+            .id_salt("filter_sidebar_scroll")
+            .show(ui, |ui| {
 
             let favorite_count = state.favorite_count();
             let is_favorites_selected = state.filter.scope == LibraryScope::Favorites;
@@ -865,7 +880,8 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                     }
                 }
             }
-        });
+            });
+    }
 
     if !ui
         .ctx()
@@ -894,6 +910,12 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
             favorites = ?favorites.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
             "sidebar: favorite removed"
         );
+    }
+
+    if let Some(tree_action) = tree_action {
+        action = Some(match tree_action {
+            folder_tree::FolderTreeAction::Navigate(path) => SidebarAction::NavigateTree(path),
+        });
     }
 
     action

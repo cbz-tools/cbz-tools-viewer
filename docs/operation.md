@@ -77,10 +77,10 @@ The configured destinations are available from the shared filename-token menu in
 
 ### Library left pane
 
-The Library left pane has three tabs: `Library`, `Tree`, and `History`.
+The Library left pane has three tabs: `Library`, `Filter`, and `History`.
 
-* `Library` navigates to registered Library folders and provides the existing library functions, including favorites, filters, and groups.
-* `Tree` shows real directories only. Hidden directories are omitted. Click `▶` / `▼` to expand or collapse a directory, or click a folder name to navigate there. Directory levels are loaded as needed, and the Tree follows changes to the current Library path.
+* `Library` contains the registered Library-folder list and the Directories Tree. Use `Add Folder` to register folders and manage them from the list. The Tree scrolls independently; `Add Folder`, the registered-folder list, the `Directories` header, and `Reload` remain fixed. It shows real directories only; hidden directories are omitted. Click `▶` / `▼` to expand or collapse a directory, or click a folder name to navigate there. Directory levels are loaded as needed. The Tree follows the shared current Library path through normal navigation, expands needed ancestors, and brings the current directory into view when the path changes.
+* `Filter` contains the existing Favorites, Reading status, Extensions, and Groups controls.
 * `History` provides the existing reading history.
 
 The left pane can be shown or hidden. It consumes part of the Library grid width; drag its divider to resize it. Visibility and width are restored with the session. Double-click the divider to reset the width to its default.

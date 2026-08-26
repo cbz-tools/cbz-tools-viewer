@@ -14,9 +14,12 @@ use std::{
 use eframe::egui;
 
 use crate::{
+    domain::app_settings::UiLanguage,
     ui::{library::compare_name_natural, theme},
     util::path_eq::normalize_path_for_selection,
 };
+
+use super::i18n::{TextKey, tr};
 
 const MAX_RENDER_DEPTH: usize = 64;
 const PENDING_REPAINT_INTERVAL: Duration = Duration::from_millis(150);
@@ -58,6 +61,7 @@ pub struct FolderTreeState {
     last_observed_current_key: Option<String>,
     /// One-shot request kept until the active row has actually been rendered.
     scroll_to_active: bool,
+    last_observed_current_root: Option<PathBuf>,
     pending: HashMap<PathBuf, PendingScan>,
     /// A clicked row waits for its background directory scan to succeed before
     /// the app is allowed to change LibraryState.current_dir.
@@ -65,6 +69,10 @@ pub struct FolderTreeState {
     navigation_ready: Option<PathBuf>,
     result_tx: Sender<ScanResult>,
     result_rx: Receiver<ScanResult>,
+}
+
+pub enum FolderTreeAction {
+    Navigate(PathBuf),
 }
 
 impl Default for FolderTreeState {
@@ -80,6 +88,7 @@ impl Default for FolderTreeState {
             user_collapsed: HashSet::new(),
             last_observed_current_key: None,
             scroll_to_active: false,
+            last_observed_current_root: None,
             pending: HashMap::new(),
             pending_navigation: None,
             navigation_ready: None,
@@ -117,6 +126,7 @@ impl FolderTreeState {
         self.user_collapsed.clear();
         self.last_observed_current_key = None;
         self.scroll_to_active = false;
+        self.last_observed_current_root = None;
         self.pending_navigation = None;
         self.navigation_ready = None;
         self.initialized = false;
@@ -228,15 +238,27 @@ impl FolderTreeState {
             self.last_observed_current_key = Some(current_key);
             self.scroll_to_active = true;
         }
-        let chain = ancestor_chain(current_dir);
-        let Some(root) = self
+        let Some(current_root) = self
             .roots
             .iter()
             .find(|root| path_is_within_root(current_dir, root))
+            .cloned()
         else {
             return;
         };
-        let Some(root_index) = chain.iter().position(|path| paths_match(path, root)) else {
+        if self
+            .last_observed_current_root
+            .as_deref()
+            .is_some_and(|previous_root| !paths_match(previous_root, &current_root))
+        {
+            self.collapse_non_current_root_state(&current_root);
+        }
+        self.last_observed_current_root = Some(current_root.clone());
+        let chain = ancestor_chain(current_dir);
+        let Some(root_index) = chain
+            .iter()
+            .position(|path| paths_match(path, &current_root))
+        else {
             return;
         };
         let chain = &chain[root_index..];
@@ -262,6 +284,17 @@ impl FolderTreeState {
         } else {
             self.expanded.remove(current);
         }
+    }
+
+    fn collapse_non_current_root_state(&mut self, current_root: &Path) {
+        let roots = self.roots.clone();
+        let non_current_root = |path: &Path| {
+            roots
+                .iter()
+                .any(|root| !paths_match(root, current_root) && path_is_within_root(path, root))
+        };
+        self.expanded.retain(|path| !non_current_root(path));
+        self.user_expanded.retain(|path| !non_current_root(path));
     }
 
     fn ensure_scan(&mut self, path: PathBuf) {
@@ -325,16 +358,58 @@ impl FolderTreeState {
     }
 }
 
-/// Draws the Tree tab and returns a directory navigation request when a label is clicked.
-pub fn show(
+/// Draws the tree rows directly into a caller-owned vertical scroll area.
+///
+/// The Library uses this to keep Add Folder, registered folders, and the tree on
+/// one natural vertical scroll path.
+#[allow(dead_code)]
+pub fn show_in_scroll(
     ui: &mut egui::Ui,
     state: &mut FolderTreeState,
     current_dir: Option<&Path>,
-) -> Option<PathBuf> {
+    favorites: &mut Vec<PathBuf>,
+    language: UiLanguage,
+) -> Option<FolderTreeAction> {
+    show_header(ui, state, current_dir);
+    show_rows(ui, state, current_dir, favorites, language)
+}
+
+/// Prepares the tree and draws its fixed header. Call `show_rows` from the
+/// dedicated Tree scroll area afterward.
+pub fn show_header(ui: &mut egui::Ui, state: &mut FolderTreeState, current_dir: Option<&Path>) {
+    prepare(state, current_dir);
+    show_header_controls(ui, state, current_dir);
+}
+
+/// Draws only the tree rows into a caller-owned vertical scroll area.
+pub fn show_rows(
+    ui: &mut egui::Ui,
+    state: &mut FolderTreeState,
+    current_dir: Option<&Path>,
+    favorites: &mut Vec<PathBuf>,
+    language: UiLanguage,
+) -> Option<FolderTreeAction> {
+    let active_normalized = current_dir.map(normalize_path_for_selection);
+    let mut roots = state.roots.clone();
+    roots.sort_by(|left, right| compare_paths(left, right));
+    for root in roots {
+        show_node(ui, state, &root, &active_normalized, 0, favorites, language);
+    }
+
+    finish(ui, state)
+}
+
+fn prepare(state: &mut FolderTreeState, current_dir: Option<&Path>) {
     state.initialize_if_needed();
     state.drain_results();
     state.sync_current_dir(current_dir);
+}
 
+fn show_header_controls(
+    ui: &mut egui::Ui,
+    state: &mut FolderTreeState,
+    current_dir: Option<&Path>,
+) {
     ui.horizontal(|ui| {
         ui.label(egui::RichText::new("Directories").color(theme::TEXT_SUBTLE));
         if ui
@@ -346,32 +421,16 @@ pub fn show(
         }
     });
     ui.separator();
+}
 
-    let active_normalized = current_dir.map(normalize_path_for_selection);
-    let mut roots = state.roots.clone();
-    roots.sort_by(|left, right| compare_paths(left, right));
-
-    // Allocate the remaining body explicitly so the non-floating scrollbar reserves
-    // space inside this clipped rectangle rather than overpainting tree rows.
-    let body_rect = ui.available_rect_before_wrap();
-    let parent_clip = ui.clip_rect();
-    let (_, body_rect) = ui.allocate_space(body_rect.size());
-    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect));
-    body_ui.set_clip_rect(parent_clip.intersect(body_rect));
-    body_ui.style_mut().spacing.scroll.floating = false;
-    egui::ScrollArea::vertical()
-        .id_salt("folder_tree_scroll")
-        .auto_shrink([false, false])
-        .show(&mut body_ui, |tree_ui| {
-            for root in roots {
-                show_node(tree_ui, state, &root, &active_normalized, 0);
-            }
-        });
-
+fn finish(ui: &mut egui::Ui, state: &mut FolderTreeState) -> Option<FolderTreeAction> {
     if !state.pending.is_empty() {
         ui.ctx().request_repaint_after(PENDING_REPAINT_INTERVAL);
     }
-    state.navigation_ready.take()
+    state
+        .navigation_ready
+        .take()
+        .map(FolderTreeAction::Navigate)
 }
 
 fn show_node(
@@ -380,6 +439,8 @@ fn show_node(
     path: &Path,
     active_normalized: &Option<String>,
     depth: usize,
+    favorites: &mut Vec<PathBuf>,
+    language: UiLanguage,
 ) {
     if depth > MAX_RENDER_DEPTH {
         return;
@@ -407,6 +468,7 @@ fn show_node(
     );
     let arrow = if expanded { "▼" } else { "▶" };
     let content_start_x = arrow_rect.max.x + TREE_CONTENT_PADDING;
+    let registered = favorites.iter().any(|favorite| paths_match(favorite, path));
     let status_width = if node.loading || node.error.is_some() {
         20.0
     } else {
@@ -427,7 +489,7 @@ fn show_node(
         )
         .on_hover_text(path.to_string_lossy());
     if is_active && state.scroll_to_active {
-        label_response.scroll_to_me(Some(egui::Align::Center));
+        label_response.scroll_to_me(None);
         state.scroll_to_active = false;
     }
     paint_tree_row_state(ui, label_rect, is_active, label_response.hovered());
@@ -449,8 +511,47 @@ fn show_node(
             state.user_collapsed.remove(path);
             state.ensure_scan(path.to_path_buf());
         }
-    } else if label_response.clicked() {
+    } else if label_response.clicked_by(egui::PointerButton::Primary) {
         state.request_navigation(path.to_path_buf());
+    }
+    if label_response.secondary_clicked() {
+        state.pending_navigation = None;
+        state.navigation_ready = None;
+    }
+
+    label_response.clone().context_menu(|menu_ui| {
+        let registration_key = if registered {
+            TextKey::RemoveTreeFolderFromLibrary
+        } else {
+            TextKey::AddTreeFolderToLibrary
+        };
+        if menu_ui.button(tr(language, registration_key)).clicked() {
+            if registered {
+                let path_key = normalize_path_for_selection(path);
+                favorites.retain(|favorite| normalize_path_for_selection(favorite) != path_key);
+            } else if !favorites.iter().any(|favorite| paths_match(favorite, path)) {
+                favorites.push(path.to_path_buf());
+            }
+            state.pending_navigation = None;
+            state.navigation_ready = None;
+            ui.ctx().request_repaint();
+            menu_ui.close();
+        }
+    });
+
+    if registered {
+        let marker_rect = egui::Rect::from_center_size(
+            egui::pos2(row_rect.max.x - status_width - 5.0, row_rect.center().y),
+            egui::vec2(10.0, theme::CONTROL_HEIGHT),
+        );
+        let marker_response = ui.interact(
+            marker_rect,
+            ui.id().with(("folder_tree_registered", path)),
+            egui::Sense::hover(),
+        );
+        ui.painter()
+            .circle_filled(marker_rect.center(), 2.5, theme::TEXT_SUBTLE);
+        marker_response.on_hover_text(tr(language, TextKey::TreeFolderRegistered));
     }
 
     let text_rect = egui::Rect::from_min_max(
@@ -459,9 +560,7 @@ fn show_node(
             row_rect.min.y,
         ),
         egui::pos2(
-            label_rect
-                .max
-                .x
+            (label_rect.max.x - if registered { 10.0 } else { 0.0 })
                 .max(label_rect.min.x + TREE_ACTIVE_BAR_WIDTH + TREE_LABEL_GAP),
             row_rect.max.y,
         ),
@@ -497,7 +596,15 @@ fn show_node(
 
     if expanded && node.loaded {
         for child in node.children {
-            show_node(ui, state, &child, active_normalized, depth + 1);
+            show_node(
+                ui,
+                state,
+                &child,
+                active_normalized,
+                depth + 1,
+                favorites,
+                language,
+            );
         }
     }
 }
