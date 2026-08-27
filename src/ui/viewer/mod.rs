@@ -1178,6 +1178,7 @@ pub fn show(
                 language,
                 filter_token_enabled,
                 web_searches,
+                false,
             );
             let filter_token = token_menu.filter_token;
             let clear_filter = token_menu.clear_filter;

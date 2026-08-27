@@ -38,6 +38,7 @@ pub(crate) fn show_filename_token_menu_frame(
     language: UiLanguage,
     filter_enabled: bool,
     web_searches: &[WebSearchMenuItem],
+    library_menu: bool,
 ) -> FilenameTokenMenuResult {
     let filename = entry
         .path
@@ -110,7 +111,12 @@ pub(crate) fn show_filename_token_menu_frame(
     let selected_text = &selectable_tokens[selected_idx].text;
     let can_apply = !selected_text.trim().is_empty();
     let filter_enabled = filter_enabled && can_apply;
-    let filter_label = tr(language, TextKey::FilterToken).replacen("{}", selected_text, 1);
+    let filter_key = if library_menu {
+        TextKey::FilterTokenCompact
+    } else {
+        TextKey::FilterToken
+    };
+    let filter_label = tr(language, filter_key).replacen("{}", selected_text, 1);
     let filter_row = ContextMenuRowSpec {
         label: &filter_label,
         shortcut: "",
@@ -134,7 +140,12 @@ pub(crate) fn show_filename_token_menu_frame(
         };
     }
 
-    let copy_label = tr(language, TextKey::CopyToken).replacen("{}", selected_text, 1);
+    let copy_key = if library_menu {
+        TextKey::CopyTokenCompact
+    } else {
+        TextKey::CopyToken
+    };
+    let copy_label = tr(language, copy_key).replacen("{}", selected_text, 1);
     let copy_row = ContextMenuRowSpec {
         label: &copy_label,
         shortcut: "",
@@ -155,8 +166,12 @@ pub(crate) fn show_filename_token_menu_frame(
 
     if !web_searches.is_empty() {
         let mut web_search = None;
-        let web_search_label =
-            tr(language, TextKey::WebSearchToken).replacen("{}", selected_text, 1);
+        let web_search_key = if library_menu {
+            TextKey::WebSearchTokenCompact
+        } else {
+            TextKey::WebSearchToken
+        };
+        let web_search_label = tr(language, web_search_key).replacen("{}", selected_text, 1);
         draw_context_menu_submenu_button(ui, &web_search_label, |ui| {
             ui.set_min_width(200.0);
             ui.set_max_width(200.0);
@@ -188,6 +203,10 @@ pub(crate) fn show_filename_token_menu_frame(
                 rendered: true,
             };
         }
+    }
+
+    if library_menu {
+        ui.separator();
     }
 
     let clear_filter_row = ContextMenuRowSpec {

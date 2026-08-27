@@ -1435,6 +1435,7 @@ fn render_context_menu_header(
                 context.language,
                 true,
                 context.web_searches,
+                true,
             );
             menu_actions.filter_token = token_menu.filter_token;
             menu_actions.clear_filter = token_menu.clear_filter;
