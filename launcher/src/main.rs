@@ -5,6 +5,7 @@ use std::{
     ffi::OsStr,
     fs::{self, File},
     io::{self, Write},
+    os::windows::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -19,6 +20,8 @@ include!(concat!(env!("OUT_DIR"), "/embedded_assets.rs"));
 const APP_ID: &str = "cbz-viewer";
 #[cfg(windows)]
 const RUNTIME_SUBDIRECTORY: &str = "runtime";
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 #[cfg(windows)]
 const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
 #[cfg(windows)]
@@ -37,6 +40,7 @@ fn main() {
 #[cfg(windows)]
 fn run() -> anyhow_free::Result<i32> {
     let runtime_dir = ensure_runtime()?;
+    cleanup_old_runtime_directories(&runtime_dir);
     let core_path = runtime_dir.join("cbz-viewer-core.exe");
     Command::new(core_path)
         .args(std::env::args_os().skip(1))
@@ -45,6 +49,75 @@ fn run() -> anyhow_free::Result<i32> {
             anyhow_free::Error::new(format!("failed to start core executable: {error}"))
         })?;
     Ok(0)
+}
+
+#[cfg(windows)]
+fn cleanup_old_runtime_directories(current_runtime_dir: &Path) {
+    let Some(runtime_root) = current_runtime_dir.parent() else {
+        return;
+    };
+    let Some(current_version) = parse_release_version(env!("CARGO_PKG_VERSION")) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(runtime_root) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_dir()
+            || metadata.is_symlink()
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        {
+            continue;
+        }
+
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(version) = parse_release_version(name) else {
+            continue;
+        };
+        if version < current_version {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn parse_release_version(name: &str) -> Option<(u64, u64, u64)> {
+    let components: Vec<_> = name.split('.').collect();
+    if components.len() != 3 {
+        return None;
+    }
+
+    let [major, minor, patch] = components.as_slice() else {
+        return None;
+    };
+    Some((
+        parse_release_component(major)?,
+        parse_release_component(minor)?,
+        parse_release_component(patch)?,
+    ))
+}
+
+#[cfg(windows)]
+fn parse_release_component(component: &str) -> Option<u64> {
+    if component == "0" {
+        return Some(0);
+    }
+
+    if component.is_empty()
+        || component.starts_with('0')
+        || !component.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+
+    component.parse().ok()
 }
 
 #[cfg(not(windows))]
