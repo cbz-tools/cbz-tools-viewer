@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.4] - 2026-08-29
+
+### Fixed
+
+- Aligned the Viewer filename-token context menu with Library's compact labels and separator before Clear Filter.
+
 ## [0.5.3] - 2026-08-27
 
 ### Changed

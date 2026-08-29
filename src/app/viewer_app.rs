@@ -1671,10 +1671,15 @@ impl ViewerApp {
         let delete_label = tr(language, TextKey::Delete);
         let delete_and_next_label = tr(language, TextKey::DeleteAndNextBook);
         let cancel_label = tr(language, TextKey::Cancel);
+        let window_id = egui::Id::new((
+            "viewer_delete_dialog",
+            BookId::from_path(self.state.entry().path.as_ref()),
+        ));
         let mut open = true;
         let mut confirmed = false;
         let mut cancelled = false;
         egui::Window::new(title)
+            .id(window_id)
             .open(&mut open)
             .resizable(false)
             .collapsible(false)
