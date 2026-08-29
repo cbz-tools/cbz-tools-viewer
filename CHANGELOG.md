@@ -8,6 +8,10 @@ All notable changes to **CBZ Viewer** are documented in this file.
 
 - Aligned the Viewer filename-token context menu with Library's compact labels and separator before Clear Filter.
 
+### Changed
+
+- Changed standard L1/L2 cache calculation from 1/8 to 1/16 of available memory.
+
 ## [0.5.3] - 2026-08-27
 
 ### Changed

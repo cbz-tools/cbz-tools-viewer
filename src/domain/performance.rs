@@ -154,7 +154,7 @@ impl PerformanceResources {
                 floor_to_power_of_two_candidate(
                     PERFORMANCE_CACHE_MIN_MIB,
                     self.l1_normal_upper_mib(),
-                    cap_mib(mib / 8).max(PERFORMANCE_CACHE_MIN_MIB),
+                    cap_mib(mib / 16).max(PERFORMANCE_CACHE_MIN_MIB),
                 )
             })
             .unwrap_or(PERFORMANCE_CACHE_MIN_MIB)
@@ -164,7 +164,7 @@ impl PerformanceResources {
         floor_to_power_of_two_candidate(
             PERFORMANCE_CACHE_MIN_MIB,
             self.l2_normal_upper_mib(),
-            cap_mib(self.physical_ram_mib() / 8).max(PERFORMANCE_CACHE_MIN_MIB),
+            cap_mib(self.physical_ram_mib() / 16).max(PERFORMANCE_CACHE_MIN_MIB),
         )
     }
 
