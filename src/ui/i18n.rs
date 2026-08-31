@@ -110,7 +110,6 @@ pub enum TextKey {
     ExternalToolPathNote,
     Example,
     Optimizer,
-    SampleExternalTool,
     StartModeLabel,
     BackgroundMode,
     NormalMode,
@@ -527,11 +526,10 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::Count => "count",
         TextKey::ExternalToolLabel => "Tool",
         TextKey::ExternalToolPathNote => {
-            "{path} is replaced with the full path of the target book."
+            "{path}      Full path of the target book\n{name_ext}  File name + extension\n{name}      File name without extension\n\nExample: D:\\Books\\Title Vol. 01.cbz\n{path}      → D:\\Books\\Title Vol. 01.cbz\n{name_ext}  → Title Vol. 01.cbz\n{name}      → Title Vol. 01"
         }
         TextKey::Example => "Example",
         TextKey::Optimizer => "Optimizer",
-        TextKey::SampleExternalTool => "Sample external tool",
         TextKey::StartModeLabel => "Start mode",
         TextKey::BackgroundMode => "Background",
         TextKey::NormalMode => "Normal",
@@ -819,10 +817,11 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::MiB => Some("MiB"),
         TextKey::Count => Some("個"),
         TextKey::ExternalToolLabel => Some("ツール"),
-        TextKey::ExternalToolPathNote => Some("{path} は対象の本のフルパスに置換されます。"),
+        TextKey::ExternalToolPathNote => Some(
+            "{path}      対象の本のフルパス\n{name_ext}  ファイル名 + 拡張子\n{name}      ファイル名（拡張子なし）\n\n例: D:\\Books\\作品名 第01巻.cbz\n{path}      → D:\\Books\\作品名 第01巻.cbz\n{name_ext}  → 作品名 第01巻.cbz\n{name}      → 作品名 第01巻",
+        ),
         TextKey::Example => Some("例"),
         TextKey::Optimizer => Some("Optimizer"),
-        TextKey::SampleExternalTool => Some("サンプル外部ツール"),
         TextKey::StartModeLabel => Some("起動方式"),
         TextKey::BackgroundMode => Some("バックグラウンド"),
         TextKey::NormalMode => Some("通常"),

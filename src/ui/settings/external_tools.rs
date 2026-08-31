@@ -47,7 +47,6 @@ pub(super) fn show_external_tools_tab(
     }
 
     subtle_text(ui, tr(language, TextKey::ExternalToolPathNote));
-    subtle_text(ui, tr(language, TextKey::SampleExternalTool));
 }
 
 fn tool_editor(
@@ -130,10 +129,8 @@ fn tool_editor(
         ui.label(tr(language, TextKey::ArgumentsLabel));
         ui.add_sized(
             [420.0, 24.0],
-            egui::TextEdit::singleline(&mut tool.args).hint_text(format!(
-                "{}: --json \"{{path}}\"",
-                tr(language, TextKey::Example)
-            )),
+            egui::TextEdit::singleline(&mut tool.args)
+                .hint_text(format!("{}: \"{{path}}\"", tr(language, TextKey::Example))),
         );
     });
 }

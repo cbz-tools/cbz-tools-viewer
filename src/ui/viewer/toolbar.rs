@@ -439,12 +439,6 @@ pub(super) fn render_viewer_toolbar(
         if !external_tools.is_empty() {
             ui.separator();
             let all_disabled = interaction_blocked;
-            if let ExternalToolToolbarState::Running {
-                tool_index, path, ..
-            } = external_tool_state
-            {
-                let _ = (tool_index, path);
-            }
             for tool in external_tools {
                 let active_count = external_tool_active_counts
                     .get(tool.tool_index)
@@ -466,7 +460,10 @@ pub(super) fn render_viewer_toolbar(
                         {
                             theme::ExternalToolButtonState::Failed
                         }
-                        ExternalToolToolbarState::Running { .. } => {
+                        ExternalToolToolbarState::Running { tool_index, path }
+                            if *tool_index == tool.tool_index
+                                && path.as_path() == current_book_path =>
+                        {
                             theme::ExternalToolButtonState::Running
                         }
                         _ => theme::ExternalToolButtonState::Idle,

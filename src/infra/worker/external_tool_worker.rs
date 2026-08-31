@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
@@ -331,17 +331,46 @@ fn build_args_from_template(args: &str, target_paths: &[PathBuf]) -> Result<Vec<
     let parsed = split_args_safely(args)?;
     let mut out = Vec::with_capacity(parsed.len() + target_paths.len());
     for token in parsed {
-        if token == "{path}" || token == "{paths}" {
-            for path in target_paths {
-                out.push(path.to_string_lossy().into_owned());
+        match token.as_str() {
+            "{path}" | "{paths}" => out.extend(
+                target_paths
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned()),
+            ),
+            "{names_ext}" | "{name_ext}" => {
+                out.extend(target_paths.iter().map(|path| path_file_name_lossy(path)))
             }
-        } else {
-            let replaced_path = token.replace("{path}", &first.to_string_lossy());
-            let replaced = replaced_path.replace("{paths}", &first.to_string_lossy());
-            out.push(replaced);
+            "{names}" | "{name}" => {
+                out.extend(target_paths.iter().map(|path| path_file_stem_lossy(path)))
+            }
+            _ => {
+                let first_path = first.to_string_lossy();
+                let first_name_ext = path_file_name_lossy(first);
+                let first_name = path_file_stem_lossy(first);
+                let replaced = token
+                    .replace("{path}", &first_path)
+                    .replace("{paths}", &first_path)
+                    .replace("{name_ext}", &first_name_ext)
+                    .replace("{names_ext}", &first_name_ext)
+                    .replace("{name}", &first_name)
+                    .replace("{names}", &first_name);
+                out.push(replaced);
+            }
         }
     }
     Ok(out)
+}
+
+fn path_file_name_lossy(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn path_file_stem_lossy(path: &Path) -> String {
+    path.file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 pub fn split_args_safely(input: &str) -> Result<Vec<String>, String> {

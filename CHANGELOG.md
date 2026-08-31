@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.5] - 2026-08-31
+
+### Added
+
+- Added file-name placeholders for External Tool arguments and clarified the placeholder guidance in Settings.
+
 ## [0.5.4] - 2026-08-29
 
 ### Fixed
