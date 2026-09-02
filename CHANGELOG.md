@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.6] - 2026-09-02
+
+### Changed
+
+- Changed the Library left-pane toggle to visually indicate its active/open state.
+
 ## [0.5.5] - 2026-08-31
 
 ### Added

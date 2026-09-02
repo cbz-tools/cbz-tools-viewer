@@ -37,6 +37,7 @@ pub(crate) fn show_filename_token_menu_frame(
     popup_keys: PopupKeyInput,
     language: UiLanguage,
     filter_enabled: bool,
+    show_clear_filter: bool,
     web_searches: &[WebSearchMenuItem],
     library_menu: bool,
 ) -> FilenameTokenMenuResult {
@@ -205,27 +206,26 @@ pub(crate) fn show_filename_token_menu_frame(
         }
     }
 
-    if library_menu {
+    if show_clear_filter {
         ui.separator();
-    }
-
-    let clear_filter_row = ContextMenuRowSpec {
-        label: tr(language, TextKey::ClearFilter),
-        shortcut: "",
-        enabled: true,
-        label_color: theme::TEXT_MAIN,
-        shortcut_color: theme::TEXT_SUBTLE,
-        icon_color: theme::TEXT_MAIN,
-        icon: None,
-    };
-    if draw_context_menu_row(ui, &clear_filter_row) {
-        ui.close();
-        return FilenameTokenMenuResult {
-            filter_token: None,
-            clear_filter: true,
-            web_search: None,
-            rendered: true,
+        let clear_filter_row = ContextMenuRowSpec {
+            label: tr(language, TextKey::ClearFilter),
+            shortcut: "",
+            enabled: true,
+            label_color: theme::TEXT_MAIN,
+            shortcut_color: theme::TEXT_SUBTLE,
+            icon_color: theme::TEXT_MAIN,
+            icon: None,
         };
+        if draw_context_menu_row(ui, &clear_filter_row) {
+            ui.close();
+            return FilenameTokenMenuResult {
+                filter_token: None,
+                clear_filter: true,
+                web_search: None,
+                rendered: true,
+            };
+        }
     }
 
     ui.ctx().data_mut(|data| {

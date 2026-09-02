@@ -16,7 +16,7 @@ use self::library_ops::PendingAfterLoad;
 use self::platform::{normalize_dir_path, sanitize_favorite_dirs};
 use self::ui_helpers::{DialogButtonSpec, calc_cache_size_mb, dialog_button_row, setup_style};
 use self::viewer_ops::{
-    ApplyFilterTokenResult, FavoriteToggleResult, LibraryNavSnapshot,
+    ApplyFilterTokenResult, FavoriteToggleResult, FilterStateResult, LibraryNavSnapshot,
     RebuildSelectedImagesAsCbzAndNextResult, ViewerSyncEvent,
 };
 use crate::LaunchOptions;
@@ -1115,6 +1115,21 @@ impl App {
                         );
                     }
                 }
+                ViewerSyncEvent::RequestFilterState {
+                    request_id,
+                    response_tx,
+                } => {
+                    let active = !self.library.filter.keyword().is_empty();
+                    if response_tx
+                        .send(FilterStateResult::Success(active))
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            request_id,
+                            "viewer.ipc.filter_state.response_channel_closed"
+                        );
+                    }
+                }
                 ViewerSyncEvent::RebuildSelectedImagesAsCbzAndNext {
                     request_id,
                     book_id,
@@ -1491,6 +1506,7 @@ impl App {
                 topbar::show(
                     ui,
                     &mut self.library,
+                    self.left_pane_visible,
                     ui_language,
                     &mut self.app_settings.viewer_open_mode,
                     self.suppress_next_dropped_files,

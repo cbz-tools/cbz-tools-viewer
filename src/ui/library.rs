@@ -4634,6 +4634,7 @@ pub fn show(
             web_searches,
             external_tool_busy,
             language,
+            show_clear_filter: !state.filter.keyword().is_empty(),
         },
         virtual_grid::GridViewConfig {
             restore_scroll,

@@ -4,6 +4,9 @@ use chrono::{Datelike, NaiveDate};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TextKey {
     Settings,
+    PreferencesMenu,
+    LanguageMenu,
+    AboutMenu,
     Library,
     ViewerTab,
     Display,
@@ -273,6 +276,9 @@ pub fn format_page_count_label(
 fn english_text(key: TextKey) -> &'static str {
     let text = match key {
         TextKey::Settings => "Settings",
+        TextKey::PreferencesMenu => "Preferences...",
+        TextKey::LanguageMenu => "Language: EN ⇔ JP",
+        TextKey::AboutMenu => "About CBZ Viewer...",
         TextKey::Library => "Library",
         TextKey::LibraryTab => "Library",
         TextKey::FilterTab => "Filter",
@@ -559,6 +565,9 @@ fn english_text(key: TextKey) -> &'static str {
 fn japanese_text(key: TextKey) -> Option<&'static str> {
     match key {
         TextKey::Settings => Some("設定"),
+        TextKey::PreferencesMenu => Some("設定..."),
+        TextKey::LanguageMenu => Some("言語: EN ⇔ JP"),
+        TextKey::AboutMenu => Some("CBZ Viewer について..."),
         TextKey::Library => Some("ライブラリ"),
         TextKey::LibraryTab => Some("ライブラリ"),
         TextKey::FilterTab => Some("フィルター"),

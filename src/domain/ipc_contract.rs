@@ -25,6 +25,9 @@ pub enum ViewerToLibrary {
     ClearFilter {
         request_id: u64,
     },
+    RequestFilterState {
+        request_id: u64,
+    },
     RequestAdjacentBooks {
         request_id: u64,
         kind: AdjacentBooksKind,
@@ -108,6 +111,10 @@ pub enum LibraryToViewer {
     },
     ClearFilterAck {
         request_id: u64,
+    },
+    FilterStateResponse {
+        request_id: u64,
+        active: bool,
     },
     Deleted {
         request_id: u64,

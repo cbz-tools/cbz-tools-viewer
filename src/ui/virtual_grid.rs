@@ -153,6 +153,7 @@ pub struct GridViewContext<'a> {
     pub web_searches: &'a [WebSearchMenuItem],
     pub external_tool_busy: bool,
     pub language: UiLanguage,
+    pub show_clear_filter: bool,
 }
 
 pub struct GridViewConfig {
@@ -220,6 +221,7 @@ struct ThumbCellMenuRenderState<'a> {
     show_context_header: bool,
     context_header: &'a str,
     show_token_menu_frame: bool,
+    show_clear_filter: bool,
     can_toggle_favorite: bool,
     book_target_count: usize,
     book_settings_target_count: usize,
@@ -259,6 +261,7 @@ pub fn show_grid(
         web_searches,
         external_tool_busy,
         language,
+        show_clear_filter,
     } = context;
     let GridViewConfig {
         restore_scroll,
@@ -312,6 +315,7 @@ pub fn show_grid(
         selected_set,
         interaction_enabled,
         language,
+        show_clear_filter,
     };
 
     let scroll_out = ui
@@ -425,6 +429,7 @@ pub fn show_grid(
                                             show_context_header: menu_state.show_context_header,
                                             context_header: &menu_state.context_header,
                                             show_token_menu_frame: menu_state.show_token_menu_frame,
+                                            show_clear_filter: menu_state.show_clear_filter,
                                             can_toggle_favorite,
                                             book_target_count: menu_state.book_target_count,
                                             book_settings_target_count: menu_state
@@ -628,6 +633,7 @@ struct CellMenuState {
     rename_enabled: bool,
     can_start_external_drag: bool,
     show_token_menu_frame: bool,
+    show_clear_filter: bool,
     is_multi_selection: bool,
     show_open_menu_item: bool,
     show_rename_menu_item: bool,
@@ -643,6 +649,7 @@ struct CellMenuContext<'a> {
     selected_set: &'a HashSet<usize>,
     interaction_enabled: bool,
     language: UiLanguage,
+    show_clear_filter: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -711,6 +718,7 @@ struct ContextMenuRenderContext<'a> {
     popup_keys: PopupKeyInput,
     resolve_open_action: &'a dyn Fn(usize) -> LibraryAction,
     web_searches: &'a [WebSearchMenuItem],
+    show_clear_filter: bool,
 }
 
 struct OpenSectionState {
@@ -798,6 +806,7 @@ fn build_cell_menu_state(
         rename_enabled,
         can_start_external_drag,
         show_token_menu_frame,
+        show_clear_filter: context.show_clear_filter,
         is_multi_selection,
         show_open_menu_item: !is_multi_selection,
         show_rename_menu_item: !is_multi_selection && is_archive,
@@ -1191,6 +1200,7 @@ fn draw_thumb_cell(
             popup_keys: cell.popup_keys,
             resolve_open_action: cell.resolve_open_action,
             web_searches: menu.web_searches,
+            show_clear_filter: menu.show_clear_filter,
         };
         Popup::context_menu(&resp)
             .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
@@ -1434,6 +1444,7 @@ fn render_context_menu_header(
                 context.popup_keys,
                 context.language,
                 true,
+                context.show_clear_filter,
                 context.web_searches,
                 true,
             );

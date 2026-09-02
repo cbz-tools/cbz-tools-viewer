@@ -84,6 +84,10 @@ pub(super) enum ViewerSyncEvent {
         request_id: u64,
         response_tx: mpsc::Sender<ApplyFilterTokenResult>,
     },
+    RequestFilterState {
+        request_id: u64,
+        response_tx: mpsc::Sender<FilterStateResult>,
+    },
     RebuildSelectedImagesAsCbzAndNext {
         request_id: u64,
         book_id: BookId,
@@ -103,6 +107,11 @@ pub(super) enum FavoriteToggleResult {
 #[derive(Clone, Debug)]
 pub(super) enum ApplyFilterTokenResult {
     Success,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum FilterStateResult {
+    Success(bool),
 }
 
 #[derive(Clone, Debug)]
@@ -303,6 +312,28 @@ impl App {
                                 let response = match response_rx.recv() {
                                     Ok(ApplyFilterTokenResult::Success) => {
                                         LibraryToViewer::ClearFilterAck { request_id }
+                                    }
+                                    Err(_) => LibraryToViewer::Error {
+                                        request_id,
+                                        code: IpcErrorCode::Unknown,
+                                        retryable: false,
+                                    },
+                                };
+                                Some((response, None))
+                            }
+                            ViewerToLibrary::RequestFilterState { request_id } => {
+                                let (response_tx, response_rx) =
+                                    mpsc::channel::<FilterStateResult>();
+                                pending_viewer_sync_events.lock().push(
+                                    ViewerSyncEvent::RequestFilterState {
+                                        request_id,
+                                        response_tx,
+                                    },
+                                );
+                                repaint_ctx.request_repaint();
+                                let response = match response_rx.recv() {
+                                    Ok(FilterStateResult::Success(active)) => {
+                                        LibraryToViewer::FilterStateResponse { request_id, active }
                                     }
                                     Err(_) => LibraryToViewer::Error {
                                         request_id,
@@ -741,6 +772,9 @@ fn process_viewer_ipc_request(
             return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
         }
         ViewerToLibrary::ClearFilter { request_id } => {
+            return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
+        }
+        ViewerToLibrary::RequestFilterState { request_id } => {
             return Some(ipc_error_response(request_id, IpcErrorCode::InvalidRequest));
         }
         ViewerToLibrary::Delete {

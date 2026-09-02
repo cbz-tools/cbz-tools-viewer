@@ -99,6 +99,8 @@ enum ViewerMode {
         pending_action_request_id: Option<u64>,
         pending_viewer_state_request_id: Option<u64>,
         pending_favorite_toggle_request_id: Option<u64>,
+        pending_filter_state_request_id: Option<u64>,
+        filter_state_active: Option<bool>,
         pending_spad_request_id: Option<u64>,
     },
     SnapshotOnly {
@@ -106,6 +108,8 @@ enum ViewerMode {
         event_rx: mpsc::Receiver<IpcEvent>,
         last_request_id: u64,
         pending_viewer_state_request_id: Option<u64>,
+        pending_filter_state_request_id: Option<u64>,
+        filter_state_active: Option<bool>,
     },
     Detached,
 }
@@ -450,6 +454,70 @@ impl ViewerApp {
         }
     }
 
+    fn filter_state_active_for_ui(&self) -> bool {
+        match &self.mode {
+            ViewerMode::Library {
+                filter_state_active,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                filter_state_active,
+                ..
+            } => filter_state_active.unwrap_or(false),
+            _ => false,
+        }
+    }
+
+    fn clear_filter_state_request(&mut self) {
+        match &mut self.mode {
+            ViewerMode::Library {
+                pending_filter_state_request_id,
+                filter_state_active,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                pending_filter_state_request_id,
+                filter_state_active,
+                ..
+            } => {
+                *pending_filter_state_request_id = None;
+                *filter_state_active = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn request_filter_state(&mut self) {
+        self.clear_filter_state_request();
+        let (request_tx, request_id) = match &mut self.mode {
+            ViewerMode::Library {
+                request_tx,
+                last_request_id,
+                pending_filter_state_request_id,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                request_tx,
+                last_request_id,
+                pending_filter_state_request_id,
+                ..
+            } => {
+                *last_request_id = last_request_id.saturating_add(1);
+                let request_id = *last_request_id;
+                *pending_filter_state_request_id = Some(request_id);
+                (request_tx.clone(), request_id)
+            }
+            _ => return,
+        };
+        if request_tx
+            .send(ViewerToLibrary::RequestFilterState { request_id })
+            .is_err()
+        {
+            tracing::warn!(request_id, "viewer.ipc.filter_state.request.send.failed");
+            self.clear_filter_state_request();
+        }
+    }
+
     fn open_boundary_preview_disk_cache() -> Option<DiskCache> {
         DiskCache::open(DiskCache::default_root())
             .or_else(|_| {
@@ -548,6 +616,8 @@ impl ViewerApp {
                                     event_rx: common.1,
                                     last_request_id: 0,
                                     pending_viewer_state_request_id: None,
+                                    pending_filter_state_request_id: None,
+                                    filter_state_active: None,
                                 }
                             } else {
                                 ViewerMode::Library {
@@ -558,6 +628,8 @@ impl ViewerApp {
                                     pending_action_request_id: None,
                                     pending_viewer_state_request_id: None,
                                     pending_favorite_toggle_request_id: None,
+                                    pending_filter_state_request_id: None,
+                                    filter_state_active: None,
                                     pending_spad_request_id: None,
                                 }
                             }
@@ -1232,6 +1304,8 @@ impl ViewerApp {
                                 TextKey::FavoriteUpdateFailed,
                                 Instant::now(),
                             );
+                        } else if self.is_current_filter_state_request(request_id) {
+                            self.clear_filter_state_request();
                         }
                     }
                     LibraryToViewer::FavoriteToggleResponse {
@@ -1243,6 +1317,24 @@ impl ViewerApp {
                             self.book_state.favorite_state = favorite_state;
                             self.pending_favorite_toggle_previous_state = None;
                             self.clear_pending_favorite_toggle_request();
+                        }
+                    }
+                    LibraryToViewer::FilterStateResponse { request_id, active } => {
+                        if self.is_current_filter_state_request(request_id) {
+                            if let ViewerMode::Library {
+                                pending_filter_state_request_id,
+                                filter_state_active,
+                                ..
+                            }
+                            | ViewerMode::SnapshotOnly {
+                                pending_filter_state_request_id,
+                                filter_state_active,
+                                ..
+                            } = &mut self.mode
+                            {
+                                *pending_filter_state_request_id = None;
+                                *filter_state_active = Some(active);
+                            }
                         }
                     }
                     LibraryToViewer::ApplyFilterTokenAck { request_id: _ } => {}
@@ -1357,6 +1449,20 @@ impl ViewerApp {
                 pending_favorite_toggle_request_id,
                 ..
             } => pending_favorite_toggle_request_id == &Some(request_id),
+            _ => false,
+        }
+    }
+
+    fn is_current_filter_state_request(&self, request_id: u64) -> bool {
+        match &self.mode {
+            ViewerMode::Library {
+                pending_filter_state_request_id,
+                ..
+            }
+            | ViewerMode::SnapshotOnly {
+                pending_filter_state_request_id,
+                ..
+            } => pending_filter_state_request_id == &Some(request_id),
             _ => false,
         }
     }
@@ -2364,7 +2470,6 @@ impl eframe::App for ViewerApp {
             return;
         }
         let ctx = ui.ctx().clone();
-
         let mut cover_blank_changed: Option<bool> = None;
         let mut spread_changed: Option<SpreadMode> = None;
         let mut interval_changed: Option<f32> = None;
@@ -2375,6 +2480,7 @@ impl eframe::App for ViewerApp {
             self.mode,
             ViewerMode::Library { .. } | ViewerMode::SnapshotOnly { .. }
         );
+        let show_clear_filter = filter_token_enabled && self.filter_state_active_for_ui();
         let allow_page_range_delete = self.allow_page_range_delete();
         let external_tools = self.external_tool_button_models();
         let external_tool_state = self.external_tool_toolbar_state_for_ui();
@@ -2407,6 +2513,7 @@ impl eframe::App for ViewerApp {
                         global_quality: self.app_settings.viewer_quality,
                         capabilities,
                         filter_token_enabled,
+                        show_clear_filter,
                         web_searches: &web_searches,
                         allow_page_range_delete,
                         boundary_preview_thumb_size: egui::vec2(
@@ -2425,6 +2532,9 @@ impl eframe::App for ViewerApp {
                 );
                 match action {
                     ViewerAction::None => {}
+                    ViewerAction::RequestFilterState => {
+                        self.request_filter_state();
+                    }
                     ViewerAction::FilterToken(token) => {
                         self.request_filter_token(token);
                     }

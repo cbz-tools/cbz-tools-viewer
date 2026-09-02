@@ -70,6 +70,7 @@ pub struct TopbarResult {
 pub fn show(
     ui: &mut egui::Ui,
     state: &mut LibraryState,
+    left_pane_visible: bool,
     language: UiLanguage,
     viewer_open_mode: &mut ViewerOpenMode,
     _ignore_external_drop: bool,
@@ -97,15 +98,39 @@ pub fn show(
         ui.set_height(TOPBAR_HEIGHT);
 
         // ── パス直接入力 ──────────────────────────────────────────────────────
-        let menu_resp = ui
-            .add_sized(
-                TOPBAR_ICON_BUTTON_SIZE,
-                egui::Button::new(icons::icon(icons::ICON_MENU, ICON_SIZE_MENU_SETTINGS))
-                    .fill(egui::Color32::TRANSPARENT)
-                    .stroke(quiet_stroke),
-            )
+        let (menu_fill, menu_stroke) = selected_button_colors(left_pane_visible);
+        let menu_content_id = ui.make_persistent_id("library_menu_content");
+        let menu_layout_resp =
+            egui::Button::new(egui::Atom::custom(menu_content_id, egui::vec2(17.0, 18.0)))
+                .min_size(TOPBAR_ICON_BUTTON_SIZE)
+                .fill(menu_fill)
+                .stroke(menu_stroke)
+                .atom_ui(ui);
+        if let Some(menu_content_rect) = menu_layout_resp.rect(menu_content_id) {
+            let menu_line_stroke =
+                egui::Stroke::new(1.5, ui.visuals().widgets.inactive.fg_stroke.color);
+            for y_offset in [-5.0_f32, 0.0, 5.0] {
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(
+                            menu_content_rect.center().x - 8.5,
+                            menu_content_rect.center().y + y_offset,
+                        ),
+                        egui::pos2(
+                            menu_content_rect.center().x + 8.5,
+                            menu_content_rect.center().y + y_offset,
+                        ),
+                    ],
+                    menu_line_stroke,
+                );
+            }
+        }
+        let menu_resp = menu_layout_resp
+            .response
             .on_hover_text(tr(language, TextKey::ShowLibrary));
-        paint_quiet_hover_border(ui, &menu_resp);
+        if !left_pane_visible {
+            paint_quiet_hover_border(ui, &menu_resp);
+        }
         if menu_resp.clicked() {
             toggle_left_pane = true;
         }
@@ -116,20 +141,13 @@ pub fn show(
             state.hud_mode,
             crate::domain::app_settings::LibraryHudMode::On
         );
+        let (hud_fill, hud_stroke) = selected_button_colors(hud_selected);
         let hud_resp = ui
             .add_sized(
                 TOPBAR_SMALL_TEXT_BUTTON_SIZE,
                 egui::Button::new(egui::RichText::new("HUD").size(LABEL_FONT_SIZE))
-                    .fill(if hud_selected {
-                        theme::BUTTON_ACTIVE
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .stroke(if hud_selected {
-                        selected_stroke
-                    } else {
-                        quiet_stroke
-                    }),
+                    .fill(hud_fill)
+                    .stroke(hud_stroke),
             )
             .on_hover_text(tr(language, TextKey::CurrentHud).replace("{}", state.hud_mode.label()));
         if hud_resp.clicked() {
@@ -182,7 +200,7 @@ pub fn show(
         ui.separator();
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            // 設定メニュー。項目名は UI 言語にかかわらず英語固定。
+            // 設定メニュー
             let (settings_resp, _) = egui::containers::menu::MenuButton::from_button(
                 egui::Button::new(icons::icon(icons::ICON_SETTINGS, ICON_SIZE_MENU_SETTINGS))
                     .min_size(TOPBAR_ICON_BUTTON_SIZE)
@@ -191,16 +209,16 @@ pub fn show(
             )
             .ui(ui, |ui| {
                 ui.set_min_width(220.0);
-                if ui.button("Preferences...").clicked() {
+                if ui.button(tr(language, TextKey::PreferencesMenu)).clicked() {
                     settings_requested = true;
                     ui.close();
                 }
-                if ui.button("Language: EN ⇔ JP").clicked() {
+                if ui.button(tr(language, TextKey::LanguageMenu)).clicked() {
                     language_toggle_requested = true;
                     ui.close();
                 }
                 ui.separator();
-                if ui.button("About CBZ Viewer...").clicked() {
+                if ui.button(tr(language, TextKey::AboutMenu)).clicked() {
                     about_requested = true;
                     ui.close();
                 }
@@ -559,6 +577,20 @@ pub fn show(
         path_cancelled,
         path_blank_clicked,
         path_edit_rect,
+    }
+}
+
+fn selected_button_colors(selected: bool) -> (egui::Color32, egui::Stroke) {
+    if selected {
+        (
+            theme::BUTTON_ACTIVE,
+            egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE),
+        )
+    } else {
+        (
+            egui::Color32::TRANSPARENT,
+            egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT),
+        )
     }
 }
 

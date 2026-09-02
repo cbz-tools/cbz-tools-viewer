@@ -54,6 +54,7 @@ pub(crate) fn max_texture_side_from_context(ctx: &egui::Context) -> u32 {
 
 pub enum ViewerAction {
     None,
+    RequestFilterState,
     FilterToken(String),
     ClearFilter,
     WebSearch {
@@ -433,6 +434,7 @@ pub struct ViewerShowContext<'a> {
     pub global_quality: ViewerQuality,
     pub capabilities: ViewerUiCapabilities,
     pub filter_token_enabled: bool,
+    pub show_clear_filter: bool,
     pub web_searches: &'a [WebSearchMenuItem],
     pub allow_page_range_delete: bool,
     pub boundary_preview_thumb_size: egui::Vec2,
@@ -809,6 +811,7 @@ pub fn show(
         global_quality,
         capabilities,
         filter_token_enabled,
+        show_clear_filter,
         web_searches,
         allow_page_range_delete,
         boundary_preview_thumb_size,
@@ -1168,7 +1171,8 @@ pub fn show(
         draw_key_feedback(ui, &used_rect, text);
         ctx.request_repaint_after(Duration::from_millis(60));
     }
-    Popup::context_menu(&used_resp)
+    let show_clear_filter = show_clear_filter && !used_resp.secondary_clicked();
+    let context_menu_open = Popup::context_menu(&used_resp)
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             let token_menu = show_filename_token_menu_frame(
@@ -1177,6 +1181,7 @@ pub fn show(
                 PopupKeyInput::default(),
                 language,
                 filter_token_enabled,
+                show_clear_filter,
                 web_searches,
                 true,
             );
@@ -1253,6 +1258,9 @@ pub fn show(
                 (None, Some(_)) => {}
             }
         });
+    if filter_token_enabled && used_resp.secondary_clicked() && context_menu_open.is_some() {
+        action = ViewerAction::RequestFilterState;
+    }
     let mut overlay_interacting = false;
     let fullscreen_overlay_near =
         is_fullscreen && !in_fullscreen_transition && fullscreen_overlay_near(&ctx, &used_rect);
