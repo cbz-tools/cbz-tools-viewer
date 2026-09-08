@@ -605,7 +605,7 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                             ui,
                             icons::ICON_DELETE,
                             15.0,
-                            tr(language, TextKey::RemoveFromFavorites),
+                            tr(language, TextKey::RemoveTreeFolderFromLibrary),
                         ))
                         .clicked()
                     {

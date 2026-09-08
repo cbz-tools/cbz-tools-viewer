@@ -2,6 +2,17 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.7] - 2026-09-08
+
+### Changed
+
+- Removed the standalone SHA-256 checksum file from GitHub Release assets.
+- Unified Library folder registration terminology between the directory Tree and Library controls.
+
+### Fixed
+
+- Updated the operation guides to match the current External Tools filename placeholders and Clear Filter behavior.
+
 ## [0.5.6] - 2026-09-02
 
 ### Changed

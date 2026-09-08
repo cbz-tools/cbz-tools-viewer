@@ -14,7 +14,6 @@ $ErrorActionPreference = "Stop"
 $packageName = "cbz-tools-viewer-$Version-windows-x64"
 $stageDir = Join-Path $OutputDir $packageName
 $zipPath = Join-Path $OutputDir "$packageName.zip"
-$shaPath = "$zipPath.sha256"
 $vcpkgRoot = if ([string]::IsNullOrWhiteSpace($env:VCPKG_ROOT)) { "C:\vcpkg" } else { $env:VCPKG_ROOT }
 $ffmpegShareDir = Join-Path $vcpkgRoot "installed/x64-windows/share/ffmpeg"
 
@@ -39,9 +38,6 @@ if (Test-Path $stageDir) {
 }
 if (Test-Path $zipPath) {
   Remove-Item $zipPath -Force
-}
-if (Test-Path $shaPath) {
-  Remove-Item $shaPath -Force
 }
 
 New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
@@ -104,6 +100,3 @@ try {
 finally {
   $archive.Dispose()
 }
-
-$hash = Get-FileHash -Algorithm SHA256 -Path $zipPath
-"$($hash.Hash.ToLowerInvariant())  $($hash.Path | Split-Path -Leaf)" | Set-Content -Path $shaPath

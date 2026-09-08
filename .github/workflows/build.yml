@@ -393,7 +393,6 @@ jobs:
           retention-days: 7
           path: |
             target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
-            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip.sha256
             target/package/ffmpeg-source-${{ env.CBZ_RELEASE_VERSION }}.zip
       - name: Upload release asset
         if: github.event_name == 'push'
@@ -402,5 +401,4 @@ jobs:
           tag_name: ${{ github.ref_name }}
           files: |
             target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
-            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip.sha256
             target/package/ffmpeg-source-${{ github.ref_name }}.zip
