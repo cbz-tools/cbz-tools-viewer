@@ -598,9 +598,9 @@ struct CachedReader {
     /// フルデコード時に消費して Deflate 二重展開を防ぐ。
     raw_cache: Option<(u32, Bytes)>,
 
-    /// デコード済みフレーム LRU キャッシュ: (page_n, display_w) → Arc<frames>。
+    /// デコード済みフレーム LRU キャッシュ: (page_n, display_w) → frames + logical original size。
     /// キャッシュヒット時はフル ZIP 解凍 + JPEG デコードをスキップ（ページ戻り等に有効）。
-    frame_cache: LruCache<PageKey, Arc<Vec<img::FrameData>>>,
+    frame_cache: LruCache<PageKey, Arc<CachedFrame>>,
     /// animated image の逐次フレーム供給状態。
     animation_streams: HashMap<AnimationStreamKey, CachedAnimationStream>,
     /// Animation stream request の navigation 世代。古い Start/Fill は復活させない。
@@ -614,6 +614,12 @@ struct CachedAnimationStream {
     canvas_w: u32,
     canvas_h: u32,
     gpu_safety_side: u32,
+}
+
+struct CachedFrame {
+    frames: Arc<Vec<img::FrameData>>,
+    logical_orig_w: u32,
+    logical_orig_h: u32,
 }
 
 const FAILED_PAGE_TEXT: &str = "PAGE LOAD FAILED";
@@ -1186,11 +1192,7 @@ fn get_display_page(
     interactive: bool,
 ) -> anyhow::Result<DisplayPage> {
     let full_key = (pn, display_w, display_h, quality, ViewerFrameStage::Full);
-    if let Some(frames) = cached.frame_cache.get(&full_key) {
-        let (orig_w, orig_h) = frames
-            .first()
-            .map(|f| (f.image.width, f.image.height))
-            .unwrap_or((0, 0));
+    if let Some(cached_frame) = cached.frame_cache.get(&full_key) {
         tracing::trace!(
             "[viewer-worker-frame-cache] page={} hit=true display_w={} display_h={} quality={:?} stage=full",
             pn,
@@ -1199,9 +1201,9 @@ fn get_display_page(
             quality
         );
         return Ok(DisplayPage::Static(DecodedPage {
-            frames: Arc::clone(frames),
-            orig_w,
-            orig_h,
+            frames: Arc::clone(&cached_frame.frames),
+            orig_w: cached_frame.logical_orig_w,
+            orig_h: cached_frame.logical_orig_h,
             decode_ms: 0,
         }));
     }
@@ -1474,7 +1476,11 @@ fn build_failed_decoded_page(
     let spec = build_failed_page_spec(display_w, display_h);
     cached.frame_cache.put(
         (pn, display_w, display_h, quality, ViewerFrameStage::Full),
-        Arc::clone(&spec.frames),
+        Arc::new(CachedFrame {
+            frames: Arc::clone(&spec.frames),
+            logical_orig_w: spec.width,
+            logical_orig_h: spec.height,
+        }),
     );
     cached.raw_cache = None;
     DecodedPage {
@@ -1613,12 +1619,7 @@ fn get_and_decode(
     let full_key = (pn, display_w, display_h, quality, ViewerFrameStage::Full);
 
     // ── LRU キャッシュヒット ───────────────────────────────────────────────
-    if let Some(frames) = cached.frame_cache.get(&full_key) {
-        // ヒット: orig_w/h はデコード済み画像の寸法から再取得（アスペクト比は保持される）
-        let (orig_w, orig_h) = frames
-            .first()
-            .map(|f| (f.image.width, f.image.height))
-            .unwrap_or((0, 0));
+    if let Some(cached_frame) = cached.frame_cache.get(&full_key) {
         tracing::trace!(
             "[viewer-worker-frame-cache] page={} hit=true display_w={} display_h={} quality={:?} stage=full",
             pn,
@@ -1627,9 +1628,9 @@ fn get_and_decode(
             quality
         );
         return Ok(DecodedPage {
-            frames: Arc::clone(frames),
-            orig_w,
-            orig_h,
+            frames: Arc::clone(&cached_frame.frames),
+            orig_w: cached_frame.logical_orig_w,
+            orig_h: cached_frame.logical_orig_h,
             decode_ms: 0,
         });
     }
@@ -1679,7 +1680,11 @@ fn get_and_decode(
     // LRU に保存（Arc::clone で所有権を共有: コピーコストなし）
     cached.frame_cache.put(
         (pn, display_w, display_h, quality, ViewerFrameStage::Full),
-        Arc::clone(&frames),
+        Arc::new(CachedFrame {
+            frames: Arc::clone(&frames),
+            logical_orig_w: vf.orig_w,
+            logical_orig_h: vf.orig_h,
+        }),
     );
 
     Ok(DecodedPage {

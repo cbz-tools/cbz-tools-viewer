@@ -6,6 +6,10 @@ use webp_anim::{InspectLimits, WebpKind, inspect};
 
 use crate::domain::page_map::PageImageFormat;
 use crate::infra::image::decode::GifAnimFrameSource;
+use crate::infra::image::orientation::{
+    ImageOrientation, for_page_format, jpeg as jpeg_orientation, jpeg_app1, logical_dimensions,
+    tiff as tiff_orientation, webp as webp_orientation,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MetadataProbeResult {
@@ -22,6 +26,10 @@ pub enum MetadataProbeResult {
 pub struct JpegMetadataProbe {
     state: JpegProbeState,
     pos: usize,
+    physical_width: Option<u32>,
+    physical_height: Option<u32>,
+    orientation: ImageOrientation,
+    app1_payload: Vec<u8>,
 }
 
 impl JpegMetadataProbe {
@@ -29,6 +37,10 @@ impl JpegMetadataProbe {
         Self {
             state: JpegProbeState::Start,
             pos: 0,
+            physical_width: None,
+            physical_height: None,
+            orientation: ImageOrientation::Normal,
+            app1_payload: Vec::new(),
         }
     }
 
@@ -78,7 +90,21 @@ impl JpegMetadataProbe {
                         self.state = JpegProbeState::Scan;
                         continue;
                     }
-                    if marker == 0xD9 || marker == 0xDA {
+                    if marker == 0xDA {
+                        let (Some(width), Some(height)) =
+                            (self.physical_width, self.physical_height)
+                        else {
+                            return Ok(MetadataProbeResult::Invalid);
+                        };
+                        let (width, height) = logical_dimensions(width, height, self.orientation);
+                        return Ok(MetadataProbeResult::Done {
+                            format: PageImageFormat::Jpeg,
+                            width,
+                            height,
+                            bytes_touched: self.pos,
+                        });
+                    }
+                    if marker == 0xD9 {
                         return Ok(MetadataProbeResult::Invalid);
                     }
                     if is_jpeg_standalone_marker(marker) {
@@ -119,6 +145,8 @@ impl JpegMetadataProbe {
                             return Ok(MetadataProbeResult::Invalid);
                         }
                         self.state = JpegProbeState::SofData { remaining: payload };
+                    } else if marker == 0xE1 {
+                        self.state = JpegProbeState::App1Data { remaining: payload };
                     } else {
                         self.state = JpegProbeState::SkipSegment { remaining: payload };
                     }
@@ -158,12 +186,32 @@ impl JpegMetadataProbe {
                     if width == 0 || height == 0 {
                         return Ok(MetadataProbeResult::Invalid);
                     }
-                    return Ok(MetadataProbeResult::Done {
-                        format: PageImageFormat::Jpeg,
-                        width,
-                        height,
-                        bytes_touched: self.pos + 6,
-                    });
+                    self.physical_width = Some(width);
+                    self.physical_height = Some(height);
+                    self.state = JpegProbeState::SkipSegment {
+                        remaining: remaining - 6,
+                    };
+                }
+                JpegProbeState::App1Data { mut remaining } => {
+                    let available = data.len().saturating_sub(self.pos);
+                    if available == 0 {
+                        self.state = JpegProbeState::App1Data { remaining };
+                        return Ok(MetadataProbeResult::NeedMore);
+                    }
+                    let take = remaining.min(available);
+                    self.app1_payload
+                        .extend_from_slice(&data[self.pos..self.pos + take]);
+                    self.pos += take;
+                    remaining -= take;
+                    if remaining != 0 {
+                        self.state = JpegProbeState::App1Data { remaining };
+                        return Ok(MetadataProbeResult::NeedMore);
+                    }
+                    if self.orientation == ImageOrientation::Normal {
+                        self.orientation = jpeg_app1(&self.app1_payload);
+                    }
+                    self.app1_payload.clear();
+                    self.state = JpegProbeState::Scan;
                 }
             }
         }
@@ -186,46 +234,70 @@ enum JpegProbeState {
     SofData {
         remaining: usize,
     },
+    App1Data {
+        remaining: usize,
+    },
 }
 
 pub fn probe_png_metadata(data: &[u8]) -> Result<MetadataProbeResult> {
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if data.len() < 24 {
+    if data.len() < 8 {
         return Ok(MetadataProbeResult::NeedMore);
     }
     if &data[0..8] != PNG_SIGNATURE {
         return Ok(MetadataProbeResult::Invalid);
     }
-    let ihdr_len = u32::from_be_bytes(
-        data[8..12]
-            .try_into()
-            .expect("PNG metadata path validates minimum length first"),
-    ) as usize;
-    if ihdr_len != 13 {
-        return Ok(MetadataProbeResult::Invalid);
+    let mut pos = 8usize;
+    let mut dimensions = None;
+    let mut orientation = ImageOrientation::Normal;
+    loop {
+        let Some(header) = data.get(pos..pos + 8) else {
+            return Ok(MetadataProbeResult::NeedMore);
+        };
+        let length = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as usize;
+        let payload_start = pos + 8;
+        let chunk_type = &header[4..8];
+        if chunk_type == b"IDAT" {
+            let Some((width, height)) = dimensions else {
+                return Ok(MetadataProbeResult::Invalid);
+            };
+            let (width, height) = logical_dimensions(width, height, orientation);
+            return Ok(MetadataProbeResult::Done {
+                format: PageImageFormat::Png,
+                width,
+                height,
+                bytes_touched: pos,
+            });
+        }
+        let Some(payload) = data.get(payload_start..payload_start + length) else {
+            return Ok(MetadataProbeResult::NeedMore);
+        };
+        if chunk_type == b"IHDR" {
+            if length != 13 || dimensions.is_some() {
+                return Ok(MetadataProbeResult::Invalid);
+            }
+            let width = u32::from_be_bytes(payload[0..4].try_into().expect("IHDR width"));
+            let height = u32::from_be_bytes(payload[4..8].try_into().expect("IHDR height"));
+            if width == 0 || height == 0 {
+                return Ok(MetadataProbeResult::Invalid);
+            }
+            dimensions = Some((width, height));
+        } else if chunk_type == b"eXIf" {
+            let parsed = tiff_orientation(payload);
+            if parsed != ImageOrientation::Normal {
+                orientation = parsed;
+            }
+        } else if chunk_type == b"IEND" {
+            return Ok(MetadataProbeResult::Invalid);
+        }
+        let Some(next) = payload_start
+            .checked_add(length)
+            .and_then(|end| end.checked_add(4))
+        else {
+            return Ok(MetadataProbeResult::Invalid);
+        };
+        pos = next;
     }
-    if &data[12..16] != b"IHDR" {
-        return Ok(MetadataProbeResult::Invalid);
-    }
-    let width = u32::from_be_bytes(
-        data[16..20]
-            .try_into()
-            .expect("PNG metadata path validates minimum length first"),
-    );
-    let height = u32::from_be_bytes(
-        data[20..24]
-            .try_into()
-            .expect("PNG metadata path validates minimum length first"),
-    );
-    if width == 0 || height == 0 {
-        return Ok(MetadataProbeResult::Invalid);
-    }
-    Ok(MetadataProbeResult::Done {
-        format: PageImageFormat::Png,
-        width,
-        height,
-        bytes_touched: 24,
-    })
 }
 
 pub fn read_jpeg_metadata(data: &[u8]) -> Result<(PageImageFormat, u32, u32)> {
@@ -236,6 +308,7 @@ pub fn read_jpeg_metadata(data: &[u8]) -> Result<(PageImageFormat, u32, u32)> {
     if width == 0 || height == 0 {
         anyhow::bail!("invalid JPEG dimensions");
     }
+    let (width, height) = logical_dimensions(width, height, jpeg_orientation(data));
     Ok((PageImageFormat::Jpeg, width, height))
 }
 
@@ -246,7 +319,9 @@ pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, 
             WebpKind::Static(info) => info.canvas,
             WebpKind::Animated(info) => info.canvas,
         };
-        return Ok(Some((PageImageFormat::WebP, canvas.width, canvas.height)));
+        let (width, height) =
+            logical_dimensions(canvas.width, canvas.height, webp_orientation(data));
+        return Ok(Some((PageImageFormat::WebP, width, height)));
     }
 
     if is_gif_signature(data) {
@@ -269,6 +344,7 @@ pub fn read_image_metadata(data: &[u8]) -> Result<Option<(PageImageFormat, u32, 
         return Ok(Some(read_jpeg_metadata(data)?));
     }
     let (width, height) = reader.into_dimensions().context("image dimensions")?;
+    let (width, height) = logical_dimensions(width, height, for_page_format(data, format));
     Ok(Some((format, width, height)))
 }
 

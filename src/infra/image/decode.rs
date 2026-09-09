@@ -13,6 +13,10 @@ use webp_anim::{AnimationDecoder, DecodeLimits, InspectLimits, WebpKind, inspect
 
 use crate::domain::app_settings::ViewerQuality;
 use crate::domain::page::ImageFormatHint;
+use crate::infra::image::orientation::{
+    ImageOrientation, for_image_hint, jpeg as jpeg_orientation, logical_dimensions, normalize_rgba,
+    webp as webp_orientation,
+};
 
 // ── 公開型 ────────────────────────────────────────────────────────────────────
 /// アニメーションフレームの最小遅延（ms）。16ms ≒ 62.5fps 上限。
@@ -221,12 +225,14 @@ impl AnimationFrameSource {
 /// 共用 crate の decoder を viewer の再生フレーム型へ適合する。
 pub struct WebpAnimFrameSource {
     decoder: AnimationDecoder,
+    orientation: ImageOrientation,
 }
 
 impl WebpAnimFrameSource {
     pub fn new(data: &[u8]) -> Result<Self> {
         Ok(Self {
             decoder: AnimationDecoder::new(data, DecodeLimits::for_trusted_input())?,
+            orientation: webp_orientation(data),
         })
     }
 
@@ -239,7 +245,9 @@ impl WebpAnimFrameSource {
     }
 
     pub fn canvas(&self) -> webp_anim::CanvasSize {
-        self.decoder.info().canvas
+        let canvas = self.decoder.info().canvas;
+        let (width, height) = logical_dimensions(canvas.width, canvas.height, self.orientation);
+        webp_anim::CanvasSize { width, height }
     }
 
     pub fn frame_durations(&self) -> Result<Vec<u32>> {
@@ -277,12 +285,18 @@ impl WebpAnimFrameSource {
             return Ok(None);
         };
         let raw_delay = u32::try_from(frame.duration.as_millis()).unwrap_or(u32::MAX);
+        let (width, height, pixels) = normalize_rgba(
+            frame.canvas.width,
+            frame.canvas.height,
+            frame.rgba,
+            self.orientation,
+        )?;
 
         Ok(Some(FrameData {
             image: DecodedImage {
-                width: frame.canvas.width,
-                height: frame.canvas.height,
-                pixels: frame.rgba,
+                width,
+                height,
+                pixels,
             },
             delay_ms: raw_delay.max(MIN_FRAME_DELAY_MS),
         }))
@@ -342,6 +356,7 @@ pub fn decode_for_thumb(
     let _ = target_width;
     match fmt {
         ImageFormatHint::Jpeg => decode_jpeg(data),
+        ImageFormatHint::Png => decode_png_static(data),
         ImageFormatHint::Avif => decode_avif_static(data),
         ImageFormatHint::Gif => decode_gif_first_frame(data),
         ImageFormatHint::WebP => decode_webp_first_frame(data),
@@ -392,7 +407,13 @@ fn resolve_fmt(data: &[u8], hint: ImageFormatHint) -> ImageFormatHint {
 /// JPEG → RGBA8（TurboJPEG が最終 RGBA バッファへ直接出力）
 fn decode_jpeg(data: &[u8]) -> Result<DecodedImage> {
     let (decompressor, header) = read_turbojpeg_header(data)?;
-    decode_jpeg_with_scale(data, decompressor, header, turbojpeg::ScalingFactor::ONE)
+    decode_jpeg_with_scale(
+        data,
+        decompressor,
+        header,
+        turbojpeg::ScalingFactor::ONE,
+        jpeg_orientation(data),
+    )
 }
 
 // ── WebP（静止画）────────────────────────────────────────────────────────────
@@ -411,11 +432,15 @@ pub fn decode_webp(data: &[u8]) -> Result<DecodedImage> {
             .collect()
     };
 
-    Ok(DecodedImage {
-        width: w,
-        height: h,
-        pixels,
-    })
+    normalize_decoded_image(
+        data,
+        ImageFormatHint::WebP,
+        DecodedImage {
+            width: w,
+            height: h,
+            pixels,
+        },
+    )
 }
 
 fn decode_webp_first_frame(data: &[u8]) -> Result<DecodedImage> {
@@ -434,6 +459,11 @@ fn decode_webp_first_frame(data: &[u8]) -> Result<DecodedImage> {
 
 /// image crate を使って汎用デコード（PNG / AVIF など）。GIF は専用経路を使う。
 fn decode_generic(data: &[u8]) -> Result<DecodedImage> {
+    let image = decode_generic_raw(data)?;
+    normalize_decoded_image(data, ImageFormatHint::Unknown, image)
+}
+
+fn decode_generic_raw(data: &[u8]) -> Result<DecodedImage> {
     let img = image::load_from_memory(data).context("image decode")?;
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
@@ -441,6 +471,27 @@ fn decode_generic(data: &[u8]) -> Result<DecodedImage> {
         width: w,
         height: h,
         pixels: rgba.into_raw(),
+    })
+}
+
+fn normalize_decoded_image(
+    data: &[u8],
+    format: ImageFormatHint,
+    image: DecodedImage,
+) -> Result<DecodedImage> {
+    normalize_decoded_image_with_orientation(image, for_image_hint(data, format))
+}
+
+fn normalize_decoded_image_with_orientation(
+    image: DecodedImage,
+    orientation: ImageOrientation,
+) -> Result<DecodedImage> {
+    let (width, height, pixels) =
+        normalize_rgba(image.width, image.height, image.pixels, orientation)?;
+    Ok(DecodedImage {
+        width,
+        height,
+        pixels,
     })
 }
 
@@ -453,11 +504,12 @@ fn decode_gif_first_frame(data: &[u8]) -> Result<DecodedImage> {
 }
 
 fn decode_png_static(data: &[u8]) -> Result<DecodedImage> {
-    decode_generic(data)
+    let image = decode_generic_raw(data)?;
+    normalize_decoded_image(data, ImageFormatHint::Png, image)
 }
 
 fn decode_avif_static(data: &[u8]) -> Result<DecodedImage> {
-    decode_generic(data).with_context(|| {
+    decode_generic_raw(data).with_context(|| {
         "AVIF decode failed: AVIF decoder is not available or image data is unsupported by image crate"
     })
 }
@@ -546,7 +598,11 @@ fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {
             .collect::<image::ImageResult<Vec<_>>>()
             .map_err(|e| anyhow::anyhow!("APNG frames: {e}"))?;
         if frames.len() > 1 {
-            return Ok(frames.into_iter().map(image_frame_to_frame_data).collect());
+            let orientation = for_image_hint(data, ImageFormatHint::Png);
+            return Ok(frames
+                .into_iter()
+                .map(|frame| image_frame_to_frame_data(frame, orientation))
+                .collect::<Result<Vec<_>>>()?);
         }
     }
 
@@ -566,7 +622,7 @@ fn is_apng(data: &[u8]) -> Result<bool> {
 }
 
 /// image::Frame → FrameData 変換（共通）
-fn image_frame_to_frame_data(f: image::Frame) -> FrameData {
+fn image_frame_to_frame_data(f: image::Frame, orientation: ImageOrientation) -> Result<FrameData> {
     let (numer, denom) = f.delay().numer_denom_ms();
     let delay_ms = if denom == 0 {
         FALLBACK_FRAME_DELAY_MS
@@ -575,14 +631,15 @@ fn image_frame_to_frame_data(f: image::Frame) -> FrameData {
     };
     let rgba = f.into_buffer();
     let (w, h) = rgba.dimensions();
-    FrameData {
+    let (w, h, pixels) = normalize_rgba(w, h, rgba.into_raw(), orientation)?;
+    Ok(FrameData {
         image: DecodedImage {
             width: w,
             height: h,
-            pixels: rgba.into_raw(),
+            pixels,
         },
         delay_ms,
-    }
+    })
 }
 
 // ── TurboJPEG 縮小デコード ───────────────────────────────────────────────────
@@ -605,8 +662,11 @@ fn decode_jpeg_for_target(
 ) -> Result<DecodedImage> {
     let (decompressor, header) = read_turbojpeg_header(data)?;
     let orig_w = u32::try_from(header.width).context("JPEG width exceeds u32")?;
-    let scale = jpeg_scale_factor(orig_w, target_width, quality);
-    decode_jpeg_with_scale(data, decompressor, header, scale)
+    let orig_h = u32::try_from(header.height).context("JPEG height exceeds u32")?;
+    let orientation = jpeg_orientation(data);
+    let (logical_orig_w, _) = logical_dimensions(orig_w, orig_h, orientation);
+    let scale = jpeg_scale_factor(logical_orig_w, target_width, quality);
+    decode_jpeg_with_scale(data, decompressor, header, scale, orientation)
 }
 
 /// target_width に対して最適な TurboJPEG スケールを返す。
@@ -686,14 +746,16 @@ fn decode_jpeg_with_scale(
     mut decompressor: turbojpeg::Decompressor,
     header: turbojpeg::DecompressHeader,
     requested_scale: turbojpeg::ScalingFactor,
+    orientation: ImageOrientation,
 ) -> Result<DecodedImage> {
     use turbojpeg::{Image, PixelFormat};
 
     if jpeg_uses_wic_fallback(header.colorspace) {
         // TurboJPEG direct RGBA is not used for CMYK/YCCK; only those JPEG
         // colorspaces fall back to the Windows WIC color conversion path.
-        return super::wic::decode_cmyk_ycck_jpeg(data)
-            .context("CMYK/YCCK JPEG WIC fallback failed");
+        let decoded = super::wic::decode_cmyk_ycck_jpeg(data)
+            .context("CMYK/YCCK JPEG WIC fallback failed")?;
+        return normalize_decoded_image_with_orientation(decoded, orientation);
     }
     let scale = if header.is_lossless {
         turbojpeg::ScalingFactor::ONE
@@ -723,11 +785,14 @@ fn decode_jpeg_with_scale(
         .decompress(data, image.as_deref_mut())
         .map_err(|e| anyhow::anyhow!("TurboJPEG RGBA decode: {e}"))?;
 
-    Ok(DecodedImage {
-        width: width_u32,
-        height: height_u32,
-        pixels: image.pixels,
-    })
+    normalize_decoded_image_with_orientation(
+        DecodedImage {
+            width: width_u32,
+            height: height_u32,
+            pixels: image.pixels,
+        },
+        orientation,
+    )
 }
 
 // ── リサイズ ──────────────────────────────────────────────────────────────────
@@ -853,6 +918,8 @@ fn decode_jpeg_for_viewer(
     let (decompressor, header) = read_turbojpeg_header(data)?;
     let orig_w = u32::try_from(header.width).context("JPEG width exceeds u32")?;
     let orig_h = u32::try_from(header.height).context("JPEG height exceeds u32")?;
+    let orientation = jpeg_orientation(data);
+    let (logical_orig_w, logical_orig_h) = logical_dimensions(orig_w, orig_h, orientation);
     let target = match quality {
         ViewerQuality::Original if orig_w > 0 && orig_h > 0 => {
             safe_original_target_side(orig_w, orig_h, cap)
@@ -866,12 +933,13 @@ fn decode_jpeg_for_viewer(
         decompressor,
         header,
         jpeg_scale_factor(orig_w, target, &quality),
+        orientation,
     )?;
 
     let img = resize_to_max_side_with_filter(img, target, resize_filter)?;
     Ok(ViewerFrames {
-        orig_w,
-        orig_h,
+        orig_w: logical_orig_w,
+        orig_h: logical_orig_h,
         frames: vec![FrameData {
             image: img,
             delay_ms: STATIC_FRAME_DELAY_MS,
@@ -917,13 +985,19 @@ fn decode_png_for_viewer(
     let rgba_started = Instant::now();
     let rgba = dyn_img.to_rgba8();
     let _rgba_ms = rgba_started.elapsed().as_millis();
-    let (orig_w, orig_h) = rgba.dimensions();
+    let (physical_w, physical_h) = rgba.dimensions();
 
-    let mut img = DecodedImage {
-        width: orig_w,
-        height: orig_h,
-        pixels: rgba.into_raw(),
-    };
+    let mut img = normalize_decoded_image(
+        data,
+        ImageFormatHint::Png,
+        DecodedImage {
+            width: physical_w,
+            height: physical_h,
+            pixels: rgba.into_raw(),
+        },
+    )?;
+    let orig_w = img.width;
+    let orig_h = img.height;
 
     // PNG-2: static raster 向け viewer quality pipeline。
     // Speed / Balanced は安全な場合のみ 2x2 平均の事前 1/2 縮小を使い、

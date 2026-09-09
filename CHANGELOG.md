@@ -2,6 +2,13 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.8] - 2026-09-09
+
+### Fixed
+
+- Fixed JPEG, PNG/APNG, TIFF, WebP, and Animated WebP images with orientation metadata being displayed in the wrong direction.
+- Applied orientation-aware dimensions to Page Map, AUTO spread detection, thumbnails, previews, and animation playback.
+
 ## [0.5.7] - 2026-09-08
 
 ### Changed
