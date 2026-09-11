@@ -396,9 +396,43 @@ jobs:
             target/package/ffmpeg-source-${{ env.CBZ_RELEASE_VERSION }}.zip
       - name: Upload release asset
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          files: |
-            target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip
-            target/package/ffmpeg-source-${{ github.ref_name }}.zip
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPO: ${{ github.repository }}
+        run: |
+          $tag = $env:RELEASE_TAG
+          $repo = $env:RELEASE_REPO
+          $releaseNotes = '[**Changelog**](https://github.com/cbz-tools/cbz-tools-viewer/blob/main/CHANGELOG.md)'
+
+          $viewOutput = @(& gh release view $tag --repo $repo --json id 2>&1)
+          $viewExitCode = $LASTEXITCODE
+          if ($viewExitCode -ne 0) {
+            $viewError = ($viewOutput | ForEach-Object { $_.ToString() }) -join [Environment]::NewLine
+            if ($viewError -notmatch '(?i)\b404\b|release not found|no release found') {
+              if ($viewError) {
+                Write-Error $viewError
+              }
+              exit $viewExitCode
+            }
+
+            Write-Host "Release $tag was not found; creating it."
+            & gh release create $tag --repo $repo --title $tag --verify-tag --notes $releaseNotes
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          } else {
+            Write-Host "Release $tag already exists; preserving its metadata and body."
+          }
+
+          $assets = @(
+            'target/package/${{ env.CBZ_RELEASE_PACKAGE }}.zip'
+            'target/package/ffmpeg-source-${{ github.ref_name }}.zip'
+          )
+          foreach ($asset in $assets) {
+            & gh release upload $tag $asset --repo $repo --clobber
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }

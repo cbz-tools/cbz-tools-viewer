@@ -2,6 +2,13 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.9] - 2026-09-12
+
+### Fixed
+
+- Fixed the Viewer stopping on a white screen after rapid consecutive page navigation.
+- Fixed GPU texture history consistency during rapid page navigation.
+
 ## [0.5.8] - 2026-09-09
 
 ### Fixed

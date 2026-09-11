@@ -2472,6 +2472,8 @@ impl ViewerState {
             result.request_display_h,
             result.request_max_tex_side,
         );
+        let left_texture_payload = Self::static_texture_payload(left.content.as_ref());
+        let right_texture_payload = Self::static_texture_payload(right.content.as_ref());
         self.display_assets.content_left = left.content;
         self.display_assets.content_right = right.content;
         let both_contents_animated = matches!(
@@ -2565,11 +2567,7 @@ impl ViewerState {
             }
         }
         if !left_committed && left.register_gpu_history {
-            self.register_gpu_texture_history(
-                left.page,
-                Self::static_texture_payload(self.display_assets.content_left.as_ref()),
-                render_signature,
-            );
+            self.register_gpu_texture_history(left.page, left_texture_payload, render_signature);
         }
 
         let mut right_committed = false;
@@ -2628,11 +2626,7 @@ impl ViewerState {
             }
         }
         if !right_committed && right.register_gpu_history {
-            self.register_gpu_texture_history(
-                right.page,
-                Self::static_texture_payload(self.display_assets.content_right.as_ref()),
-                render_signature,
-            );
+            self.register_gpu_texture_history(right.page, right_texture_payload, render_signature);
         }
 
         true
@@ -5256,6 +5250,20 @@ impl ViewerState {
         self.persistent.target_page
     }
 
+    fn result_is_on_current_navigation_path(
+        &self,
+        result: &crate::infra::worker::viewer_loader::ViewerResult,
+    ) -> bool {
+        let displayed_page = self.persistent.displayed_page;
+        let target_page = self.nav_target();
+        let result_page = result.view_idx;
+        if target_page >= displayed_page {
+            result_page >= displayed_page && result_page <= target_page
+        } else {
+            result_page <= displayed_page && result_page >= target_page
+        }
+    }
+
     pub(super) fn register_nav_input(&mut self, now: Instant) {
         // 短時間連打を 1 系列として扱い、入力の性質を切り替える。
         self.ui_runtime.nav_consecutive_count = match self.ui_runtime.last_nav_input_at {
@@ -6104,18 +6112,35 @@ impl ViewerState {
             && self.request.queued_view.is_some()
             && self.nav_target() != self.persistent.requested_page
         {
+            if !self.result_is_on_current_navigation_path(&result) {
+                tracing::trace!(
+                    request_id = result.request_id,
+                    result_view = result.view_idx,
+                    displayed_page = self.persistent.displayed_page,
+                    requested_page = self.persistent.requested_page,
+                    nav_target = self.nav_target(),
+                    queued_view = ?self.request.queued_view,
+                    "viewer_ui: dropped intermediate result for follow-latest"
+                );
+                return self.consume_queued_view(display_w, display_h, max_tex_side, ctx);
+            }
+
+            // Keep the commit state aligned with the result while the latest
+            // request remains queued. `finalize_display_commit` promotes
+            // requested_page to displayed_page and then consumes that queue.
             tracing::trace!(
                 request_id = result.request_id,
+                result_view = result.view_idx,
+                displayed_page = self.persistent.displayed_page,
                 requested_page = self.persistent.requested_page,
                 nav_target = self.nav_target(),
                 queued_view = ?self.request.queued_view,
-                "viewer_ui: dropped intermediate result for follow-latest"
+                "viewer_ui: committing intermediate result for follow-latest"
             );
-            return self.consume_queued_view(display_w, display_h, max_tex_side, ctx);
+            self.persistent.requested_page = result.view_idx;
         }
 
-        let (result_left_page, result_right_page) =
-            self.current_view_pages(self.persistent.requested_page);
+        let (result_left_page, result_right_page) = (result.page_left, result.page_right);
 
         let request_display_w = result.request_display_w;
         let request_display_h = result.request_display_h;
