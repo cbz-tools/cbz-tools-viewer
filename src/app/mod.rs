@@ -82,12 +82,21 @@ struct EntryProperties {
     page_count: Option<u32>,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum StartupScanState {
+    /// Defer the initial scan until one complete root frame has finished.
+    WaitForFirstFrame,
+    WaitForFrameAfter(u64),
+    Started,
+}
+
 pub struct App {
     library: LibraryState,
     favorites: Vec<PathBuf>,
     left_pane_visible: bool,
     left_pane_width: f32,
     initial_dir: Option<PathBuf>,
+    startup_scan_state: StartupScanState,
 
     /// アプリ全体設定（サムネサイズ等）
     app_settings: AppSettings,
@@ -191,6 +200,11 @@ impl App {
                     .map(PathBuf::from)
             })
             .map(normalize_dir_path);
+        let startup_scan_state = if initial_dir.is_some() {
+            StartupScanState::WaitForFirstFrame
+        } else {
+            StartupScanState::Started
+        };
         let pending_select = launch
             .startup_select_path
             .map(normalize_dir_path)
@@ -231,6 +245,7 @@ impl App {
             left_pane_visible,
             left_pane_width,
             initial_dir,
+            startup_scan_state,
             app_settings,
             performance_resources,
             settings_open: false,
@@ -310,8 +325,20 @@ impl eframe::App for App {
         }
 
         // ── 起動時の初期スキャン ──────────────────────────────────────────────
-        if let Some(dir) = self.initial_dir.take() {
-            self.library.start_load_dir_async(normalize_dir_path(dir));
+        let current_frame_nr = ctx.cumulative_frame_nr();
+        match self.startup_scan_state {
+            StartupScanState::WaitForFirstFrame => {
+                self.startup_scan_state = StartupScanState::WaitForFrameAfter(current_frame_nr);
+            }
+            StartupScanState::WaitForFrameAfter(first_frame_nr)
+                if current_frame_nr > first_frame_nr =>
+            {
+                self.startup_scan_state = StartupScanState::Started;
+                if let Some(dir) = self.initial_dir.take() {
+                    self.library.start_load_dir_async(normalize_dir_path(dir));
+                }
+            }
+            StartupScanState::WaitForFrameAfter(_) | StartupScanState::Started => {}
         }
         if self.library.poll_async_load() {
             self.resolve_pending_select();
