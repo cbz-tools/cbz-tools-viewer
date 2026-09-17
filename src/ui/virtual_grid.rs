@@ -22,7 +22,9 @@ use crate::infra::web_search::WebSearchMenuItem;
 
 use super::{
     common::paint_favorite_star,
-    filename_token_menu::{PopupKeyInput, show_filename_token_menu_frame},
+    filename_token_menu::{
+        FilenameTokenMenuOptions, PopupKeyInput, show_filename_token_menu_frame,
+    },
     i18n::{TextKey, tr},
     icons,
     library::{
@@ -1441,12 +1443,14 @@ fn render_context_menu_header(
             let token_menu = show_filename_token_menu_frame(
                 ui,
                 entry,
-                context.popup_keys,
-                context.language,
-                true,
-                context.show_clear_filter,
-                context.web_searches,
-                true,
+                FilenameTokenMenuOptions {
+                    popup_keys: context.popup_keys,
+                    language: context.language,
+                    filter_enabled: true,
+                    show_clear_filter: context.show_clear_filter,
+                    web_searches: context.web_searches,
+                    library_menu: true,
+                },
             );
             menu_actions.filter_token = token_menu.filter_token;
             menu_actions.clear_filter = token_menu.clear_filter;

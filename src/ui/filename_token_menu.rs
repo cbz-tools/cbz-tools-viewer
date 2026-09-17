@@ -23,6 +23,15 @@ pub(crate) struct PopupKeyInput {
     pub(crate) esc: bool,
 }
 
+pub(crate) struct FilenameTokenMenuOptions<'a> {
+    pub(crate) popup_keys: PopupKeyInput,
+    pub(crate) language: UiLanguage,
+    pub(crate) filter_enabled: bool,
+    pub(crate) show_clear_filter: bool,
+    pub(crate) web_searches: &'a [WebSearchMenuItem],
+    pub(crate) library_menu: bool,
+}
+
 #[derive(Default)]
 pub(crate) struct FilenameTokenMenuResult {
     pub(crate) filter_token: Option<String>,
@@ -34,12 +43,7 @@ pub(crate) struct FilenameTokenMenuResult {
 pub(crate) fn show_filename_token_menu_frame(
     ui: &mut egui::Ui,
     entry: &BookMeta,
-    popup_keys: PopupKeyInput,
-    language: UiLanguage,
-    filter_enabled: bool,
-    show_clear_filter: bool,
-    web_searches: &[WebSearchMenuItem],
-    library_menu: bool,
+    options: FilenameTokenMenuOptions<'_>,
 ) -> FilenameTokenMenuResult {
     let filename = entry
         .path
@@ -71,7 +75,12 @@ pub(crate) fn show_filename_token_menu_frame(
         .unwrap_or_else(|| default_selected_token_index(&selectable_tokens));
     ui.set_min_width(520.0);
     ui.set_max_width(720.0);
-    if popup_keys.up || popup_keys.down || popup_keys.left || popup_keys.right || popup_keys.esc {
+    if options.popup_keys.up
+        || options.popup_keys.down
+        || options.popup_keys.left
+        || options.popup_keys.right
+        || options.popup_keys.esc
+    {
         ui.close();
         return FilenameTokenMenuResult::default();
     }
@@ -111,13 +120,13 @@ pub(crate) fn show_filename_token_menu_frame(
 
     let selected_text = &selectable_tokens[selected_idx].text;
     let can_apply = !selected_text.trim().is_empty();
-    let filter_enabled = filter_enabled && can_apply;
-    let filter_key = if library_menu {
+    let filter_enabled = options.filter_enabled && can_apply;
+    let filter_key = if options.library_menu {
         TextKey::FilterTokenCompact
     } else {
         TextKey::FilterToken
     };
-    let filter_label = tr(language, filter_key).replacen("{}", selected_text, 1);
+    let filter_label = tr(options.language, filter_key).replacen("{}", selected_text, 1);
     let filter_row = ContextMenuRowSpec {
         label: &filter_label,
         shortcut: "",
@@ -141,12 +150,12 @@ pub(crate) fn show_filename_token_menu_frame(
         };
     }
 
-    let copy_key = if library_menu {
+    let copy_key = if options.library_menu {
         TextKey::CopyTokenCompact
     } else {
         TextKey::CopyToken
     };
-    let copy_label = tr(language, copy_key).replacen("{}", selected_text, 1);
+    let copy_label = tr(options.language, copy_key).replacen("{}", selected_text, 1);
     let copy_row = ContextMenuRowSpec {
         label: &copy_label,
         shortcut: "",
@@ -165,18 +174,19 @@ pub(crate) fn show_filename_token_menu_frame(
         ui.close();
     }
 
-    if !web_searches.is_empty() {
+    if !options.web_searches.is_empty() {
         let mut web_search = None;
-        let web_search_key = if library_menu {
+        let web_search_key = if options.library_menu {
             TextKey::WebSearchTokenCompact
         } else {
             TextKey::WebSearchToken
         };
-        let web_search_label = tr(language, web_search_key).replacen("{}", selected_text, 1);
+        let web_search_label =
+            tr(options.language, web_search_key).replacen("{}", selected_text, 1);
         draw_context_menu_submenu_button(ui, &web_search_label, |ui| {
             ui.set_min_width(200.0);
             ui.set_max_width(200.0);
-            for search in web_searches {
+            for search in options.web_searches {
                 let search_row = ContextMenuRowSpec {
                     label: &search.display,
                     shortcut: "",
@@ -206,10 +216,10 @@ pub(crate) fn show_filename_token_menu_frame(
         }
     }
 
-    if show_clear_filter {
+    if options.show_clear_filter {
         ui.separator();
         let clear_filter_row = ContextMenuRowSpec {
-            label: tr(language, TextKey::ClearFilter),
+            label: tr(options.language, TextKey::ClearFilter),
             shortcut: "",
             enabled: true,
             label_color: theme::TEXT_MAIN,

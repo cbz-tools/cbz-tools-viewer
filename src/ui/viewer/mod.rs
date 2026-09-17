@@ -26,7 +26,9 @@ use self::progress::render_page_progress_bar;
 use self::state::{OverlayRenderResult, now_ms};
 use self::toolbar::{ViewerToolbarContext, is_reserved_viewer_key, render_viewer_toolbar};
 use super::{
-    filename_token_menu::{PopupKeyInput, show_filename_token_menu_frame},
+    filename_token_menu::{
+        FilenameTokenMenuOptions, PopupKeyInput, show_filename_token_menu_frame,
+    },
     icons, theme,
 };
 
@@ -1178,12 +1180,14 @@ pub fn show(
             let token_menu = show_filename_token_menu_frame(
                 ui,
                 state.entry(),
-                PopupKeyInput::default(),
-                language,
-                filter_token_enabled,
-                show_clear_filter,
-                web_searches,
-                true,
+                FilenameTokenMenuOptions {
+                    popup_keys: PopupKeyInput::default(),
+                    language,
+                    filter_enabled: filter_token_enabled,
+                    show_clear_filter,
+                    web_searches,
+                    library_menu: true,
+                },
             );
             let filter_token = token_menu.filter_token;
             let clear_filter = token_menu.clear_filter;

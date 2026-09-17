@@ -599,10 +599,10 @@ fn decode_png_frames(data: &[u8]) -> Result<Vec<FrameData>> {
             .map_err(|e| anyhow::anyhow!("APNG frames: {e}"))?;
         if frames.len() > 1 {
             let orientation = for_image_hint(data, ImageFormatHint::Png);
-            return Ok(frames
+            return frames
                 .into_iter()
                 .map(|frame| image_frame_to_frame_data(frame, orientation))
-                .collect::<Result<Vec<_>>>()?);
+                .collect::<Result<Vec<_>>>();
         }
     }
 
