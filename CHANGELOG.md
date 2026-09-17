@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.10] - 2026-09-17
+
+### Fixed
+
+- Improved the reliability of the application icon shown in the Windows taskbar at startup.
+
 ## [0.5.9] - 2026-09-12
 
 ### Fixed
