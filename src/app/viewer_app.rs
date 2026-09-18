@@ -25,6 +25,7 @@ use crate::infra::page_map::viewer_bootstrap::bootstrap_viewer_page_map;
 use crate::infra::worker::external_tool_worker::{
     ExternalToolRunRequest, ExternalToolRunResult, ExternalToolWorker,
 };
+use crate::infra::worker::spad_early_start_threshold_percent;
 use crate::repaint::RepaintNotifier;
 use crate::ui::i18n::{TextKey, tr};
 use crate::ui::thumb_cache::load_disk_thumb_texture;
@@ -87,6 +88,7 @@ pub struct ViewerApp {
     saved_viewer_window_maximized: Option<bool>,
     image_order_snapshot_applied: bool,
     spad_session_id: u64,
+    spad_early_start_threshold_percent: Option<usize>,
 }
 
 enum ViewerMode {
@@ -672,6 +674,7 @@ impl ViewerApp {
                 entry,
                 start_page: book_state.start_page.map(|page| page as u32).unwrap_or(0),
                 spad_session_id: 1,
+                spad_early_start_threshold_percent: None,
                 cover_blank: file_settings.cover_blank,
                 quality_override: file_settings.quality_override,
                 global_reading_direction: app_settings.reading_direction,
@@ -762,6 +765,7 @@ impl ViewerApp {
             saved_viewer_window_maximized,
             image_order_snapshot_applied: false,
             spad_session_id: 1,
+            spad_early_start_threshold_percent: None,
         };
         app.send_spad_request();
         Ok(app)
@@ -816,6 +820,7 @@ impl ViewerApp {
                 entry,
                 start_page: book_state.start_page.map(|page| page as u32).unwrap_or(0),
                 spad_session_id: self.spad_session_id,
+                spad_early_start_threshold_percent: self.spad_early_start_threshold_percent,
                 cover_blank: file_settings.cover_blank,
                 quality_override: file_settings.quality_override,
                 global_reading_direction: self.app_settings.reading_direction,
@@ -1020,6 +1025,10 @@ impl ViewerApp {
     }
 
     fn configure_spad_targets(&mut self, prev: Option<AdjacentBook>, next: Option<AdjacentBook>) {
+        if self.spad_early_start_threshold_percent.is_none() && (prev.is_some() || next.is_some()) {
+            self.spad_early_start_threshold_percent =
+                Some(spad_early_start_threshold_percent(&self.state.entry().path));
+        }
         let prev_layout_settings = prev.as_ref().map(|book| {
             let settings = self.settings.get(&book.path);
             viewer::SpadTargetLayoutSettings {
@@ -1034,8 +1043,13 @@ impl ViewerApp {
                 cover_blank: settings.cover_blank,
             }
         });
-        self.state
-            .configure_spad_targets(prev, next, prev_layout_settings, next_layout_settings);
+        self.state.configure_spad_targets(
+            prev,
+            next,
+            prev_layout_settings,
+            next_layout_settings,
+            self.spad_early_start_threshold_percent,
+        );
     }
 
     fn book_meta_for_preview_path(path: &Path) -> Option<BookMeta> {

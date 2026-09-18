@@ -2,6 +2,13 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.11] - 2026-09-18
+
+### Changed
+
+- Made the Library pane toggle icon larger and easier to see.
+- Adjusted adjacent-book preloading to begin earlier on SSDs and later on HDDs, balancing responsiveness with disk activity.
+
 ## [0.5.10] - 2026-09-17
 
 ### Fixed

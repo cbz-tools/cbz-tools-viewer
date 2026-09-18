@@ -10,6 +10,7 @@
 | Prev Worker | worker thread | 前本専用RGBA decode | `spad-prev`, `spad_prev_shared` |
 | SPAD Queue | worker queue | side別single-slot request queue | `send_spad_next_request()`, `send_spad_prev_request()` |
 | SPAD Result Receiver | UI thread | side別result drain | `try_recv_spad_next()`, `try_recv_spad_prev()` |
+| Early-start Threshold | RAM / ViewerApp | 媒体別の先行開始閾値。最初のSPAD target成立時にだけ判定しViewer内で保持 | `spad_early_start_threshold_percent`, `spad_early_start_threshold_percent()` |
 | Ready Scratchpad | RAM | promotion候補のRGBA | `ready_pages`, `SpadReadyPage` |
 | Promotion | UI thread | 本移動後のL1 Future化 | `take_spad_ready_pages_for_target()`, `promote_spad_ready_pages_to_l1_future()` |
 | L1 Future | VRAM | promotion先 | `GpuWarmupCache` |
@@ -103,6 +104,8 @@ Prev target
 
 各Targetはtarget path、entry page、page_count、ready pages、failed pages、current bytes、byte budget、exhaustedを保持する。SPAD全体はsessionとgenerationを持ち、inflightはNext/Prevで別に保持する。予算もTarget別であり、片側が明示的にexhaustedでも反対側は継続できる。
 
+先行dispatchの媒体別閾値はTarget別ではなくViewer session単位で保持する。最初にNextまたはPrevのSPAD targetが成立した時だけ現在本のpathから媒体を判定し、その値をViewerAppに保存する。本移動でViewerStateが再生成されても同じ値を引き継ぎ、同一Viewer sessionでは再判定しない。SPAD targetが一度も成立しない場合は媒体判定自体を行わない。
+
 ---
 
 ## Worker構成
@@ -132,18 +135,37 @@ shared SPAD queueは使わない。Next dispatchを先に試して優先性を�
 
 SPAD dispatchは、現在本の初回表示がcommit済みで、L2 statusのBookId / generationが現在Viewerと一致することを前提にside別で判定する。
 
-L2が未完了でも、次のいずれかを満たす場合は、各隣接本の最低保証2枚だけを先行dispatchできる。
+L2が未完了でも、媒体別の先行開始閾値に達した場合は、各隣接本の最低保証2枚だけを先行dispatchできる。
 
-- SPAD追加予約分を除いたL2 RGBA cacheの実使用量が有効上限の30%に達した。
-- 現在本のPage Mapがあり、L2に保持された物理ページ数がPage Map総ページ数の30%に達した。
+先行開始閾値は次のとおりである。
 
-Page Mapがない場合は、ページ数条件を使わない。L2 settled後は通常どおり追加割合を含む残りのSPAD dispatchを許可する。
+```text
+SSD      25%
+HDD      50%
+Unknown  25%
+```
+
+判定はSPADが実際に利用可能になった時だけ行う。`configure_spad_targets()` にNextまたはPrevの少なくとも一方が渡され、Viewer session内でまだ未判定の場合に、現在本のpathを使って既存のstorage medium判定を1回だけ実行する。結果はViewerAppに保持し、本移動後も再利用する。SPAD targetが存在しない場合は媒体判定しない。
+
+L2が未完了の場合、次のいずれかを満たすと最低保証2枚の先行dispatchを許可する。
+
+- SPAD追加予約分を除いたL2 RGBA cacheの実使用量が、媒体別閾値に達した。
+- 現在本のPage Mapがあり、L2に保持された物理ページ数がPage Map総ページ数の媒体別閾値に達した。
+
+Page Mapがない場合は、ページ数条件を使わない。L2 settled後は媒体別閾値に関係なく、通常どおり追加割合を含む残りのSPAD dispatchを許可する。
 
 ```text
 現在本の表示commit済み、loading中でなく、displayed_page == requested_page、かつ displayed_page == target_page
 L2 statusのBookIdが現在Viewerと一致
 L2 statusのgenerationが現在Viewerと一致
-L2 settled済み、またはL2使用率が30%以上、または（Page Mapがある場合）L2保持ページ率が30%以上
+L2 settled済み、
+またはL2使用率が媒体別閾値以上、
+または（Page Mapがある場合）L2保持ページ率が媒体別閾値以上
+
+媒体別閾値:
+    SSD      25%
+    HDD      50%
+    Unknown  25%
 ```
 
 各sideはside別inflightがなく、targetが存在し、targetが未exhaustedで、target budgetとdispatch可能な候補pageが残る場合にdispatch可能である。
@@ -281,9 +303,14 @@ AdjacentBooks snapshot
         ↓
 SPAD target configure
         ↓
+first target only:
+storage medium detect -> thresholdをViewer session内で保持
+        ↓
 existing Page Map cache read only (optional)
         ↓
-L2 30% / settled gate
+L2 media threshold / settled gate
+    SSD / Unknown: 25%
+    HDD:           50%
         ↓
 SPAD dispatch
     ├─ spad-next worker
@@ -313,6 +340,7 @@ display commit / fallback decode
 - SPADはRGBA scratchpadでありTexture cacheではない。
 - SPADは本移動後にのみL1 Futureへpromotionする。
 - Next/Prevは別Targetとして並列decodeする。
+- SSD/HDD判定は最初のSPAD target成立時にだけ行い、Viewer session中は同じ閾値を再利用する。SPAD targetがなければ判定しない。
 - Page Mapは既存cacheを参照するだけで、新規作成しない。
 - stale resultはdropし、物理cancelは必須にしない。
 - fallback decodeを表示保証の最終経路とする。

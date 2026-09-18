@@ -107,23 +107,24 @@ pub fn show(
                 .stroke(menu_stroke)
                 .atom_ui(ui);
         if let Some(menu_content_rect) = menu_layout_resp.rect(menu_content_id) {
-            let menu_line_stroke =
+            let menu_icon_stroke =
                 egui::Stroke::new(1.5, ui.visuals().widgets.inactive.fg_stroke.color);
-            for y_offset in [-5.0_f32, 0.0, 5.0] {
-                ui.painter().line_segment(
-                    [
-                        egui::pos2(
-                            menu_content_rect.center().x - 8.5,
-                            menu_content_rect.center().y + y_offset,
-                        ),
-                        egui::pos2(
-                            menu_content_rect.center().x + 8.5,
-                            menu_content_rect.center().y + y_offset,
-                        ),
-                    ],
-                    menu_line_stroke,
-                );
-            }
+            let icon_rect =
+                egui::Rect::from_center_size(menu_content_rect.center(), egui::vec2(17.0, 16.0));
+            ui.painter().rect_stroke(
+                icon_rect,
+                egui::CornerRadius::same(3),
+                menu_icon_stroke,
+                egui::StrokeKind::Inside,
+            );
+            let divider_x = icon_rect.left() + 6.0;
+            ui.painter().line_segment(
+                [
+                    egui::pos2(divider_x, icon_rect.top() + 2.0),
+                    egui::pos2(divider_x, icon_rect.bottom() - 2.0),
+                ],
+                menu_icon_stroke,
+            );
         }
         let menu_resp = menu_layout_resp
             .response

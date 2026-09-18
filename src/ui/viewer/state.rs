@@ -61,9 +61,6 @@ const LOG_VIEWPORT_TRANSITION: bool = cfg!(debug_assertions);
 const TRANSITION_LOG_FRAMES: u8 = 30;
 const ANIMATION_STREAM_LEFT_SLOT: usize = 0;
 const ANIMATION_STREAM_RIGHT_SLOT: usize = 1;
-/// SPAD最低保証を先行開始する割合。ユーザー設定ではなく調整用の内部定数。
-/// L2バイト使用率と、Page Mapがある場合のL2保持ページ率で共用する。
-const SPAD_EARLY_START_THRESHOLD_PERCENT: usize = 30;
 const SPAD_GUARANTEED_PAGE_COUNT: usize = 2;
 macro_rules! spad_trace_debug {
     ($($arg:tt)*) => {
@@ -152,6 +149,7 @@ pub struct ViewerStateInit {
     pub entry: BookMeta,
     pub start_page: u32,
     pub spad_session_id: u64,
+    pub spad_early_start_threshold_percent: Option<usize>,
     pub cover_blank: bool,
     pub quality_override: Option<ViewerQuality>,
     pub global_reading_direction: ReadingDirection,
@@ -374,6 +372,7 @@ struct SpadInflightRequest {
 struct ViewerSpadState {
     session: u64,
     generation: u64,
+    early_start_threshold_percent: Option<usize>,
     next_inflight: Option<SpadInflightRequest>,
     prev_inflight: Option<SpadInflightRequest>,
     prev: Option<SpadTargetState>,
@@ -1433,9 +1432,11 @@ impl ViewerState {
         next: Option<AdjacentBook>,
         prev_layout_settings: Option<SpadTargetLayoutSettings>,
         next_layout_settings: Option<SpadTargetLayoutSettings>,
+        early_start_threshold_percent: Option<usize>,
     ) {
         self.cancel_spad("target_reset");
         self.spad.generation = self.spad.generation.saturating_add(1);
+        self.spad.early_start_threshold_percent = early_start_threshold_percent;
         self.spad.next_inflight = None;
         self.spad.prev_inflight = None;
         self.spad.no_dispatch_logged = false;
@@ -1549,6 +1550,7 @@ impl ViewerState {
             entry,
             start_page,
             spad_session_id,
+            spad_early_start_threshold_percent,
             cover_blank,
             quality_override,
             global_reading_direction,
@@ -1708,6 +1710,7 @@ impl ViewerState {
             spad: ViewerSpadState {
                 session: spad_session_id,
                 generation: 0,
+                early_start_threshold_percent: spad_early_start_threshold_percent,
                 next_inflight: None,
                 prev_inflight: None,
                 prev: None,
@@ -3486,24 +3489,29 @@ impl ViewerState {
         }
         {
             let l2_status = self.l2_settled_status();
+            let early_start_threshold_percent = self.spad.early_start_threshold_percent;
             let display_stable = self.ui_runtime.last_display_commit_show_seq.is_some()
                 && !self.ui_runtime.loading
                 && self.persistent.displayed_page == self.persistent.requested_page
                 && self.persistent.displayed_page == self.persistent.target_page;
-            let l2_usage_threshold_reached = l2_status.max_bytes > 0
-                && l2_status.current_bytes.saturating_mul(100)
-                    >= l2_status
-                        .max_bytes
-                        .saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT);
+            let l2_usage_threshold_reached =
+                early_start_threshold_percent.is_some_and(|threshold| {
+                    l2_status.max_bytes > 0
+                        && l2_status.current_bytes.saturating_mul(100)
+                            >= l2_status.max_bytes.saturating_mul(threshold)
+                });
             let page_map_page_count = match &self.persistent.page_map_mode {
                 ViewerPageMapMode::Mapped(page_map) => Some(page_map.page_count()),
                 ViewerPageMapMode::Unavailable => None,
             };
-            let l2_page_threshold_reached = page_map_page_count.is_some_and(|page_count| {
-                page_count > 0
-                    && l2_status.cached_page_count.saturating_mul(100)
-                        >= page_count.saturating_mul(SPAD_EARLY_START_THRESHOLD_PERCENT)
-            });
+            let l2_page_threshold_reached =
+                early_start_threshold_percent.is_some_and(|threshold| {
+                    page_map_page_count.is_some_and(|page_count| {
+                        page_count > 0
+                            && l2_status.cached_page_count.saturating_mul(100)
+                                >= page_count.saturating_mul(threshold)
+                    })
+                });
             let scope = if l2_status.settled {
                 Some(SpadDispatchScope::All)
             } else if l2_usage_threshold_reached || l2_page_threshold_reached {
