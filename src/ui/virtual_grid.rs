@@ -1316,7 +1316,11 @@ fn draw_thumb_cell(
     let painter = ui.painter();
 
     // ── 背景 ─────────────────────────────────────────────────────────────────
-    painter.rect_filled(rect, CornerRadius::same(5), theme::PLACEHOLDER_BG);
+    // 通常の画像カードは未使用領域を Library 背景へ透過させる。
+    // 画像未生成・読み込み中・失敗・フォルダの状態表示にはプレースホルダーを残す。
+    if !matches!(thumb_state, ThumbCellState::Ready(_)) {
+        painter.rect_filled(rect, CornerRadius::same(5), theme::PLACEHOLDER_BG);
+    }
 
     // 選択枠は「実画像」ではなく、固定サムネイル表示エリアに合わせる。
     // これにより縦長/横長画像でも選択枠サイズが揺れない。

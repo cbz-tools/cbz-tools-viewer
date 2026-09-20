@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.12] - 2026-09-20
+
+### Changed
+
+- Matched unused space around Library thumbnails to the Library background for a more natural card appearance.
+
 ## [0.5.11] - 2026-09-18
 
 ### Changed
