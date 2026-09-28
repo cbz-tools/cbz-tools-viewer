@@ -199,6 +199,7 @@ impl ViewerMode {
             allow_delete: self.can_delete_and_next(),
             allow_book_navigation: self.can_navigate_book(),
             allow_favorite_toggle: self.can_navigate_book(),
+            allow_cover_setting: matches!(self, Self::Library { .. } | Self::SnapshotOnly { .. }),
         }
     }
 }
@@ -231,6 +232,25 @@ impl ViewerApp {
     fn mark_viewer_feedback(&mut self, key: TextKey, now: Instant) {
         let text = self.viewer_text(key);
         self.state.mark_key_feedback(text, now);
+    }
+
+    fn notify_cover_changed(&self, current_path: &Path) {
+        let request_tx = match &self.mode {
+            ViewerMode::Library { request_tx, .. }
+            | ViewerMode::SnapshotOnly { request_tx, .. } => request_tx,
+            ViewerMode::Standalone | ViewerMode::Detached => return,
+        };
+        if request_tx
+            .send(ViewerToLibrary::CoverChanged {
+                current_path: current_path.to_path_buf(),
+            })
+            .is_err()
+        {
+            tracing::warn!(
+                path = %current_path.display(),
+                "viewer.ipc.cover_changed.send.failed"
+            );
+        }
     }
 
     fn request_viewer_state_sync(
@@ -574,8 +594,11 @@ impl ViewerApp {
                             .spawn(move || {
                                 let mut conn = client;
                                 while let Ok(request) = request_rx.recv() {
-                                    let fire_and_forget =
-                                        matches!(&request, ViewerToLibrary::SourceChanged { .. });
+                                    let fire_and_forget = matches!(
+                                        &request,
+                                        ViewerToLibrary::SourceChanged { .. }
+                                            | ViewerToLibrary::CoverChanged { .. }
+                                    );
                                     tracing::debug!(request = ?request, "viewer.ipc.writer.send.begin");
                                     if conn.send_to_library(&request).is_err() {
                                         tracing::warn!("viewer.ipc.writer.send.failed");
@@ -2572,6 +2595,12 @@ impl eframe::App for ViewerApp {
                             self.begin_page_range_delete_dialog();
                         }
                     }
+                    ViewerAction::SetCover(cover_setting) if capabilities.allow_cover_setting => {
+                        let path = self.state.entry().path.as_ref().to_path_buf();
+                        self.settings.set_cover_setting(path.clone(), cover_setting);
+                        self.notify_cover_changed(path.as_path());
+                    }
+                    ViewerAction::SetCover(_) => {}
                     ViewerAction::ToggleFavorite => {
                         if let Err(e) = self.request_favorite_toggle() {
                             tracing::warn!(error = %e, "request-favorite-toggle failed");

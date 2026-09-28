@@ -951,7 +951,7 @@ fn visible_page_bounds(visible_pages: (Option<u32>, Option<u32>)) -> Option<(u32
     }
 }
 
-fn spread_screen_pages(
+pub(super) fn spread_screen_pages(
     visible_pages: (Option<u32>, Option<u32>),
     reading_direction: ReadingDirection,
 ) -> (Option<u32>, Option<u32>) {

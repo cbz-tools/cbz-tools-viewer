@@ -76,7 +76,8 @@ use crate::{
         app_settings::{LibraryCardSelectionStyle, LibraryHudMode, LibraryHudStyle, UiLanguage},
         archive::{BookId, BookMeta, LibraryEntry},
         archive_settings::{
-            FileSettings, ReadingState, SettingsStore, book_settings_path, book_settings_path_ref,
+            CoverSetting, FileSettings, ReadingState, SettingsStore, book_settings_path,
+            book_settings_path_ref,
         },
         kind_group::KindGroupConfig,
         page_map::SourceRevision,
@@ -287,6 +288,7 @@ pub struct LibraryState {
     /// サイドバー操作後にグリッドのコンテキストメニューキャッシュをリセットする
     pub reset_context_menu_cache: bool,
     reading_hud_states: HashMap<PathBuf, ReadingHudState>,
+    cover_settings_by_path: HashMap<PathBuf, CoverSetting>,
     page_map_failure_cache: Option<ArtifactFailureDiskCache>,
     page_map_failure_revisions: HashMap<BookId, SourceRevision>,
     page_map_failure_checked_revisions: HashMap<BookId, SourceRevision>,
@@ -1232,13 +1234,16 @@ impl LibraryState {
         let key = book_settings_path(path);
         let settings = SettingsStore::load().get(key.as_path());
         self.reading_hud_states
-            .insert(key, ReadingHudState::from_file_settings(&settings));
+            .insert(key.clone(), ReadingHudState::from_file_settings(&settings));
+        self.cover_settings_by_path
+            .insert(key, settings.cover_setting);
         self.recompute_group_counts();
     }
 
     pub(crate) fn remove_reading_hud_state_for_path(&mut self, path: &Path) {
         let key = book_settings_path(path);
         self.reading_hud_states.remove(&key);
+        self.cover_settings_by_path.remove(&key);
         self.recompute_group_counts();
     }
 
@@ -1250,6 +1255,7 @@ impl LibraryState {
             return;
         }
         self.reading_hud_states.remove(&old_key);
+        self.cover_settings_by_path.remove(&old_key);
         self.refresh_reading_hud_state_for_path(new_path);
         self.recompute_group_counts();
     }
@@ -2032,6 +2038,30 @@ impl LibraryState {
         self.recompute_group_counts();
     }
 
+    /// 表紙変更後に対象本の thumbnail 表示状態だけを破棄する。
+    /// Page Map の memo/failure state と本のグループ状態は維持する。
+    fn invalidate_book_thumbnail_state(&mut self, id: &BookId) {
+        if let Some(state) = self.book_states.get_mut(id) {
+            state.texture = None;
+            state.texture_size = None;
+            state.thumb_ready = false;
+            state.thumb_requested = false;
+            state.thumb_failed = false;
+            state.force_reload = false;
+        }
+        if let Some(display_keys) = self.last_display_set.as_mut() {
+            display_keys.retain(|key| key.book_id != *id);
+        }
+        if self
+            .last_display_stale_retry
+            .as_ref()
+            .is_some_and(|key| key.book_id == *id)
+        {
+            self.last_display_stale_retry = None;
+        }
+        self.recompute_group_counts();
+    }
+
     pub(crate) fn register_rebuilt_cbz_entry(
         &mut self,
         old_path: &Path,
@@ -2194,6 +2224,7 @@ impl LibraryState {
             scroll_selected_into_view_pending: false,
             reset_context_menu_cache: false,
             reading_hud_states: HashMap::new(),
+            cover_settings_by_path: HashMap::new(),
             page_map_failure_cache: open_artifact_failure_cache(),
             page_map_failure_revisions: HashMap::new(),
             page_map_failure_checked_revisions: HashMap::new(),
@@ -2355,6 +2386,51 @@ impl LibraryState {
             self.pending_source_changed_refresh = Some(current_dir);
         } else {
             self.reload_current_dir_diff();
+        }
+    }
+
+    /// Viewer が本単位の表紙元を変更したとき、対象 thumbnail を破棄して再生成する。
+    pub(crate) fn refresh_for_cover_changed(&mut self, current_path: &Path) {
+        let settings_path = book_settings_path(current_path);
+        let cover_setting = SettingsStore::load()
+            .get(settings_path.as_path())
+            .cover_setting;
+        self.cover_settings_by_path
+            .insert(settings_path.clone(), cover_setting);
+        let entry = self
+            .raw_entries
+            .iter()
+            .find(|entry| {
+                matches!(
+                    entry,
+                    LibraryEntry::Archive(_) | LibraryEntry::FolderBook(_)
+                ) && paths_equivalent_for_selection(
+                    book_settings_path_ref(entry.path()),
+                    settings_path.as_path(),
+                )
+            })
+            .cloned();
+        let book_id = entry
+            .as_ref()
+            .and_then(LibraryEntry::thumb_id)
+            .unwrap_or_else(|| BookId::from_path(settings_path.as_path()));
+
+        self.worker.invalidate_book_thumbnail(book_id.clone());
+        {
+            let _artifact_guard = self.artifact_gate.write();
+            if let Some(cache) = self.thumb_cache.as_ref()
+                && let Err(error) = cache.remove_thumbs_by_id(&book_id)
+            {
+                tracing::warn!(
+                    id = %book_id.0.to_hex(),
+                    %error,
+                    "library cover change failed to remove disk thumbnails"
+                );
+            }
+        }
+        self.invalidate_book_thumbnail_state(&book_id);
+        if let Some(entry) = entry {
+            self.request_thumb_for_entry(&entry, true);
         }
     }
 
@@ -3114,15 +3190,27 @@ impl LibraryState {
     fn prefill_reading_hud_states(&mut self) {
         let settings = SettingsStore::load();
         self.reading_hud_states.clear();
+        self.cover_settings_by_path.clear();
         for entry in &self.raw_entries {
             if matches!(entry, LibraryEntry::Folder(_) | LibraryEntry::VideoFile(_)) {
                 continue;
             }
             let key = book_settings_path(entry.path());
             let file_settings = settings.get(key.as_path());
-            self.reading_hud_states
-                .insert(key, ReadingHudState::from_file_settings(&file_settings));
+            self.reading_hud_states.insert(
+                key.clone(),
+                ReadingHudState::from_file_settings(&file_settings),
+            );
+            self.cover_settings_by_path
+                .insert(key, file_settings.cover_setting);
         }
+    }
+
+    fn cover_setting_for_entry(&self, entry: &LibraryEntry) -> CoverSetting {
+        self.cover_settings_by_path
+            .get(book_settings_path_ref(entry.path()))
+            .copied()
+            .unwrap_or_default()
     }
 
     fn filtered_entries(&self) -> Vec<LibraryEntry> {
@@ -3973,6 +4061,7 @@ impl LibraryState {
                     let task = ThumbTask {
                         book_id: book_id.clone(),
                         path: Arc::clone(&snapshot.path),
+                        cover_setting: self.cover_setting_for_entry(entry),
                         target_width,
                         expected_size: snapshot.size,
                         expected_modified: snapshot.modified,
@@ -4027,6 +4116,7 @@ impl LibraryState {
         let path = Arc::clone(&snapshot.path);
         let expected_size = snapshot.size;
         let expected_modified = snapshot.modified;
+        let cover_setting = self.cover_setting_for_entry(entry);
         let target_width = crate::domain::app_settings::AppSettings::storage_width();
         let state = self.book_state_mut(book_id);
         let should_bypass_cache = bypass_cache || state.force_reload;
@@ -4045,6 +4135,7 @@ impl LibraryState {
         self.worker.request(ThumbTask {
             book_id: book_id.clone(),
             path,
+            cover_setting,
             target_width,
             expected_size,
             expected_modified,
@@ -4236,6 +4327,7 @@ impl LibraryState {
         let path = Arc::clone(&snapshot.path);
         let expected_size = snapshot.size;
         let expected_modified = snapshot.modified;
+        let cover_setting = self.cover_setting_for_entry(entry);
         let target_width = crate::domain::app_settings::AppSettings::storage_width();
         let state = self.book_state_mut(book_id);
         if state.texture.is_some() || state.thumb_failed {
@@ -4245,6 +4337,7 @@ impl LibraryState {
         Some(ThumbTask {
             book_id: book_id.clone(),
             path,
+            cover_setting,
             target_width,
             expected_size,
             expected_modified,

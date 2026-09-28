@@ -726,6 +726,17 @@ impl App {
         self.library.worker.remove_video_cache(id.clone());
     }
 
+    fn invalidate_history_thumb_textures_for_cover_changed(&mut self, current_path: &Path) {
+        let settings_path = crate::domain::archive_settings::book_settings_path(current_path);
+        let mut prefixes = vec![format!("{}:", normalize_path_for_selection(current_path))];
+        let settings_prefix = format!("{}:", normalize_path_for_selection(settings_path.as_path()));
+        if !prefixes.contains(&settings_prefix) {
+            prefixes.push(settings_prefix);
+        }
+        self.history_thumb_textures
+            .retain(|key, _| !prefixes.iter().any(|prefix| key.starts_with(prefix)));
+    }
+
     pub(super) fn update_path_dependent_state(&mut self, old_path: &Path, new_path: Option<&Path>) {
         let old_norm = normalize_path_for_selection(old_path);
         let new_norm = new_path.map(normalize_path_for_selection);
@@ -1060,6 +1071,13 @@ impl App {
             match event {
                 ViewerSyncEvent::SourceChanged { path } => {
                     self.library.refresh_for_source_changed(path);
+                }
+                ViewerSyncEvent::CoverChanged { current_path } => {
+                    self.invalidate_history_thumb_textures_for_cover_changed(
+                        current_path.as_path(),
+                    );
+                    self.library
+                        .refresh_for_cover_changed(current_path.as_path());
                 }
                 ViewerSyncEvent::Deleted {
                     deleted_path,

@@ -17,6 +17,7 @@ use tokio::sync::{Notify, Semaphore, oneshot};
 
 use super::storage_medium::{StorageMedium, detect_storage_medium_cached};
 use crate::domain::archive::BookId;
+use crate::domain::archive_settings::CoverSetting;
 use crate::domain::page::ImageFormatHint;
 use crate::domain::page_map::{BookPageMap, SourceRevision};
 use crate::domain::thumbnail::Thumbnail;
@@ -65,6 +66,8 @@ const BACKGROUND_ARTIFACT_MAX_CREDIT: f64 = 8.0;
 pub struct ThumbTask {
     pub book_id: BookId,
     pub path: Arc<Path>,
+    /// Library 側で解決済みの本単位表紙設定。worker は設定ファイルを読まない。
+    pub cover_setting: CoverSetting,
     pub target_width: u16,
     /// 要求時点のファイルサイズ。処理完了までに変化した古い結果を UI に返さないために使う。
     pub expected_size: u64,
@@ -312,6 +315,9 @@ pub struct ThumbWorker {
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
     book_artifact_generations: BookArtifactGenerations,
+    artifact_gate: Arc<RwLock<()>>,
+    mem_cache: Arc<ThumbMemCache>,
+    in_flight: Arc<Mutex<HashSet<(ThumbTaskKey, u64)>>>,
     lanes: Arc<ThumbnailLaneState>,
     display_mailbox: Arc<DisplayThumbMailbox>,
     preview_control: Arc<PreviewControl>,
@@ -825,6 +831,8 @@ impl ThumbWorker {
         let generation = Arc::new(AtomicU64::new(0));
         let artifact_generation = Arc::new(AtomicU64::new(0));
         let book_artifact_generations = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let mem_cache = Arc::new(ThumbMemCache::new(THUMB_MEM_CACHE_MAX_BYTES));
+        let in_flight = Arc::new(Mutex::new(HashSet::new()));
         let lanes = Arc::new(ThumbnailLaneState::new(base_goal));
         let display_mailbox = Arc::new(DisplayThumbMailbox::new(Arc::clone(&lanes)));
         let preview_control = Arc::new(PreviewControl::new());
@@ -863,6 +871,8 @@ impl ThumbWorker {
                 let generation = Arc::clone(&generation);
                 let artifact_generation = Arc::clone(&artifact_generation);
                 let book_artifact_generations = Arc::clone(&book_artifact_generations);
+                let mem_cache = Arc::clone(&mem_cache);
+                let in_flight = Arc::clone(&in_flight);
                 let artifact_gate = Arc::clone(&artifact_gate);
                 let lanes = Arc::clone(&lanes);
                 let display_mailbox = Arc::clone(&display_mailbox);
@@ -879,6 +889,8 @@ impl ThumbWorker {
                         generation,
                         artifact_generation,
                         book_artifact_generations,
+                        mem_cache,
+                        in_flight,
                         artifact_gate,
                         lanes,
                         display_mailbox,
@@ -914,6 +926,9 @@ impl ThumbWorker {
             generation,
             artifact_generation,
             book_artifact_generations,
+            artifact_gate,
+            mem_cache,
+            in_flight,
             lanes,
             display_mailbox,
             preview_control,
@@ -1001,6 +1016,18 @@ impl ThumbWorker {
 
     pub(crate) fn is_book_artifact_current(&self, id: &BookId, expected: u64) -> bool {
         current_book_artifact_generation(&self.book_artifact_generations, id) == expected
+    }
+
+    /// Invalidate image thumbnail state without changing Page Map generations or coordinator state.
+    pub fn invalidate_book_thumbnail(&self, id: BookId) {
+        {
+            let _gate = self.artifact_gate.write();
+            self.mem_cache.remove_by_book_id(&id);
+        }
+        self.display_mailbox.remove_by_book_id(&id);
+        if let Ok(mut in_flight) = self.in_flight.lock() {
+            in_flight.retain(|(key, _)| key.book_id != id);
+        }
     }
 
     pub fn request_video(&self, mut task: VideoThumbTask) {
@@ -1204,6 +1231,8 @@ struct WorkerMainContext {
     generation: Arc<AtomicU64>,
     artifact_generation: Arc<AtomicU64>,
     book_artifact_generations: BookArtifactGenerations,
+    mem_cache: Arc<ThumbMemCache>,
+    in_flight: Arc<Mutex<HashSet<(ThumbTaskKey, u64)>>>,
     artifact_gate: Arc<RwLock<()>>,
     lanes: Arc<ThumbnailLaneState>,
     display_mailbox: Arc<DisplayThumbMailbox>,
@@ -1222,6 +1251,8 @@ fn worker_main(context: WorkerMainContext) {
         generation,
         artifact_generation,
         book_artifact_generations,
+        mem_cache,
+        in_flight,
         artifact_gate,
         lanes,
         display_mailbox,
@@ -1296,7 +1327,7 @@ fn worker_main(context: WorkerMainContext) {
         Some(page_map_status_notifier),
     ));
     let shared = Arc::new(WorkerShared {
-        mem_cache: ThumbMemCache::new(THUMB_MEM_CACHE_MAX_BYTES),
+        mem_cache,
         disk_cache: Arc::clone(&disk_cache),
         page_map_cache,
         artifact_failure_cache,
@@ -1306,7 +1337,7 @@ fn worker_main(context: WorkerMainContext) {
         artifact_gate: Arc::clone(&artifact_gate),
         lanes,
         next_flight_id: AtomicU64::new(0),
-        in_flight: Arc::new(Mutex::new(HashSet::new())),
+        in_flight,
         video_in_flight: Arc::new(Mutex::new(HashSet::new())),
         pruned_revisions: Arc::new(Mutex::new(HashSet::new())),
         req_tx,
@@ -4321,7 +4352,7 @@ impl Drop for LaneRunningGuard {
 }
 
 struct WorkerShared {
-    mem_cache: ThumbMemCache,
+    mem_cache: Arc<ThumbMemCache>,
     disk_cache: Arc<DiskCache>, // バックグラウンド書き込みと共有する。
     page_map_cache: Option<Arc<PageMapDiskCache>>,
     artifact_failure_cache: Option<Arc<ArtifactFailureDiskCache>>,
@@ -4705,6 +4736,88 @@ struct FolderThumbnailLaneResult {
     elapsed: Duration,
 }
 
+enum CoverThumbnailSource {
+    Page(bytes::Bytes),
+    Spread {
+        left: bytes::Bytes,
+        right: bytes::Bytes,
+    },
+}
+
+fn read_cover_thumbnail_source(
+    reader: &dyn BookReader,
+    setting: CoverSetting,
+) -> anyhow::Result<CoverThumbnailSource> {
+    let page_count = reader.page_count();
+    let default_page = || reader.read_first_image().map(CoverThumbnailSource::Page);
+
+    match setting {
+        CoverSetting::Default => default_page(),
+        CoverSetting::Page(page) if page < page_count => reader
+            .read_page_n(page)
+            .map(CoverThumbnailSource::Page)
+            .or_else(|_| default_page()),
+        CoverSetting::Spread { left, right }
+            if left < page_count && right < page_count && left != right =>
+        {
+            match (reader.read_page_n(left), reader.read_page_n(right)) {
+                (Ok(left), Ok(right)) => Ok(CoverThumbnailSource::Spread { left, right }),
+                _ => default_page(),
+            }
+        }
+        CoverSetting::Page(_) | CoverSetting::Spread { .. } => default_page(),
+    }
+}
+
+fn decode_cover_thumbnail_page(raw: &[u8], target_width: u32) -> anyhow::Result<img::DecodedImage> {
+    if raw.len() > MAX_THUMB_RAW_BYTES {
+        anyhow::bail!("cover page raw image exceeds thumbnail byte limit");
+    }
+    let decoded = img::decode_for_thumb(raw, ImageFormatHint::Unknown, target_width)?;
+    img::resize_to_width(decoded, target_width)
+}
+
+fn decode_book_cover_thumbnail(
+    reader: &dyn BookReader,
+    setting: CoverSetting,
+    target_width: u32,
+) -> anyhow::Result<img::DecodedImage> {
+    match read_cover_thumbnail_source(reader, setting)? {
+        CoverThumbnailSource::Page(raw) => decode_cover_thumbnail_page(&raw, target_width),
+        CoverThumbnailSource::Spread { left, right } => {
+            let half_width = (target_width / 2).max(1);
+            let left = decode_cover_thumbnail_page(&left, half_width)?;
+            let right = decode_cover_thumbnail_page(&right, half_width)?;
+            let width = left
+                .width
+                .checked_add(right.width)
+                .ok_or_else(|| anyhow::anyhow!("spread cover width overflow"))?;
+            let height = left.height.max(right.height);
+            let pixel_count = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|count| count.checked_mul(4))
+                .ok_or_else(|| anyhow::anyhow!("spread cover pixel count overflow"))?;
+            let mut pixels = vec![255; pixel_count];
+            for (image, x_offset) in [(&left, 0u32), (&right, left.width)] {
+                let y_offset = (height - image.height) / 2;
+                for y in 0..image.height {
+                    let source_start = (y as usize * image.width as usize) * 4;
+                    let destination_start =
+                        ((y + y_offset) as usize * width as usize + x_offset as usize) * 4;
+                    let row_bytes = image.width as usize * 4;
+                    pixels[destination_start..destination_start + row_bytes]
+                        .copy_from_slice(&image.pixels[source_start..source_start + row_bytes]);
+                }
+            }
+            Ok(img::DecodedImage {
+                width,
+                height,
+                pixels,
+            })
+        }
+    }
+}
+
 struct DeferredThumbWrite {
     webp: Vec<u8>,
 }
@@ -4766,8 +4879,8 @@ impl DeferredCache {
             let book_artifact_generations = Arc::clone(&book_artifact_generations);
             let artifact_gate = Arc::clone(&artifact_gate);
             let source_path = Arc::clone(&source_path);
-            let webp = thumb.webp;
             let is_folder_book = matches!(book_source_kind(&source_path), BookSourceKind::Folder);
+            let webp = thumb.webp;
             let _ = tokio::task::spawn_blocking(move || {
                 let _gate = artifact_gate.read();
                 if generation.load(Ordering::Relaxed) != task_generation {
@@ -4945,80 +5058,86 @@ fn process_thumb(
         );
     }
 
-    if !task.bypass_cache {
-        if let Some(thumb) = shared.mem_cache.get(id, task.target_width) {
-            if generation.load(Ordering::Relaxed) != task_generation {
-                return (WorkerMsg::Stale(id.clone()), None);
-            }
-            let deferred = if !page_map_cached && !page_map_failed {
-                page_map_cache.and_then(|cache| {
-                    page_map_cache_miss_deferred(
-                        &task,
-                        &source_revision,
-                        shared,
-                        generation,
-                        task_generation,
-                        Arc::clone(cache),
-                    )
-                })
-            } else {
-                None
-            };
-            return attach_page_map_cache_hit(
-                (
-                    WorkerMsg::Ready(ReadyThumb {
-                        book_id: id.clone(),
-                        book_artifact_generation: task.book_artifact_generation,
-                        pixels: thumb.pixels,
-                        width: thumb.width,
-                        height: thumb.height,
-                        expected_size: task.expected_size,
-                        expected_modified: task.expected_modified,
-                    }),
-                    deferred,
-                ),
-                page_map_cache_hit,
-            );
+    let memory_thumb = if !task.bypass_cache {
+        let _gate = shared.artifact_gate.read();
+        shared.mem_cache.get(id, task.target_width)
+    } else {
+        None
+    };
+    if let Some(thumb) = memory_thumb {
+        if generation.load(Ordering::Relaxed) != task_generation {
+            return (WorkerMsg::Stale(id.clone()), None);
         }
+        let deferred = if !page_map_cached && !page_map_failed {
+            page_map_cache.and_then(|cache| {
+                page_map_cache_miss_deferred(
+                    &task,
+                    &source_revision,
+                    shared,
+                    generation,
+                    task_generation,
+                    Arc::clone(cache),
+                )
+            })
+        } else {
+            None
+        };
+        return attach_page_map_cache_hit(
+            (
+                WorkerMsg::Ready(ReadyThumb {
+                    book_id: id.clone(),
+                    book_artifact_generation: task.book_artifact_generation,
+                    pixels: thumb.pixels,
+                    width: thumb.width,
+                    height: thumb.height,
+                    expected_size: task.expected_size,
+                    expected_modified: task.expected_modified,
+                }),
+                deferred,
+            ),
+            page_map_cache_hit,
+        );
     }
 
-    if !task.bypass_cache {
-        if let Some(webp_bytes) =
-            shared
-                .disk_cache
-                .get_thumb(id, task.expected_size, task.expected_modified)
-        {
-            match img::decode_webp(&webp_bytes) {
-                Ok(decoded) => {
-                    if generation.load(Ordering::Relaxed) != task_generation {
-                        return (WorkerMsg::Stale(id.clone()), None);
-                    }
-                    let deferred = if !page_map_cached && !page_map_failed {
-                        page_map_cache.and_then(|cache| {
-                            page_map_cache_miss_deferred(
-                                &task,
-                                &source_revision,
-                                shared,
-                                generation,
-                                task_generation,
-                                Arc::clone(cache),
-                            )
-                        })
-                    } else {
-                        None
-                    };
-                    return attach_page_map_cache_hit(
-                        (
-                            store_and_ready(decoded, task, shared, origin.is_visible()),
-                            deferred,
-                        ),
-                        page_map_cache_hit,
-                    );
+    let disk_thumb = if !task.bypass_cache {
+        let _gate = shared.artifact_gate.read();
+        shared
+            .disk_cache
+            .get_thumb(id, task.expected_size, task.expected_modified)
+    } else {
+        None
+    };
+    if let Some(webp_bytes) = disk_thumb {
+        match img::decode_webp(&webp_bytes) {
+            Ok(decoded) => {
+                if generation.load(Ordering::Relaxed) != task_generation {
+                    return (WorkerMsg::Stale(id.clone()), None);
                 }
-                Err(_) => {
-                    let id_hex = id.0.to_hex();
-                    tracing::warn!(id = &id_hex[..8], "broken disk cache entry, re-generating");
-                }
+                let deferred = if !page_map_cached && !page_map_failed {
+                    page_map_cache.and_then(|cache| {
+                        page_map_cache_miss_deferred(
+                            &task,
+                            &source_revision,
+                            shared,
+                            generation,
+                            task_generation,
+                            Arc::clone(cache),
+                        )
+                    })
+                } else {
+                    None
+                };
+                return attach_page_map_cache_hit(
+                    (
+                        store_and_ready(decoded, task, shared, origin.is_visible()),
+                        deferred,
+                    ),
+                    page_map_cache_hit,
+                );
+            }
+            Err(_) => {
+                let id_hex = id.0.to_hex();
+                tracing::warn!(id = &id_hex[..8], "broken disk cache entry, re-generating");
             }
         }
     }
@@ -5121,52 +5240,74 @@ fn process_thumb(
         );
     }
 
-    let raw = match read_thumb_source_bytes(&task.path) {
-        Ok(raw) => raw,
-        Err(e) => {
-            let msg = failed_thumb_msg(id.clone(), &task.path, &e);
-            if matches!(msg, WorkerMsg::FailedPermanent(_)) {
-                tracing::info!(path = %task.path.display(), "thumb source read: {e:#}");
-            } else {
-                tracing::warn!(path = %task.path.display(), "thumb source read: {e:#}");
-            }
-            return (msg, None);
-        }
-    };
-
-    if raw.len() > MAX_THUMB_RAW_BYTES {
-        tracing::info!(
-            path    = %task.path.display(),
-            raw_mb  = raw.len() / 1_048_576,
-            "thumbnail raw image too large, skipping"
-        );
-        return (WorkerMsg::Failed(id.clone()), None);
-    }
-
-    let decoded =
-        match img::decode_for_thumb(&raw, ImageFormatHint::Unknown, task.target_width as u32) {
-            Ok(d) => d,
+    let resized = if matches!(source_kind, BookSourceKind::Rar) {
+        let decoded = open_book_reader_for_thumb_worker(&task.path).and_then(|reader| {
+            decode_book_cover_thumbnail(
+                reader.as_ref(),
+                task.cover_setting,
+                task.target_width as u32,
+            )
+        });
+        match decoded {
+            Ok(decoded) => decoded,
             Err(e) => {
-                let msg = failed_thumb_msg_for_image_decode(id.clone(), &raw, &e);
+                let msg = failed_thumb_msg(id.clone(), &task.path, &e);
                 if matches!(msg, WorkerMsg::FailedPermanent(_)) {
-                    tracing::info!(path = %task.path.display(), "decode: {e:#}");
+                    tracing::info!(path = %task.path.display(), "rar cover thumbnail: {e:#}");
                 } else {
-                    tracing::warn!(path = %task.path.display(), "decode: {e:#}");
+                    tracing::warn!(path = %task.path.display(), "rar cover thumbnail: {e:#}");
+                }
+                return (msg, None);
+            }
+        }
+    } else {
+        let raw = match read_thumb_source_bytes(&task.path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let msg = failed_thumb_msg(id.clone(), &task.path, &e);
+                if matches!(msg, WorkerMsg::FailedPermanent(_)) {
+                    tracing::info!(path = %task.path.display(), "thumb source read: {e:#}");
+                } else {
+                    tracing::warn!(path = %task.path.display(), "thumb source read: {e:#}");
                 }
                 return (msg, None);
             }
         };
 
-    let resized = match img::resize_to_width(decoded, task.target_width as u32) {
-        Ok(r) => r,
-        Err(e) => {
-            let msg = failed_thumb_msg(id.clone(), &task.path, &e);
-            if matches!(msg, WorkerMsg::FailedPermanent(_)) {
-                tracing::info!(path = %task.path.display(), "resize: {e:#}");
-            } else {
-                tracing::warn!(path = %task.path.display(), "resize: {e:#}");
+        if raw.len() > MAX_THUMB_RAW_BYTES {
+            tracing::info!(
+                path    = %task.path.display(),
+                raw_mb  = raw.len() / 1_048_576,
+                "thumbnail raw image too large, skipping"
+            );
+            return (WorkerMsg::Failed(id.clone()), None);
+        }
+
+        let decoded =
+            match img::decode_for_thumb(&raw, ImageFormatHint::Unknown, task.target_width as u32) {
+                Ok(d) => d,
+                Err(e) => {
+                    let msg = failed_thumb_msg_for_image_decode(id.clone(), &raw, &e);
+                    if matches!(msg, WorkerMsg::FailedPermanent(_)) {
+                        tracing::info!(path = %task.path.display(), "decode: {e:#}");
+                    } else {
+                        tracing::warn!(path = %task.path.display(), "decode: {e:#}");
+                    }
+                    return (msg, None);
+                }
+            };
+
+        match img::resize_to_width(decoded, task.target_width as u32) {
+            Ok(resized) => resized,
+            Err(e) => {
+                let msg = failed_thumb_msg(id.clone(), &task.path, &e);
+                if matches!(msg, WorkerMsg::FailedPermanent(_)) {
+                    tracing::info!(path = %task.path.display(), "resize: {e:#}");
+                } else {
+                    tracing::warn!(path = %task.path.display(), "resize: {e:#}");
+                }
+                return (msg, None);
             }
-            return (msg, None);
         }
     };
     let webp = img::encode_webp(&resized).ok();
@@ -5416,9 +5557,8 @@ fn build_epub_thumbnail_lane(
     task: &ThumbTask,
 ) -> anyhow::Result<EpubThumbnailLaneResult> {
     let started = Instant::now();
-    let raw = reader.read_page_n(0)?;
-    let decoded = img::decode_for_thumb(&raw, ImageFormatHint::Unknown, task.target_width as u32)?;
-    let decoded = img::resize_to_width(decoded, task.target_width as u32)?;
+    let decoded =
+        decode_book_cover_thumbnail(reader, task.cover_setting, task.target_width as u32)?;
 
     Ok(EpubThumbnailLaneResult {
         decoded,
@@ -5638,10 +5778,8 @@ fn build_zip_thumbnail_lane(
         .page_map_image_entry_infos()
         .next()
         .ok_or_else(|| anyhow::anyhow!("no image in zip archive"))?;
-    let raw = reader.read_page_n(page0_info.page_index)?;
-
-    let decoded = img::decode_for_thumb(&raw, ImageFormatHint::Unknown, task.target_width as u32)?;
-    let decoded = img::resize_to_width(decoded, task.target_width as u32)?;
+    let decoded =
+        decode_book_cover_thumbnail(reader, task.cover_setting, task.target_width as u32)?;
 
     Ok(ZipThumbnailLaneResult {
         compression: page0_info.compression,
@@ -5824,12 +5962,11 @@ fn build_folder_thumbnail_lane(
     task: &ThumbTask,
 ) -> anyhow::Result<FolderThumbnailLaneResult> {
     let started = Instant::now();
-    let Some(page0_info) = reader.page_map_image_entry_infos().next() else {
+    let Some(_page0_info) = reader.page_map_image_entry_infos().next() else {
         return Err(anyhow::anyhow!("no image in folder book"));
     };
-    let raw = reader.read_page_n(page0_info.page_index)?;
-    let decoded = img::decode_for_thumb(&raw, ImageFormatHint::Unknown, task.target_width as u32)?;
-    let decoded = img::resize_to_width(decoded, task.target_width as u32)?;
+    let decoded =
+        decode_book_cover_thumbnail(reader, task.cover_setting, task.target_width as u32)?;
 
     Ok(FolderThumbnailLaneResult {
         decoded,

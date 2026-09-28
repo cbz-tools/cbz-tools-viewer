@@ -60,6 +60,9 @@ pub(super) enum ViewerSyncEvent {
     SourceChanged {
         path: PathBuf,
     },
+    CoverChanged {
+        current_path: PathBuf,
+    },
     Deleted {
         deleted_path: PathBuf,
         next_path: Option<PathBuf>,
@@ -236,6 +239,13 @@ impl App {
                             pending_viewer_sync_events
                                 .lock()
                                 .push(ViewerSyncEvent::SourceChanged { path });
+                            repaint_ctx.request_repaint();
+                            continue;
+                        }
+                        if let ViewerToLibrary::CoverChanged { current_path } = msg {
+                            pending_viewer_sync_events
+                                .lock()
+                                .push(ViewerSyncEvent::CoverChanged { current_path });
                             repaint_ctx.request_repaint();
                             continue;
                         }
@@ -722,7 +732,9 @@ fn process_viewer_ipc_request(
 ) -> Option<(LibraryToViewer, Option<ViewerSyncEvent>)> {
     let started_at = Instant::now();
     let (response, sync_event) = match msg {
-        ViewerToLibrary::SourceChanged { .. } => return None,
+        ViewerToLibrary::SourceChanged { .. } | ViewerToLibrary::CoverChanged { .. } => {
+            return None;
+        }
         ViewerToLibrary::RequestViewerState {
             request_id,
             current_path: _,

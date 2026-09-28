@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.13] - 2026-09-28
+
+### Added
+
+- Added Viewer options to set a page or the current spread as the Library cover for ZIP/CBZ, RAR/CBR, EPUB, and DIR books. Resetting the cover returns to the first page; source files are unchanged.
+
 ## [0.5.12] - 2026-09-20
 
 ### Changed

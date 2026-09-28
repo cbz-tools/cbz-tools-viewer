@@ -10,6 +10,9 @@ pub enum ViewerToLibrary {
     SourceChanged {
         path: PathBuf,
     },
+    CoverChanged {
+        current_path: PathBuf,
+    },
     RequestViewerState {
         request_id: u64,
         current_path: PathBuf,

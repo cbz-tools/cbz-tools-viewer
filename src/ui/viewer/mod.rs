@@ -10,8 +10,9 @@ use std::{
 use eframe::egui::{self, Color32, Key, Popup, PopupCloseBehavior, Rect, pos2, vec2};
 
 use crate::domain::app_settings::{ReadingDirection, UiLanguage, ViewerQuality};
-use crate::domain::archive_settings::SpreadMode;
+use crate::domain::archive_settings::{CoverSetting, SpreadMode};
 use crate::domain::ipc_contract::ViewerFavoriteState;
+use crate::infra::archive::{BookSourceKind, book_source_kind};
 use crate::infra::image::decode as img;
 use crate::infra::web_search::WebSearchMenuItem;
 use crate::ui::i18n::{TextKey, tr};
@@ -20,7 +21,7 @@ use self::draw::{
     BoundaryPreviewCardAction, FullscreenOverlayContext, ViewerOverlayContext,
     compute_spread_rects, draw_boundary_preview_card, draw_follow_placeholder_panel,
     draw_fullscreen_overlay, draw_key_feedback, draw_pages, draw_status_message,
-    draw_viewer_overlays, fullscreen_overlay_near,
+    draw_viewer_overlays, fullscreen_overlay_near, spread_screen_pages,
 };
 use self::progress::render_page_progress_bar;
 use self::state::{OverlayRenderResult, now_ms};
@@ -66,6 +67,7 @@ pub enum ViewerAction {
     ToggleFullscreen,
     RequestDelete,
     RequestPageRangeDelete,
+    SetCover(CoverSetting),
     ToggleFavorite,
     PreviousBook,
     NextBook,
@@ -133,14 +135,9 @@ fn delete_range_context_menu_target_page(
         compute_spread_rects(area, left_size, right_size)
     };
 
-    let left_page = match reading_direction {
-        ReadingDirection::LeftToRight => visible_pages.0.or(visible_pages.1),
-        ReadingDirection::RightToLeft => visible_pages.1.or(visible_pages.0),
-    };
-    let right_page = match reading_direction {
-        ReadingDirection::LeftToRight => visible_pages.1.or(visible_pages.0),
-        ReadingDirection::RightToLeft => visible_pages.0.or(visible_pages.1),
-    };
+    let (screen_left, screen_right) = spread_screen_pages(visible_pages, reading_direction);
+    let left_page = screen_left.or(screen_right);
+    let right_page = screen_right.or(screen_left);
 
     if left_rect.is_some_and(|rect| rect.contains(pointer_pos)) {
         return left_page;
@@ -419,6 +416,7 @@ pub struct ViewerUiCapabilities {
     pub allow_delete: bool,
     pub allow_book_navigation: bool,
     pub allow_favorite_toggle: bool,
+    pub allow_cover_setting: bool,
 }
 
 impl ViewerUiCapabilities {}
@@ -1063,6 +1061,15 @@ pub fn show(
 
     let (used_rect, used_resp) =
         ui.allocate_exact_size(vec2(content.width(), img_h), egui::Sense::click());
+    let cover_setting_enabled = capabilities.allow_cover_setting
+        && matches!(
+            book_source_kind(state.entry().path.as_ref()),
+            BookSourceKind::Zip
+                | BookSourceKind::Rar
+                | BookSourceKind::Epub
+                | BookSourceKind::Folder
+        );
+    let mut current_effective_spread = false;
 
     let has_visible_content =
         state.display_assets.content_left.is_some() || state.display_assets.content_right.is_some();
@@ -1154,6 +1161,7 @@ pub fn show(
             display_h,
             false,
         );
+        current_effective_spread = draw_layout.effective_spread;
         if used_resp.secondary_clicked() {
             let context_menu_target_page = delete_range_context_menu_target_page(
                 state,
@@ -1208,6 +1216,50 @@ pub fn show(
                 return;
             }
             if token_menu_rendered {
+                ui.separator();
+            }
+            if cover_setting_enabled {
+                ui.menu_button(tr(language, TextKey::CoverSettings), |ui| {
+                    let current_page = state
+                        .delete_range_context_menu_target_page()
+                        .unwrap_or_else(|| state.current_requested_page());
+                    if ui.button(tr(language, TextKey::SetPageAsCover)).clicked() {
+                        action = ViewerAction::SetCover(CoverSetting::Page(current_page));
+                        ui.close();
+                        return;
+                    }
+
+                    let visible_pages = state.current_view_pages(state.persistent.displayed_page);
+                    let (left, right) =
+                        spread_screen_pages(visible_pages, state.effective_reading_direction());
+                    let spread_pages = left
+                        .zip(right)
+                        .filter(|(left, right)| current_effective_spread && left != right);
+                    if ui
+                        .add_enabled(
+                            spread_pages.is_some(),
+                            egui::Button::new(tr(language, TextKey::SetSpreadAsCover)),
+                        )
+                        .clicked()
+                    {
+                        let Some((left, right)) = spread_pages else {
+                            return;
+                        };
+                        action = ViewerAction::SetCover(CoverSetting::Spread { left, right });
+                        ui.close();
+                        return;
+                    }
+
+                    if ui
+                        .button(tr(language, TextKey::ResetCoverSetting))
+                        .clicked()
+                    {
+                        action = ViewerAction::SetCover(CoverSetting::Default);
+                        ui.close();
+                    }
+                });
+            }
+            if page_range_delete_enabled {
                 ui.separator();
             }
             if !page_range_delete_enabled {

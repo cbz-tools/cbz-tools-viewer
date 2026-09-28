@@ -34,6 +34,20 @@ pub enum SpreadMode {
     Spread,
 }
 
+/// 本単位の Library 表紙画像の生成元。ページ番号は Viewer の論理 index。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverSetting {
+    #[default]
+    Default,
+    Page(u32),
+    /// Viewer で見た画面左・画面右の順で保存する。
+    Spread {
+        left: u32,
+        right: u32,
+    },
+}
+
 mod spread_mode_serde {
     use super::SpreadMode;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -180,6 +194,9 @@ mod option_reading_direction_serde {
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct FileSettings {
+    /// Library thumbnail の表紙元。Viewer のページ構成には影響しない。
+    #[serde(default)]
+    pub cover_setting: CoverSetting,
     /// 見開きモードで表紙の前に仮想ブランクページを挿入する
     pub cover_blank: bool,
     /// 見開きモード設定
@@ -220,6 +237,7 @@ pub fn clamp_slideshow_interval_secs(secs: f32) -> f32 {
 impl Default for FileSettings {
     fn default() -> Self {
         Self {
+            cover_setting: CoverSetting::Default,
             cover_blank: false,
             spread_mode: SpreadMode::Auto,
             slideshow_interval_secs: DEFAULT_SLIDESHOW_INTERVAL_SECS,
@@ -263,6 +281,12 @@ impl SettingsStore {
 
     pub fn set_cover_blank(&mut self, path: PathBuf, value: bool) {
         self.data.entry(path).or_default().cover_blank = value;
+        self.dirty = true;
+        self.flush();
+    }
+
+    pub fn set_cover_setting(&mut self, path: PathBuf, value: CoverSetting) {
+        self.data.entry(path).or_default().cover_setting = value;
         self.dirty = true;
         self.flush();
     }
