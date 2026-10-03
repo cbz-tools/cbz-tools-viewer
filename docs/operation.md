@@ -69,7 +69,10 @@ The configured destinations are available from the shared filename-token menu in
 * L1 VRAM Cache: Stores GPU textures for upcoming and recently viewed pages.
 * L2 RAM Cache: Stores decoded RGBA images in system memory. Adjacent-book preloading uses 5% of this setting for each of the next and previous books by default.
 * Background Workers: Controls background decoding parallelism.
-* Danger Zone: Allows manual values beyond the normal hardware-based limits, including Adjacent Book Preload RAM (5–30% per adjacent book). The two-page preload guarantee is separate, and changes take effect the next time the Viewer starts.
+* Disk Cache: Shows usage and provides `Clear thumbnail cache`. Deleted cache entries are regenerated when displayed.
+* Danger Zone: Allows manual cache-capacity and worker-count values beyond the normal hardware-based limits, including Adjacent Book Preload RAM (5–30% per adjacent book). The two-page preload guarantee is separate.
+
+Changes to cache capacities, worker count, and adjacent-book preload RAM take effect the next time the Viewer starts.
 
 ---
 
@@ -83,7 +86,7 @@ The Library left pane has three tabs: `Library`, `Filter`, and `History`.
 * `Filter` contains the existing Favorites, Reading status, Extensions, and Groups controls.
 * `History` provides the existing reading history.
 
-The left pane can be shown or hidden. It consumes part of the Library grid width; drag its divider to resize it. Visibility and width are restored with the session. Double-click the divider to reset the width to its default.
+Use the `Show / hide library` button at the top left to toggle the left pane. It consumes part of the Library grid width; drag its divider to resize it. Visibility and width are restored with the session. Double-click the divider to reset the width to its default.
 
 ### Basic actions
 
@@ -96,6 +99,11 @@ The left pane can be shown or hidden. It consumes part of the Library grid width
 | F2 | Rename |
 | Ctrl+A | Select all |
 | Ctrl+C | Copy path |
+| Ctrl+L / Alt+D | Edit the path field |
+| Ctrl+F | Focus the search box |
+| Alt+← / Alt+→ | Go back / forward in folder-navigation history |
+| Alt+↑ | Go to the parent folder |
+| F5 | Reload the current folder |
 | Ctrl+Wheel Up | Increase thumbnail display size by one step |
 | Ctrl+Wheel Down | Decrease thumbnail display size by one step |
 
@@ -120,20 +128,20 @@ For video files, hovering over the thumbnail starts a preview after a short dela
 * Moving between the preview area and scrub area switches modes immediately.
 * Moving the pointer away restores the normal thumbnail.
 
-### Animated WebP thumbnail preview
+### Animated-image thumbnail preview
 
-After a short hover delay, an Archive or image-file thumbnail plays in place when its thumbnail source is an animated WebP. For archives, only the first image is played.
+After a short hover delay, Archive, image-folder, and image-file thumbnails play animated WebP / GIF in place. For books, only the first image is used; changing the Library cover does not change the preview source. APNG is shown as a static thumbnail in the Library.
 
-* Hover outside the filename HUD area to play the animated WebP automatically.
+* Hover outside the filename HUD area to play the animated WebP / GIF automatically.
 * Hover over the filename HUD area and move left or right to immediately show the still frame at that point in the animation.
-* A one-page book whose page is an animated WebP uses the same time scrub. Multi-page books use page scrubbing instead.
+* A one-page book whose page is an animated WebP / GIF uses the same time scrub. Multi-page books use page scrubbing instead.
 * When the card HUD is hidden, the same bottom area is still used for scrubbing.
 * Moving between the preview area and scrub area switches modes immediately.
 * Moving the pointer away restores the normal thumbnail.
 
 ### Static-image thumbnail scrubbing
 
-For multi-page image books with an available Page Map, Static Scrub can be used on Archive, FolderBook, EPUB image book, and RAR/CBR entries. Multi-page books use the page axis even when a page is an animated WebP.
+For multi-page image books with an available Page Map, Static Scrub can be used on Archive, FolderBook, EPUB image book, and RAR/CBR entries. Multi-page books use the page axis even when a page is animated.
 
 * Move left or right in the filename HUD area to scrub through all pages.
 * The page at the pointed position is shown in the thumbnail.
@@ -174,7 +182,7 @@ See [Book group settings](book-groups.md) for details.
 | Open in Explorer | Show in Explorer |
 | Add to Favorites / Remove from Favorites | Toggle favorite state |
 | Set Group | Assign a group |
-| Clear Book Settings | Reset book-specific display settings and reading status |
+| Clear Book Settings | Reset book-specific display settings, Library cover settings, and reading status |
 | Rename | Rename |
 | Copy | Copy path |
 | Delete | Delete |
@@ -206,17 +214,19 @@ The Viewer uses the same filename-token menu and token selection as the Library.
 | Wheel up | Previous page |
 | Home | First page |
 | End | Last page |
+| Enter | Open the book shown in the previous/next book preview at a book boundary |
 
-The meaning of the left and right keys changes depending on the reading direction.
+The meaning of ← / → and A / D changes depending on the reading direction.
+You can also navigate pages with the progress bar at the bottom.
 
 ### Book navigation
 
 | Action | Result |
 | --- | --- |
-| ↑ / ↓ | Book navigation |
-| W / S | Book navigation |
+| ↑ / W | Previous book |
+| ↓ / S | Next book |
 
-Navigation follows the book order shown in the Library.
+In a Library-connected Viewer, navigation follows the book order shown in the Library.
 
 You can move across a mixed list of books and image folders in the same order.
 
@@ -228,18 +238,20 @@ You can move across a mixed list of books and image folders in the same order.
 | Space | Start / stop slideshow |
 | ESC | Close, or exit fullscreen when fullscreen is active |
 
+If the Viewer was opened in fullscreen from the Library, ESC closes it. An active range selection or confirmation dialog is cleared first.
+
 ### Book actions
 
 | Action | Result |
 | --- | --- |
 | Delete | Delete the current book |
 
-Deleting an image folder removes the whole folder.
+Book deletion is available in a Library-connected Viewer. Deleting an image folder removes the whole folder.
 
 ### Page range delete and archive rebuild
 
 This operation rewrites or replaces the archive.
-It is available only for archive books opened from the Library.
+It is available only for ZIP/CBZ and RAR/CBR books opened in a Library-connected Viewer.
 FolderBook, EPUB, and ImageFile are not supported.
 
 You cannot delete all image pages.
@@ -271,11 +283,30 @@ The toolbar provides the following actions:
 * Reading direction
 * Cover blank
 * Quality
-* Slideshow
+* Slideshow and playback interval
 * Fullscreen
 * External Tools
+* Book deletion (Library-connected Viewer only)
 
-Animated WebP files are played back as animations. Spread view is supported.
+The display-mode button switches between AUTO, Single, and Spread. AUTO pairs portrait pages into spreads and shows landscape pages individually. Without an available Page Map, it uses single-page view.
+
+Cover blank places a blank beside the first page and changes subsequent spread pairings. It can be set in AUTO / Spread and is disabled in Single. It is a separate setting from the Library cover.
+
+Animated WebP / GIF and APNG (.png) are played back as animations. Spread view is supported, with page navigation just like regular images.
+
+### Right-click menu
+
+Right-click the image display area to access filename-token actions, cover settings, and page-range deletion. Cover settings and range deletion appear according to the book type and Viewer mode.
+
+`Set cover` changes the Library cover thumbnail.
+
+| Item | Result |
+| --- | --- |
+| Set this page as cover | Use the current page; in a spread, use the page on the clicked side |
+| Set this spread as cover | Use the two displayed pages in their left/right order; enabled only when two pages are actually displayed as a spread |
+| Reset cover setting | Restore the default first image |
+
+ZIP/CBZ, RAR/CBR, EPUB image books, and image folders (DIR) are supported in Library-connected / Snapshot Viewers. Standalone, Detached, and CLI Viewers do not show the cover-settings menu. The setting is saved per book without modifying the original archive or image files.
 
 ### Reading direction
 
@@ -354,9 +385,9 @@ The window title shows the file name of the current book.
 ### Image
 
 * JPEG
-* PNG
+* PNG (static / APNG, .png)
 * WebP (static / animated)
 * AVIF (.avif / .avifs)
 * BMP
 * TIFF
-* GIF
+* GIF (static / animated)

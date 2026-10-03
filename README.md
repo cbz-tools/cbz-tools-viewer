@@ -137,7 +137,7 @@ When you open a single supported image file, CBZ Viewer opens the parent folder 
 See the following for detailed usage:
 
 * [Operation Guide](docs/operation.md)
-* [Library display settings](docs/operation.md#library-display-settings)
+* [Library display settings](docs/operation.md#library-settings)
 * [Danger Zone Recovery](docs/DANGER_ZONE_RECOVERY.md)
 * [L1 / L2 Streaming Cache](docs/dev/SimpleStreaming.md)
 * [SPAD: Adjacent Book Scratchpad](docs/dev/Spad.md)

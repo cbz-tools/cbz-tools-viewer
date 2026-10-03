@@ -137,7 +137,7 @@ PC の CPU / RAM / VRAM に基づいて、先読み、キャッシュ、サム�
 詳細な操作方法については以下を参照してください。
 
 * [操作説明](docs/operation.ja.md)
-* [Library表示設定](docs/operation.ja.md#library-display-settings)
+* [Library表示設定](docs/operation.ja.md#ライブラリ設定)
 * [Danger Zone 設定からの復旧](docs/DANGER_ZONE_RECOVERY.md)
 * [L1 / L2 Streaming Cache](docs/dev/SimpleStreaming.md)
 * [SPAD: Adjacent Book Scratchpad](docs/dev/Spad.md)
