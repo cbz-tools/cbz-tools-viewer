@@ -37,3 +37,9 @@ pub fn paths_equivalent_for_selection(a: &Path, b: &Path) -> bool {
         na == nb
     }
 }
+
+pub fn normalized_path_is_same_or_descendant(candidate: &str, parent: &str) -> bool {
+    let candidate = Path::new(candidate);
+    let parent = Path::new(parent);
+    candidate == parent || candidate.starts_with(parent)
+}

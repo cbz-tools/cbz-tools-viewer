@@ -2,6 +2,19 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.14] - 2026-10-11
+
+### Added
+- Added a history view for newly added books.
+
+### Changed
+- Increased history capacity to 200 books.
+- Changed History to open books on double-click.
+
+### Fixed
+- Fixed missing thumbnails for folder-based books.
+- Improved Library navigation when opening books from History.
+
 ## [0.5.13] - 2026-09-28
 
 ### Added

@@ -144,6 +144,8 @@ pub struct ReadyThumb {
     pub height: u16,
     pub expected_size: u64,
     pub expected_modified: Option<SystemTime>,
+    /// True only when this request decoded/resized the source instead of using a cache.
+    pub generated: bool,
 }
 
 /// Video success response carries the source revision validated by the worker.
@@ -236,6 +238,12 @@ pub struct StaticPreviewFailed {
 /// Worker → UI へのメッセージ
 pub enum WorkerMsg {
     Ready(ReadyThumb),
+    ThumbnailGenerated {
+        book_id: BookId,
+        book_artifact_generation: u64,
+        expected_size: u64,
+        expected_modified: Option<SystemTime>,
+    },
     VideoReady(VideoReady),
     VideoPreviewReady(VideoPreviewReady),
     VideoPreviewFailed(VideoPreviewFailed),
@@ -1833,6 +1841,13 @@ async fn handle_thumb_result(
             }
             if should_notify {
                 let _ = runtime.tx.send(WorkerMsg::Ready(ready));
+            } else if ready.generated {
+                let _ = runtime.tx.send(WorkerMsg::ThumbnailGenerated {
+                    book_id: ready.book_id,
+                    book_artifact_generation: ready.book_artifact_generation,
+                    expected_size: ready.expected_size,
+                    expected_modified: ready.expected_modified,
+                });
             }
             if runtime.display || currently_visible {
                 runtime.repaint.request_repaint();
@@ -1844,6 +1859,7 @@ async fn handle_thumb_result(
                 });
             }
         }
+        WorkerMsg::ThumbnailGenerated { .. } => unreachable!(),
         WorkerMsg::Stale(_) => {
             if runtime.display || (runtime.origin == RequestOrigin::Background && currently_visible)
             {
@@ -3627,6 +3643,7 @@ fn lookup_video_cache(
                 height: thumb.height,
                 expected_size: task.expected_size,
                 expected_modified: task.expected_modified,
+                generated: false,
             },
             webp: None,
         };
@@ -5092,6 +5109,7 @@ fn process_thumb(
                     height: thumb.height,
                     expected_size: task.expected_size,
                     expected_modified: task.expected_modified,
+                    generated: false,
                 }),
                 deferred,
             ),
@@ -5129,7 +5147,7 @@ fn process_thumb(
                 };
                 return attach_page_map_cache_hit(
                     (
-                        store_and_ready(decoded, task, shared, origin.is_visible()),
+                        store_and_ready(decoded, task, shared, origin.is_visible(), false),
                         deferred,
                     ),
                     page_map_cache_hit,
@@ -5320,7 +5338,7 @@ fn process_thumb(
     }
 
     // decode/resize 完了後は UI を先に返し、WebP 保存は DeferredCache に分離する。
-    let msg = store_and_ready(resized, task.clone(), shared, origin.is_visible());
+    let msg = store_and_ready(resized, task.clone(), shared, origin.is_visible(), true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -5522,7 +5540,7 @@ fn process_zip_thumbnail_only(
         return (WorkerMsg::Stale(book_id.clone()), None);
     }
 
-    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory);
+    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory, true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -5615,7 +5633,7 @@ fn process_epub_thumbnail_only(
         return (WorkerMsg::Stale(book_id.clone()), None);
     }
 
-    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory);
+    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory, true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -5703,7 +5721,7 @@ fn process_epub_book_artifacts(
     }
 
     let webp = img::encode_webp(&decoded).ok();
-    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory);
+    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory, true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let page_map_fast_ready = matches!(page_map_result, EpubPageMapFastOutcome::Ready(_));
     let page_map = match page_map_result {
@@ -5923,7 +5941,7 @@ fn process_zip_book_artifacts(
         return (WorkerMsg::Stale(id.clone()), None);
     }
 
-    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory);
+    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory, true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let page_map = Some(DeferredPageMap::Fast(PageMapFastPersistRequest {
         book_id: task.book_id.clone(),
@@ -6039,7 +6057,7 @@ fn process_folder_thumbnail_only(
         return (WorkerMsg::Stale(book_id.clone()), None);
     }
 
-    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory);
+    let msg = store_and_ready(resized, task.clone(), shared, cache_in_memory, true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let deferred = DeferredCache {
         generation: Arc::clone(generation),
@@ -6133,7 +6151,7 @@ fn process_folder_book_artifacts(
     }
 
     let webp = img::encode_webp(&decoded).ok();
-    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory);
+    let msg = store_and_ready(decoded, task.clone(), shared, cache_in_memory, true);
     let task_artifact_generation = shared.artifact_generation.load(Ordering::Relaxed);
     let fast_lane_page_count = fast_lane_pages.len();
 
@@ -6238,6 +6256,7 @@ fn store_and_ready(
     task: ThumbTask,
     shared: &WorkerShared,
     cache_in_memory: bool,
+    generated: bool,
 ) -> WorkerMsg {
     let pixels: Arc<[u8]> = decoded.pixels.into();
     let (w, h) = (decoded.width as u16, decoded.height as u16);
@@ -6265,6 +6284,7 @@ fn store_and_ready(
         height: h,
         expected_size: task.expected_size,
         expected_modified: task.expected_modified,
+        generated,
     })
 }
 
@@ -6278,5 +6298,6 @@ fn ready_from_decoded(decoded: img::DecodedImage, task: VideoThumbTask) -> Ready
         height: decoded.height as u16,
         expected_size: task.expected_size,
         expected_modified: task.expected_modified,
+        generated: false,
     }
 }

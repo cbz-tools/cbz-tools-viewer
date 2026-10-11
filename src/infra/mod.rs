@@ -1,3 +1,4 @@
+pub(crate) mod added_history_store;
 mod app_settings_store;
 pub mod archive;
 pub(crate) use app_settings_store::app_settings_resolution;

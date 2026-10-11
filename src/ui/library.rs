@@ -6,6 +6,7 @@
 use parking_lot::RwLock;
 use std::{
     collections::{HashMap, HashSet},
+    hash::{Hash, Hasher},
     path::{Path, PathBuf},
     sync::{Arc, mpsc},
     thread,
@@ -331,6 +332,7 @@ pub struct LibraryState {
     diff_scan_rx: Option<mpsc::Receiver<AsyncDiffScanResult>>,
     /// 定期差分スキャンの実行中フラグ
     diff_scan_running: bool,
+    added_history_paths: Vec<PathBuf>,
     /// 外部ツール通知を差分スキャン完了後に一度だけ再確認する対象ディレクトリ。
     pending_source_changed_refresh: Option<PathBuf>,
     /// 手動リロード結果反映時に復元する選択・スクロール情報
@@ -342,6 +344,38 @@ pub struct LibraryState {
     kind_config_last_modified: Option<SystemTime>,
     kind_config_error: Option<String>,
     group_counts: GroupCountSnapshot,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct HistoryThumbnailKey {
+    pub file_size: u64,
+    pub modified: Option<SystemTime>,
+}
+
+pub(crate) struct HistoryWorkPath {
+    pub normalized_path: String,
+    pub book_id: BookId,
+    pub thumbnail_key: Option<HistoryThumbnailKey>,
+}
+
+impl PartialEq for HistoryWorkPath {
+    fn eq(&self, other: &Self) -> bool {
+        self.normalized_path == other.normalized_path
+    }
+}
+
+impl Eq for HistoryWorkPath {}
+
+impl Hash for HistoryWorkPath {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.normalized_path.hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for HistoryWorkPath {
+    fn borrow(&self) -> &str {
+        &self.normalized_path
+    }
 }
 
 pub(crate) struct BookViewState {
@@ -432,7 +466,7 @@ pub(crate) enum ReadingHudState {
 }
 
 impl ReadingHudState {
-    fn from_file_settings(settings: &FileSettings) -> Self {
+    pub(crate) fn from_file_settings(settings: &FileSettings) -> Self {
         match settings.reading_state {
             ReadingState::Unread => Self::Unread,
             ReadingState::Reading => {
@@ -1230,14 +1264,21 @@ impl LibraryState {
             .retain(|id, revision| revisions.get(id) == Some(revision));
     }
 
-    pub(crate) fn refresh_reading_hud_state_for_path(&mut self, path: &Path) {
+    pub(crate) fn refresh_reading_hud_state_for_path(&mut self, path: &Path) -> ReadingHudState {
         let key = book_settings_path(path);
         let settings = SettingsStore::load().get(key.as_path());
-        self.reading_hud_states
-            .insert(key.clone(), ReadingHudState::from_file_settings(&settings));
+        let state = ReadingHudState::from_file_settings(&settings);
+        self.reading_hud_states.insert(key.clone(), state);
         self.cover_settings_by_path
             .insert(key, settings.cover_setting);
         self.recompute_group_counts();
+        state
+    }
+
+    pub(crate) fn cached_reading_hud_state_for_path(&self, path: &Path) -> Option<ReadingHudState> {
+        self.reading_hud_states
+            .get(book_settings_path_ref(path))
+            .copied()
     }
 
     pub(crate) fn remove_reading_hud_state_for_path(&mut self, path: &Path) {
@@ -2247,6 +2288,7 @@ impl LibraryState {
             diff_scan_generation: 0,
             diff_scan_rx: None,
             diff_scan_running: false,
+            added_history_paths: Vec::new(),
             pending_source_changed_refresh: None,
             manual_reload_restore: None,
             kind_config,
@@ -2256,6 +2298,95 @@ impl LibraryState {
             kind_config_error: None,
             group_counts: GroupCountSnapshot::default(),
         }
+    }
+
+    pub(crate) fn take_added_history_paths(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.added_history_paths)
+    }
+
+    /// Current work paths and thumbnail keys for History display.
+    /// Raw entries keep Library search and scope filters independent from History.
+    pub(crate) fn normalized_history_work_paths(&self) -> HashSet<HistoryWorkPath> {
+        if self.current_dir.is_none() {
+            return HashSet::new();
+        }
+
+        self.raw_entries
+            .iter()
+            .filter_map(|entry| {
+                let book_id = entry.thumb_id_ref()?.clone();
+                let thumbnail_key = self
+                    .source_snapshots
+                    .get(&book_id)
+                    .map(|snapshot| HistoryThumbnailKey {
+                        file_size: snapshot.size,
+                        modified: snapshot.modified,
+                    })
+                    .or(match entry {
+                        LibraryEntry::Archive(meta) => Some(HistoryThumbnailKey {
+                            file_size: meta.size,
+                            modified: Some(meta.modified),
+                        }),
+                        LibraryEntry::FolderBook(meta) => Some(HistoryThumbnailKey {
+                            file_size: 0,
+                            modified: meta.revision_modified,
+                        }),
+                        LibraryEntry::ImageFile(meta) => Some(HistoryThumbnailKey {
+                            file_size: meta.size,
+                            modified: Some(meta.modified),
+                        }),
+                        LibraryEntry::Folder(_) | LibraryEntry::VideoFile(_) => None,
+                    });
+                Some(HistoryWorkPath {
+                    normalized_path: crate::util::path_eq::normalize_path_for_selection(
+                        entry.path(),
+                    ),
+                    book_id,
+                    thumbnail_key,
+                })
+            })
+            .collect()
+    }
+
+    /// Clear Library display filters, select a current work, and request scrolling to it.
+    /// The path is resolved against the live scan before changing any Library state.
+    pub(crate) fn prepare_history_open(&mut self, path: &Path) -> Option<usize> {
+        if self.current_dir.is_none() || !path.exists() {
+            return None;
+        }
+
+        let target_path = crate::util::path_eq::normalize_path_for_selection(path);
+        let mut raw_matches = self.raw_entries.iter().filter(|entry| {
+            entry.thumb_id_ref().is_some()
+                && crate::util::path_eq::normalize_path_for_selection(entry.path()) == target_path
+        });
+        let raw_entry = raw_matches.next()?;
+        if raw_matches.next().is_some() || !raw_entry.path().exists() {
+            return None;
+        }
+
+        self.filter.clear_keyword();
+        self.filter.scope = LibraryScope::Any;
+        self.filter_dirty = true;
+        self.rebuild_entries();
+
+        let mut visible_matches = self.entries.iter().enumerate().filter(|(_, entry)| {
+            entry.thumb_id_ref().is_some()
+                && crate::util::path_eq::normalize_path_for_selection(entry.path()) == target_path
+        });
+        let (index, _) = visible_matches.next()?;
+        if visible_matches.next().is_some() {
+            return None;
+        }
+
+        self.selected_idx = Some(index);
+        self.selected_set.clear();
+        self.anchor_idx = Some(index);
+        self.select_all_active = false;
+        self.scroll_to_pending = None;
+        self.scroll_restore_pending = false;
+        self.scroll_selected_into_view_pending = true;
+        Some(index)
     }
 
     // ── フォルダスキャン ──────────────────────────────────────────────────────
@@ -3316,6 +3447,18 @@ impl LibraryState {
                 msg @ (WorkerMsg::VideoReady(_) | WorkerMsg::VideoStale { .. }) => {
                     self.handle_video_thumbnail_message(msg, ctx)
                 }
+                WorkerMsg::ThumbnailGenerated {
+                    book_id,
+                    book_artifact_generation,
+                    expected_size,
+                    expected_modified,
+                } => self.handle_thumbnail_generated(
+                    book_id,
+                    book_artifact_generation,
+                    expected_size,
+                    expected_modified,
+                    ctx,
+                ),
                 WorkerMsg::Ready(resp) => self.handle_thumbnail_ready(resp, ctx),
                 WorkerMsg::DisplayStale {
                     book_id,
@@ -3859,6 +4002,13 @@ impl LibraryState {
         if !is_video && !self.is_registered(&resp.book_id) {
             return WorkerPollResult::IgnoredAndContinue;
         }
+        let added_history_path = if !is_video && resp.generated {
+            self.source_snapshots
+                .get(&resp.book_id)
+                .map(|snapshot| snapshot.path.to_path_buf())
+        } else {
+            None
+        };
         let img = egui::ColorImage::from_rgba_unmultiplied(
             [resp.width as usize, resp.height as usize],
             &resp.pixels,
@@ -3887,9 +4037,40 @@ impl LibraryState {
             state.texture_size = Some([resp.width as usize, resp.height as usize]);
             state.texture = Some(handle);
         }
+        if let Some(path) = added_history_path {
+            self.added_history_paths.push(path);
+        }
         if self.worker.is_artifact_visible(&resp.book_id) {
             ctx.request_repaint();
         }
+        WorkerPollResult::Received
+    }
+
+    fn handle_thumbnail_generated(
+        &mut self,
+        book_id: BookId,
+        book_artifact_generation: u64,
+        expected_size: u64,
+        expected_modified: Option<SystemTime>,
+        ctx: &egui::Context,
+    ) -> WorkerPollResult {
+        if !self
+            .worker
+            .is_book_artifact_current(&book_id, book_artifact_generation)
+        {
+            return WorkerPollResult::StaleAndContinue;
+        }
+        if !self.thumbnail_source_matches_revision(&book_id, expected_size, expected_modified) {
+            return WorkerPollResult::StaleAndContinue;
+        }
+        if self.is_video_registered(&book_id) || !self.is_registered(&book_id) {
+            return WorkerPollResult::IgnoredAndContinue;
+        }
+        let Some(snapshot) = self.source_snapshots.get(&book_id) else {
+            return WorkerPollResult::IgnoredAndContinue;
+        };
+        self.added_history_paths.push(snapshot.path.to_path_buf());
+        ctx.request_repaint();
         WorkerPollResult::Received
     }
 

@@ -2,7 +2,7 @@
 //!
 //! `eframe::App` 実装と、Library / Viewer / 設定 UI の接続を持つ。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -27,6 +27,7 @@ use crate::domain::archive::{BookId, BookMeta, CbzRebuildPlanOptions, LibraryEnt
 use crate::domain::ipc_contract::{IpcErrorCode, ViewerFavoriteState};
 use crate::domain::page_map::SourceRevision;
 use crate::domain::performance::PerformanceResources;
+use crate::infra::added_history_store::AddedHistoryStore;
 use crate::infra::app_settings_resolution::resolve_performance_settings;
 use crate::infra::archive::cbz_rebuild_transaction::CbzRebuildTransactionFailure;
 use crate::infra::cache::{
@@ -34,12 +35,12 @@ use crate::infra::cache::{
 };
 use crate::infra::worker::external_tool_worker::ExternalToolWorker;
 use crate::repaint::RepaintNotifier;
-use crate::session::{LeftPaneTab, SessionState, sort_key_to_str, sort_order_to_str};
+use crate::session::{HistoryView, LeftPaneTab, SessionState, sort_key_to_str, sort_order_to_str};
 use crate::ui::{
     about,
     i18n::{TextKey, tr},
     icons,
-    library::{self, LibraryAction, LibraryState},
+    library::{self, LibraryAction, LibraryState, ReadingHudState},
     settings::{self, SettingsEvent},
     sidebar, theme, topbar,
     viewer::ExternalToolTrigger,
@@ -151,8 +152,11 @@ pub struct App {
     pending_rebuilt_viewer_paths: std::sync::Arc<parking_lot::Mutex<Vec<PathBuf>>>,
     library_book_order: Arc<RwLock<LibraryNavSnapshot>>,
     left_pane_tab: LeftPaneTab,
+    history_view: HistoryView,
     folder_tree: crate::ui::folder_tree::FolderTreeState,
     open_history: std::collections::VecDeque<crate::session::HistoryEntry>,
+    added_history: AddedHistoryStore,
+    history_reading_hud_states: HashMap<String, ReadingHudState>,
     history_thumb_textures: HashMap<String, egui::TextureHandle>,
     sidebar_disk_cache: Option<DiskCache>,
 }
@@ -177,6 +181,7 @@ impl App {
             performance_settings.background_worker_count
         );
         let mut library = LibraryState::new(cc.egui_ctx.clone());
+        let added_history = AddedHistoryStore::load();
         library.sort_key = session.parse_sort_key();
         library.sort_order = session.parse_sort_order();
         library.initial_scroll_y = session.grid_scroll_y;
@@ -224,12 +229,29 @@ impl App {
             "app: restored session state"
         );
         let left_pane_tab = session.left_pane_tab;
+        let history_view = session.history_view;
         let left_pane_visible = session.left_pane_visible;
         let left_pane_width = session
             .left_pane_width
             .filter(|width| width.is_finite() && *width >= theme::LIBRARY_LEFT_PANE_MIN_W)
             .unwrap_or(theme::LIBRARY_LEFT_PANE_W);
         let open_history = session.history;
+        let mut history_reading_hud_states = HashMap::new();
+        if !open_history.is_empty() || !added_history.entries().is_empty() {
+            let settings = crate::domain::archive_settings::SettingsStore::load();
+            for entry in open_history.iter().chain(added_history.entries()) {
+                if history_reading_hud_states.contains_key(&entry.normalized_path) {
+                    continue;
+                }
+                let settings_path =
+                    crate::domain::archive_settings::book_settings_path(entry.path.as_path());
+                let file_settings = settings.get(settings_path.as_path());
+                history_reading_hud_states.insert(
+                    entry.normalized_path.clone(),
+                    ReadingHudState::from_file_settings(&file_settings),
+                );
+            }
+        }
         let sidebar_disk_cache = DiskCache::open(DiskCache::default_root())
             .or_else(|_| {
                 DiskCache::open(
@@ -283,8 +305,11 @@ impl App {
             pending_rebuilt_viewer_paths: std::sync::Arc::new(parking_lot::Mutex::new(Vec::new())),
             library_book_order: Arc::new(RwLock::new(LibraryNavSnapshot::default())),
             left_pane_tab,
+            history_view,
             folder_tree: crate::ui::folder_tree::FolderTreeState::default(),
             open_history,
+            added_history,
+            history_reading_hud_states,
             history_thumb_textures: HashMap::new(),
             sidebar_disk_cache,
         }
@@ -504,6 +529,25 @@ impl eframe::App for App {
         self.drain_pending_history_paths();
         // ThumbWorker ポーリング（入力処理後に実行して応答性を優先）
         self.library.poll_worker(&ctx);
+        let generated_paths = self.library.take_added_history_paths();
+        if !generated_paths.is_empty() {
+            for path in &generated_paths {
+                let normalized_path = normalize_path_for_selection(path.as_path());
+                if !self
+                    .history_reading_hud_states
+                    .contains_key(&normalized_path)
+                {
+                    let state = self
+                        .library
+                        .cached_reading_hud_state_for_path(path.as_path())
+                        .unwrap_or_default();
+                    self.history_reading_hud_states
+                        .insert(normalized_path, state);
+                }
+            }
+            self.added_history.record_generated_paths(generated_paths);
+            self.prune_history_reading_hud_states();
+        }
         self.library.apply_pending_updates(&ctx);
         // ライブラリ画面のリアルタイム追従（3秒ポーリング）。
         // 既存サムネイルは保持し、追加/削除/同一パス入れ替えだけを差分反映する。
@@ -568,6 +612,18 @@ impl App {
     }
 
     pub(super) fn push_open_history(&mut self, path: PathBuf) {
+        let normalized_path = normalize_path_for_selection(path.as_path());
+        if !self
+            .history_reading_hud_states
+            .contains_key(&normalized_path)
+        {
+            let state = self
+                .library
+                .cached_reading_hud_state_for_path(path.as_path())
+                .unwrap_or_default();
+            self.history_reading_hud_states
+                .insert(normalized_path, state);
+        }
         let opened_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .ok()
@@ -579,6 +635,25 @@ impl App {
         };
         temp.push_history(path, opened_at_ms);
         self.open_history = temp.history;
+        self.prune_history_reading_hud_states();
+    }
+
+    fn prune_history_reading_hud_states(&mut self) {
+        let mut tracked_paths =
+            HashSet::with_capacity(self.open_history.len() + self.added_history.entries().len());
+        tracked_paths.extend(
+            self.open_history
+                .iter()
+                .map(|entry| entry.normalized_path.clone()),
+        );
+        tracked_paths.extend(
+            self.added_history
+                .entries()
+                .iter()
+                .map(|entry| entry.normalized_path.clone()),
+        );
+        self.history_reading_hud_states
+            .retain(|path, _| tracked_paths.contains(path));
     }
 
     pub(super) fn remove_disk_thumb_by_key(&self, key: &(BookId, u64, Option<SystemTime>)) {
@@ -737,9 +812,24 @@ impl App {
             .retain(|key, _| !prefixes.iter().any(|prefix| key.starts_with(prefix)));
     }
 
-    pub(super) fn update_path_dependent_state(&mut self, old_path: &Path, new_path: Option<&Path>) {
+    pub(super) fn update_path_dependent_state(
+        &mut self,
+        old_path: &Path,
+        new_path: Option<&Path>,
+        remove_descendants: bool,
+    ) {
         let old_norm = normalize_path_for_selection(old_path);
         let new_norm = new_path.map(normalize_path_for_selection);
+        let path_matches = |normalized_path: &str| {
+            if remove_descendants {
+                crate::util::path_eq::normalized_path_is_same_or_descendant(
+                    normalized_path,
+                    &old_norm,
+                )
+            } else {
+                normalized_path == old_norm
+            }
+        };
 
         let current_dir_matches = self
             .library
@@ -785,7 +875,7 @@ impl App {
         {
             let mut pending = self.pending_history_paths.lock();
             for path in pending.iter_mut() {
-                if normalize_path_for_selection(path.as_path()) == old_norm {
+                if path_matches(&normalize_path_for_selection(path.as_path())) {
                     if let Some(new_path) = new_path {
                         *path = new_path.to_path_buf();
                     } else {
@@ -796,18 +886,25 @@ impl App {
             pending.retain(|path| !path.as_os_str().is_empty());
         }
 
-        for entry in &mut self.open_history {
-            if entry.normalized_path == old_norm {
-                if let Some(new_path) = new_path {
+        if let Some(new_path) = new_path {
+            for entry in &mut self.open_history {
+                if entry.normalized_path == old_norm {
                     entry.path = new_path.to_path_buf();
                     entry.normalized_path = new_norm.clone().unwrap_or_else(|| old_norm.clone());
-                } else {
-                    entry.normalized_path.clear();
                 }
             }
+            if let Some(state) = self.history_reading_hud_states.remove(&old_norm) {
+                self.history_reading_hud_states
+                    .insert(new_norm.clone().unwrap_or_else(|| old_norm.clone()), state);
+            }
+        } else {
+            self.open_history
+                .retain(|entry| !path_matches(&entry.normalized_path));
+            self.history_reading_hud_states
+                .retain(|path, _| !path_matches(path));
         }
-        self.open_history
-            .retain(|entry| !entry.normalized_path.is_empty());
+        self.added_history
+            .update_path(&old_norm, new_path, remove_descendants);
 
         if let Some(new_path) = new_path {
             let new_path_buf = new_path.to_path_buf();
@@ -991,10 +1088,14 @@ impl App {
             self.remove_artifact_failures_by_id(&book_meta.id);
         }
 
-        self.update_path_dependent_state(old_path, Some(new_path));
+        self.update_path_dependent_state(old_path, Some(new_path), false);
         crate::domain::archive_settings::SettingsStore::rename_path_on_disk(old_path, new_path);
         self.library
             .rename_reading_hud_state_for_path(old_path, new_path);
+        if let Some(state) = self.library.cached_reading_hud_state_for_path(new_path) {
+            self.history_reading_hud_states
+                .insert(normalize_path_for_selection(new_path), state);
+        }
         let favorite_store = self.library.favorite_store_handle();
         {
             let mut favorite_store = favorite_store.write();
@@ -1026,6 +1127,7 @@ impl App {
             new_path = %new_path.display(),
             "app: renamed path dependencies updated"
         );
+        self.save_session();
     }
 
     fn drain_pending_history_paths(&mut self) {
@@ -1082,12 +1184,24 @@ impl App {
                 ViewerSyncEvent::Deleted {
                     deleted_path,
                     next_path,
+                    is_directory,
                 } => {
-                    self.apply_deleted_path_diff(deleted_path.as_path(), next_path.as_deref());
+                    self.apply_deleted_path_diff(
+                        deleted_path.as_path(),
+                        next_path.as_deref(),
+                        is_directory,
+                    );
+                    self.save_session();
                 }
                 ViewerSyncEvent::ReadingSessionFinished { book_path } => {
-                    self.library
+                    let reading_hud_state = self
+                        .library
                         .refresh_reading_hud_state_for_path(book_path.as_path());
+                    self.history_reading_hud_states.insert(
+                        normalize_path_for_selection(book_path.as_path()),
+                        reading_hud_state,
+                    );
+                    self.prune_history_reading_hud_states();
                     self.library.mark_filter_dirty();
                 }
                 ViewerSyncEvent::Navigated { path } => {
@@ -1250,8 +1364,17 @@ impl App {
         &mut self,
         deleted_path: &Path,
         next_path: Option<&Path>,
+        is_directory: bool,
     ) {
         let deleted_cleanup = self.library.deleted_path_cleanup(deleted_path);
+        let remove_descendants = is_directory
+            || matches!(
+                deleted_cleanup.as_ref().map(|cleanup| cleanup.kind),
+                Some(
+                    crate::ui::library::DeletedEntryKind::Folder
+                        | crate::ui::library::DeletedEntryKind::FolderBook
+                )
+            );
         if let Some(book_meta) = deleted_cleanup.as_ref().and_then(|c| c.book_meta.as_ref()) {
             self.remove_worker_book_cache(&book_meta.id);
         } else if let Some(thumb_id) = deleted_cleanup.as_ref().and_then(|c| c.thumb_id.as_ref()) {
@@ -1296,7 +1419,7 @@ impl App {
         {
             tracing::debug!(error = %e, path = %deleted_path.display(), "kind-group override remove skipped");
         }
-        self.update_path_dependent_state(deleted_path, None);
+        self.update_path_dependent_state(deleted_path, None, remove_descendants);
         if let Some(target) = next_path {
             self.restore_selection_by_path(Some(target.to_path_buf()));
             self.push_open_history(target.to_path_buf());
@@ -1365,7 +1488,12 @@ impl App {
                 ));
             }
         };
-        self.apply_deleted_path_diff(completed.plan.input_path.as_path(), None);
+        self.apply_deleted_path_diff(
+            completed.plan.input_path.as_path(),
+            None,
+            matches!(entry, LibraryEntry::Folder(_) | LibraryEntry::FolderBook(_)),
+        );
+        self.save_session();
         self.library
             .register_rebuilt_cbz_entry(completed.plan.input_path.as_path(), rebuilt_entry);
         Ok(RebuiltCbzLibrarySyncResult { rebuilt_path })
@@ -1480,6 +1608,7 @@ impl App {
         state.viewer_rgba_cache_max_mb = self.app_settings.viewer_rgba_cache_max_mb;
         state.viewer_background_worker_count = self.app_settings.viewer_background_worker_count;
         state.left_pane_tab = self.left_pane_tab;
+        state.history_view = self.history_view;
         state.left_pane_visible = self.left_pane_visible;
         state.left_pane_width = Some(self.left_pane_width);
         state.history = self.open_history.clone();
@@ -1862,9 +1991,12 @@ impl App {
                         state: &mut self.library,
                         favorites: &mut self.favorites,
                         left_pane_tab: &mut self.left_pane_tab,
+                        history_view: &mut self.history_view,
                         folder_tree: &mut self.folder_tree,
                         language: ui_language,
-                        history: self.open_history.make_contiguous(),
+                        read_history: self.open_history.make_contiguous(),
+                        added_history: self.added_history.entries_mut().make_contiguous(),
+                        history_reading_hud_states: &self.history_reading_hud_states,
                         history_textures: &mut self.history_thumb_textures,
                         disk_cache: self.sidebar_disk_cache.as_ref(),
                     },
@@ -1923,7 +2055,10 @@ impl App {
                     self.open_in_explorer(path.as_path());
                 }
                 sidebar::SidebarAction::OpenHistory(path) => {
-                    let _ = self.open_viewer_by_path(path, ctx);
+                    if let Some(index) = self.library.prepare_history_open(path.as_path()) {
+                        self.refresh_library_book_order();
+                        self.open_viewer(index, ctx);
+                    }
                 }
             }
         }

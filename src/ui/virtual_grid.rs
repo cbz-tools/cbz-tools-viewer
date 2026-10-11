@@ -2244,6 +2244,26 @@ fn draw_size_badge(
     );
 }
 
+pub(crate) fn draw_reading_hud_badge(
+    painter: &egui::Painter,
+    title_rect: Rect,
+    state: ReadingHudState,
+    language: UiLanguage,
+    style: LibraryHudStyle,
+    font_size: f32,
+) -> Option<Rect> {
+    let label = reading_hud_label(state, language)?;
+    draw_hud_badge(
+        painter,
+        title_rect,
+        &[label],
+        false,
+        BadgeAnchor::TopRight,
+        font_size,
+        hud_overlay_palette(style, false, LibraryCardSelectionStyle::Default, 165),
+    )
+}
+
 fn draw_hud_badge(
     painter: &egui::Painter,
     thumb_rect: Rect,
@@ -2252,9 +2272,9 @@ fn draw_hud_badge(
     anchor: BadgeAnchor,
     font_size: f32,
     palette: HudPalette,
-) {
+) -> Option<Rect> {
     if lines.is_empty() && !favorite {
-        return;
+        return None;
     }
     let font = hud_font(font_size);
     let line_h = (font.size + 2.0).max(14.0);
@@ -2318,6 +2338,7 @@ fn draw_hud_badge(
         };
         paint_favorite_star(painter, star_center, star_radius, palette.foreground);
     }
+    Some(badge_rect)
 }
 
 fn layout_title_lines(

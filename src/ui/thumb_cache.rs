@@ -31,7 +31,18 @@ pub fn load_disk_thumb_texture(
     texture_name: impl Into<String>,
 ) -> Option<LoadedDiskThumb> {
     let id = BookId::from_path(path);
-    let bytes = cache.get_thumb(&id, file_size, modified)?;
+    load_disk_thumb_texture_for_id(ctx, cache, &id, file_size, modified, texture_name)
+}
+
+pub fn load_disk_thumb_texture_for_id(
+    ctx: &egui::Context,
+    cache: &DiskCache,
+    id: &BookId,
+    file_size: u64,
+    modified: Option<SystemTime>,
+    texture_name: impl Into<String>,
+) -> Option<LoadedDiskThumb> {
+    let bytes = cache.get_thumb(id, file_size, modified)?;
     let img = decode_webp(&bytes).ok()?;
     let image_size = [img.width as usize, img.height as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(image_size, &img.pixels);

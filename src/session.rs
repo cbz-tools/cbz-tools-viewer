@@ -4,7 +4,7 @@
 //! 保存先: `%LOCALAPPDATA%\cbz-viewer\session.json`
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     path::PathBuf,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -68,6 +68,9 @@ pub struct SessionState {
     pub viewer_background_worker_count: u16,
     #[serde(default)]
     pub left_pane_tab: LeftPaneTab,
+    /// History 内で選択している一覧。旧セッションでは Read を使う。
+    #[serde(default)]
+    pub history_view: HistoryView,
     #[serde(default)]
     pub left_pane_visible: bool,
     /// Left pane width in logical pixels. Missing or invalid legacy values use the default.
@@ -84,6 +87,13 @@ pub enum LeftPaneTab {
     #[serde(alias = "Tree")]
     Filter,
     History,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HistoryView {
+    #[default]
+    Read,
+    Added,
 }
 
 #[derive(Default, serde::Serialize, serde::Deserialize, Clone)]
@@ -110,6 +120,7 @@ impl SessionState {
     const SCHEMA_VERSION: u16 = 1;
     const DEFAULT_W: f32 = 1200.0;
     const DEFAULT_H: f32 = 800.0;
+    const MAX_HISTORY_ENTRIES: usize = 200;
 
     /// ファイルから読み込む（失敗時はデフォルト）
     pub fn load() -> Self {
@@ -296,7 +307,6 @@ impl SessionState {
     }
 
     pub fn push_history(&mut self, path: PathBuf, opened_at_ms: u64) {
-        const MAX_HISTORY: usize = 500;
         let normalized = normalize_path_for_selection(&path);
         self.history.retain(|e| e.normalized_path != normalized);
         let (file_size, modified_unix_ns) = std::fs::metadata(&path)
@@ -316,7 +326,7 @@ impl SessionState {
             file_size,
             modified_unix_ns,
         });
-        self.history.truncate(MAX_HISTORY);
+        self.history.truncate(Self::MAX_HISTORY_ENTRIES);
     }
 
     fn sanitize_history_entries(&mut self) {
@@ -325,8 +335,14 @@ impl SessionState {
                 entry.normalized_path = normalize_path_for_selection(&entry.path);
             }
         }
+        let mut seen = HashSet::new();
+        self.history
+            .retain(|entry| seen.insert(entry.normalized_path.clone()));
+        self.history.truncate(Self::MAX_HISTORY_ENTRIES);
     }
 }
+
+pub(crate) const HISTORY_LIMIT: usize = SessionState::MAX_HISTORY_ENTRIES;
 
 pub fn unix_ns_to_system_time(ns: u128) -> Option<SystemTime> {
     let ns_u64 = u64::try_from(ns).ok()?;

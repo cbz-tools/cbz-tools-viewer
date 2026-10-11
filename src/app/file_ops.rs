@@ -166,6 +166,7 @@ impl App {
             .filter_map(|&i| self.entry_path_at(i))
             .collect();
         let mut had_failure = false;
+        let mut deleted_any = false;
         for path in &targets {
             if self.library.entries.iter().any(|entry| {
                 matches!(
@@ -175,7 +176,8 @@ impl App {
             }) {
                 tracing::debug!(path = %path.display(), "video delete");
             }
-            let result = if path.is_dir() {
+            let is_directory = path.is_dir();
+            let result = if is_directory {
                 std::fs::remove_dir_all(path)
             } else {
                 std::fs::remove_file(path)
@@ -184,7 +186,7 @@ impl App {
                 tracing::error!(
                     "delete failed: {} kind={} — {e}",
                     path.display(),
-                    if path.is_dir() { "folder" } else { "file" }
+                    if is_directory { "folder" } else { "file" }
                 );
                 had_failure = true;
                 break;
@@ -192,10 +194,15 @@ impl App {
                 tracing::info!(
                     "deleted: {} kind={}",
                     path.display(),
-                    if path.is_dir() { "folder" } else { "file" }
+                    if is_directory { "folder" } else { "file" }
                 );
-                self.apply_deleted_path_diff(path.as_path(), None);
+                self.apply_deleted_path_diff(path.as_path(), None, is_directory);
+                deleted_any = true;
             }
+        }
+
+        if deleted_any {
+            self.save_session();
         }
 
         if had_failure {
@@ -355,6 +362,9 @@ impl App {
             crate::domain::archive_settings::SettingsStore::remove_path_from_disk(path.as_path());
             self.library
                 .remove_reading_hud_state_for_path(path.as_path());
+            self.history_reading_hud_states.remove(
+                &crate::util::path_eq::normalize_path_for_selection(path.as_path()),
+            );
             self.library.clear_book_artifact_state(book_id);
             self.remove_worker_book_cache(book_id);
         }

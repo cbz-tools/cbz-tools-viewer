@@ -66,6 +66,7 @@ pub(super) enum ViewerSyncEvent {
     Deleted {
         deleted_path: PathBuf,
         next_path: Option<PathBuf>,
+        is_directory: bool,
     },
     ReadingSessionFinished {
         book_path: PathBuf,
@@ -797,6 +798,7 @@ fn process_viewer_ipc_request(
                 return Some(ipc_error_response(request_id, IpcErrorCode::FileNotFound));
             }
             let deleted_path = current_path.clone();
+            let is_directory = deleted_path.is_dir();
             tracing::trace!(
                 request_id,
                 path = %deleted_path.display(),
@@ -806,7 +808,7 @@ fn process_viewer_ipc_request(
             if delete_path(current_path.as_path()).is_err() {
                 return Some(ipc_error_response(request_id, IpcErrorCode::DeleteFailed));
             }
-            deleted_response(request_id, deleted_path, None, None, None)
+            deleted_response(request_id, deleted_path, is_directory, None, None, None)
         }
         ViewerToLibrary::DeleteAndNext {
             request_id,
@@ -816,6 +818,7 @@ fn process_viewer_ipc_request(
                 return Some(ipc_error_response(request_id, IpcErrorCode::FileNotFound));
             }
             let deleted_path = current_path.clone();
+            let is_directory = deleted_path.is_dir();
             tracing::trace!(
                 request_id,
                 path = %deleted_path.display(),
@@ -877,6 +880,7 @@ fn process_viewer_ipc_request(
                     deleted_response(
                         request_id,
                         deleted_path,
+                        is_directory,
                         Some(path),
                         Some(next_book_state),
                         Some(Box::new(DeleteAndNextSpadTargets {
@@ -885,7 +889,7 @@ fn process_viewer_ipc_request(
                         })),
                     )
                 }
-                None => deleted_response(request_id, deleted_path, None, None, None),
+                None => deleted_response(request_id, deleted_path, is_directory, None, None, None),
             }
         }
         ViewerToLibrary::RebuildSelectedImagesAsCbzAndNext {
@@ -1111,6 +1115,7 @@ fn ipc_error_response(
 fn deleted_response(
     request_id: u64,
     deleted_path: PathBuf,
+    is_directory: bool,
     next_path: Option<PathBuf>,
     next_book_state: Option<ViewerBookState>,
     spad_targets: Option<Box<DeleteAndNextSpadTargets>>,
@@ -1126,6 +1131,7 @@ fn deleted_response(
         Some(ViewerSyncEvent::Deleted {
             deleted_path,
             next_path,
+            is_directory,
         }),
     )
 }

@@ -1,4 +1,8 @@
-use std::{collections::HashMap, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    time::UNIX_EPOCH,
+};
 
 use chrono::{Local, TimeZone};
 
@@ -6,10 +10,10 @@ use eframe::egui;
 use eframe::egui::text::LayoutJob;
 
 use crate::{
-    domain::app_settings::UiLanguage,
+    domain::app_settings::{LibraryHudStyle, UiLanguage},
     infra::cache::disk::DiskCache,
-    session::{HistoryEntry, LeftPaneTab, unix_ns_to_system_time},
-    ui::thumb_cache::{LoadedDiskThumb, load_disk_thumb_texture},
+    session::{HistoryEntry, HistoryView, LeftPaneTab, unix_ns_to_system_time},
+    ui::thumb_cache::{LoadedDiskThumb, load_disk_thumb_texture_for_id},
     util::path_eq::normalize_path_for_selection,
 };
 
@@ -18,8 +22,9 @@ use super::{
     folder_tree::{self, FolderTreeState},
     i18n::{TextKey, tr},
     icons,
-    library::{LibraryScope, LibraryState, ReadingHudState},
+    library::{HistoryWorkPath, LibraryScope, LibraryState, ReadingHudState},
     theme,
+    virtual_grid::draw_reading_hud_badge,
 };
 
 // `Open*` を揃えることで、呼び出し側 dispatch 時に操作意図を variants 名だけで判別できる。
@@ -35,9 +40,12 @@ pub struct SidebarViewContext<'a> {
     pub state: &'a mut LibraryState,
     pub favorites: &'a mut Vec<PathBuf>,
     pub left_pane_tab: &'a mut LeftPaneTab,
+    pub history_view: &'a mut HistoryView,
     pub folder_tree: &'a mut FolderTreeState,
     pub language: UiLanguage,
-    pub history: &'a [HistoryEntry],
+    pub read_history: &'a [HistoryEntry],
+    pub added_history: &'a [HistoryEntry],
+    pub history_reading_hud_states: &'a HashMap<String, ReadingHudState>,
     pub history_textures: &'a mut HashMap<String, egui::TextureHandle>,
     pub disk_cache: Option<&'a DiskCache>,
 }
@@ -302,14 +310,190 @@ fn classify_date_local(opened_at_ms: u64, today: chrono::NaiveDate) -> HistoryDa
     }
 }
 
+struct HistoryRenderContext<'a> {
+    library_work_paths: &'a HashSet<HistoryWorkPath>,
+    history_textures: &'a mut HashMap<String, egui::TextureHandle>,
+    disk_cache: Option<&'a DiskCache>,
+    language: UiLanguage,
+    reading_hud_states: &'a HashMap<String, ReadingHudState>,
+    hud_style: LibraryHudStyle,
+    hud_font_size: f32,
+}
+
+fn show_history_entries(
+    ui: &mut egui::Ui,
+    history: &[HistoryEntry],
+    context: HistoryRenderContext<'_>,
+) -> Option<SidebarAction> {
+    let HistoryRenderContext {
+        library_work_paths,
+        history_textures,
+        disk_cache,
+        language,
+        reading_hud_states,
+        hud_style,
+        hud_font_size,
+    } = context;
+    let today = Local::now().date_naive();
+    let mut last_group: Option<HistoryDateGroup> = None;
+    let mut action = None;
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        for entry in history {
+            let Some(library_work) = library_work_paths.get(entry.normalized_path.as_str()) else {
+                continue;
+            };
+
+            let group = classify_date_local(entry.opened_at_ms, today);
+            if last_group.as_ref() != Some(&group) {
+                let title = match &group {
+                    HistoryDateGroup::Today => tr(language, TextKey::Today).to_owned(),
+                    HistoryDateGroup::Yesterday => tr(language, TextKey::Yesterday).to_owned(),
+                    HistoryDateGroup::Date(date) => {
+                        super::i18n::format_history_date(language, *date)
+                    }
+                };
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(theme::FONT_SIZE_SMALL)
+                        .color(theme::TEXT_SUBTLE),
+                );
+                ui.add_space(2.0);
+                last_group = Some(group);
+            }
+
+            let exists = entry.path.exists();
+            let label = entry
+                .path
+                .file_stem()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry.path.to_string_lossy().into_owned());
+            let text_color = if exists {
+                theme::TEXT_MAIN
+            } else {
+                theme::TEXT_SUBTLE
+            };
+            let (file_size, modified_unix_ns, modified) =
+                if let Some(source) = library_work.thumbnail_key {
+                    let modified_unix_ns = source
+                        .modified
+                        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                        .map(|duration| duration.as_nanos());
+                    (Some(source.file_size), modified_unix_ns, source.modified)
+                } else {
+                    (
+                        entry.file_size,
+                        entry.modified_unix_ns,
+                        entry.modified_unix_ns.and_then(unix_ns_to_system_time),
+                    )
+                };
+            let key = format!(
+                "{}:{}:{}",
+                entry.normalized_path,
+                file_size.unwrap_or(0),
+                modified_unix_ns.unwrap_or(0)
+            );
+            if !history_textures.contains_key(&key) {
+                if let (Some(cache), Some(file_size)) = (disk_cache, file_size) {
+                    let loaded_thumb = load_disk_thumb_texture_for_id(
+                        ui.ctx(),
+                        cache,
+                        &library_work.book_id,
+                        file_size,
+                        modified,
+                        format!("history_thumb_{}", key),
+                    );
+                    if let Some(LoadedDiskThumb { texture, .. }) = loaded_thumb {
+                        history_textures.insert(key.clone(), texture);
+                    }
+                }
+            }
+
+            let row_width = ui.available_width().max(0.0);
+            let (_, row_rect) =
+                ui.allocate_space(egui::vec2(row_width, SIDEBAR_HISTORY_ROW_HEIGHT));
+            let row_id = ui
+                .id()
+                .with(("history_row", &entry.normalized_path, entry.opened_at_ms));
+            let row_resp = ui.interact(row_rect, row_id, egui::Sense::click());
+            if row_resp.hovered() {
+                ui.painter().rect_filled(
+                    row_rect,
+                    egui::CornerRadius::same(4),
+                    egui::Color32::from_rgb(224, 224, 224),
+                );
+            }
+
+            let painter = ui.painter_at(row_rect);
+            let inner_rect = row_rect.shrink2(egui::vec2(8.0, 0.0));
+            let thumb_rect = egui::Rect::from_min_size(inner_rect.min, egui::vec2(52.0, 72.0));
+            if let Some(texture) = history_textures.get(&key) {
+                painter.image(
+                    texture.id(),
+                    thumb_rect,
+                    egui::Rect::from_min_max(egui::Pos2::new(0.0, 0.0), egui::Pos2::new(1.0, 1.0)),
+                    if exists {
+                        egui::Color32::WHITE
+                    } else {
+                        egui::Color32::from_gray(110)
+                    },
+                );
+            } else {
+                painter.rect_filled(thumb_rect, 4.0, egui::Color32::from_gray(70));
+            }
+
+            let text_x = thumb_rect.max.x + 8.0;
+            let text_w = (inner_rect.max.x - text_x - 4.0).max(16.0);
+            let text_rect = egui::Rect::from_min_size(
+                egui::pos2(text_x, inner_rect.min.y),
+                egui::vec2(text_w, inner_rect.height()),
+            );
+            let reading_state = reading_hud_states
+                .get(&entry.normalized_path)
+                .copied()
+                .unwrap_or_default();
+            let title_width = draw_reading_hud_badge(
+                &painter,
+                text_rect,
+                reading_state,
+                language,
+                hud_style,
+                hud_font_size,
+            )
+            .map(|badge_rect| (badge_rect.min.x - text_rect.min.x - 4.0).max(16.0))
+            .unwrap_or(text_w);
+            let mut job = LayoutJob::single_section(
+                label,
+                egui::TextFormat {
+                    color: text_color,
+                    ..Default::default()
+                },
+            );
+            job.wrap.max_width = title_width;
+            job.wrap.max_rows = 4;
+            job.wrap.break_anywhere = true;
+            let galley = painter.layout_job(job);
+            painter.galley(text_rect.min, galley, text_color);
+
+            if exists && row_resp.double_clicked() {
+                action = Some(SidebarAction::OpenHistory(entry.path.clone()));
+            }
+        }
+    });
+    action
+}
+
 pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<SidebarAction> {
     let SidebarViewContext {
         state,
         favorites,
         left_pane_tab,
+        history_view,
         folder_tree,
         language,
-        history,
+        read_history,
+        added_history,
+        history_reading_hud_states,
         history_textures,
         disk_cache,
     } = context;
@@ -353,123 +537,50 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
 
     ui.separator();
     if *left_pane_tab == LeftPaneTab::History {
-        let today = Local::now().date_naive();
-        let mut last_group: Option<HistoryDateGroup> = None;
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for entry in history {
-                let group = classify_date_local(entry.opened_at_ms, today);
-                if last_group.as_ref() != Some(&group) {
-                    let title = match &group {
-                        HistoryDateGroup::Today => tr(language, TextKey::Today).to_owned(),
-                        HistoryDateGroup::Yesterday => tr(language, TextKey::Yesterday).to_owned(),
-                        HistoryDateGroup::Date(d) => super::i18n::format_history_date(language, *d),
-                    };
-                    ui.add_space(4.0);
-                    ui.label(
-                        egui::RichText::new(title)
-                            .size(theme::FONT_SIZE_SMALL)
-                            .color(theme::TEXT_SUBTLE),
-                    );
-                    ui.add_space(2.0);
-                    last_group = Some(group);
-                }
-
-                let exists = entry.path.exists();
-                let label = entry
-                    .path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| entry.path.to_string_lossy().into_owned());
-                let text_color = if exists {
-                    theme::TEXT_MAIN
-                } else {
-                    theme::TEXT_SUBTLE
-                };
-                let key = format!(
-                    "{}:{}:{}",
-                    entry.normalized_path,
-                    entry.file_size.unwrap_or(0),
-                    entry.modified_unix_ns.unwrap_or(0)
-                );
-                if !history_textures.contains_key(&key) {
-                    if let (Some(cache), Some(file_size)) = (disk_cache, entry.file_size) {
-                        let modified = entry.modified_unix_ns.and_then(unix_ns_to_system_time);
-                        let loaded_thumb = load_disk_thumb_texture(
-                            ui.ctx(),
-                            cache,
-                            &entry.path,
-                            file_size,
-                            modified,
-                            format!("history_thumb_{}", key),
-                        );
-                        if let Some(LoadedDiskThumb { texture, .. }) = loaded_thumb {
-                            history_textures.insert(key.clone(), texture);
-                        }
-                    }
-                }
-
-                let row_width = ui.available_width().max(0.0);
-                let (_, row_rect) =
-                    ui.allocate_space(egui::vec2(row_width, SIDEBAR_HISTORY_ROW_HEIGHT));
-                let row_id =
-                    ui.id()
-                        .with(("history_row", &entry.normalized_path, entry.opened_at_ms));
-                let row_resp = ui.interact(row_rect, row_id, egui::Sense::click());
-                if row_resp.hovered() {
-                    let history_hover_bg = egui::Color32::from_rgb(224, 224, 224);
-                    ui.painter().rect_filled(
-                        row_rect,
-                        egui::CornerRadius::same(4),
-                        history_hover_bg,
-                    );
-                }
-
-                let painter = ui.painter_at(row_rect);
-                let inner_rect = row_rect.shrink2(egui::vec2(8.0, 0.0));
-                let thumb_rect = egui::Rect::from_min_size(inner_rect.min, egui::vec2(52.0, 72.0));
-                if let Some(tex) = history_textures.get(&key) {
-                    painter.image(
-                        tex.id(),
-                        thumb_rect,
-                        egui::Rect::from_min_max(
-                            egui::Pos2::new(0.0, 0.0),
-                            egui::Pos2::new(1.0, 1.0),
-                        ),
-                        if exists {
-                            egui::Color32::WHITE
-                        } else {
-                            egui::Color32::from_gray(110)
-                        },
-                    );
-                } else {
-                    painter.rect_filled(thumb_rect, 4.0, egui::Color32::from_gray(70));
-                }
-
-                let text_x = thumb_rect.max.x + 8.0;
-                let text_w = (inner_rect.max.x - text_x - 4.0).max(16.0);
-                let text_rect = egui::Rect::from_min_size(
-                    egui::pos2(text_x, inner_rect.min.y),
-                    egui::vec2(text_w, inner_rect.height()),
-                );
-                let mut job = LayoutJob::single_section(
-                    label.clone(),
-                    egui::TextFormat {
-                        color: text_color,
-                        ..Default::default()
-                    },
-                );
-                job.wrap.max_width = text_w;
-                job.wrap.max_rows = 4;
-                job.wrap.break_anywhere = true;
-                let galley = painter.layout_job(job);
-                painter.galley(text_rect.min, galley, text_color);
-
-                if exists && row_resp.clicked() {
-                    action = Some(SidebarAction::OpenHistory(entry.path.clone()));
-                }
+        ui.horizontal(|ui| {
+            let tab_width =
+                ((ui.available_width() - ui.spacing().item_spacing.x).max(0.0) / 2.0).max(0.0);
+            if ui
+                .add_sized(
+                    egui::vec2(tab_width, 24.0),
+                    egui::Button::new(tr(language, TextKey::HistoryAdded))
+                        .selected(*history_view == HistoryView::Added),
+                )
+                .clicked()
+            {
+                *history_view = HistoryView::Added;
+            }
+            if ui
+                .add_sized(
+                    egui::vec2(tab_width, 24.0),
+                    egui::Button::new(tr(language, TextKey::HistoryRead))
+                        .selected(*history_view == HistoryView::Read),
+                )
+                .clicked()
+            {
+                *history_view = HistoryView::Read;
             }
         });
-        return action;
+        let history = match *history_view {
+            HistoryView::Read => read_history,
+            HistoryView::Added => added_history,
+        };
+        let library_work_paths = state.normalized_history_work_paths();
+        let hud_style = state.hud_style;
+        let hud_font_size = state.hud_font_size;
+        return show_history_entries(
+            ui,
+            history,
+            HistoryRenderContext {
+                library_work_paths: &library_work_paths,
+                history_textures,
+                disk_cache,
+                language,
+                reading_hud_states: history_reading_hud_states,
+                hud_style,
+                hud_font_size,
+            },
+        );
     }
 
     let mut remove_idx: Option<usize> = None;
