@@ -109,6 +109,10 @@ pub enum TextKey {
     DiskCache,
     CacheClear,
     CacheClearTooltip,
+    CacheClearConfirmTitle,
+    CacheClearConfirmQuestion,
+    CacheClearConfirmDescription,
+    CacheClearConfirmAction,
     DangerZone,
     Unavailable,
     MiB,
@@ -202,6 +206,10 @@ pub enum TextKey {
     PropertiesTitle,
     DeleteConfirmTitle,
     DeleteQuestion,
+    UnregisterFolderConfirmTitle,
+    UnregisterFolderConfirmQuestion,
+    UnregisterFolderConfirmNote,
+    UnregisterFolderConfirmAction,
     GroupSettingsTitle,
     GroupTargetsSentence,
     ExistingGroups,
@@ -293,7 +301,7 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::HistoryAdded => "Added",
         TextKey::Today => "Today",
         TextKey::Yesterday => "Yesterday",
-        TextKey::AddFolder => "Add folder",
+        TextKey::AddFolder => "＋ Add folder",
         TextKey::AddFolderHint => "Add the current folder to Favorites",
         TextKey::FolderDropHint => "Drop a folder here or add it to Library",
         TextKey::Unread => "Unread",
@@ -360,6 +368,14 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::PropertiesTitle => "Properties",
         TextKey::DeleteConfirmTitle => "Delete",
         TextKey::DeleteQuestion => "Delete \"{}\"?",
+        TextKey::UnregisterFolderConfirmTitle => "Remove from Library",
+        TextKey::UnregisterFolderConfirmQuestion => {
+            "Do you want to remove this folder from the Library?"
+        }
+        TextKey::UnregisterFolderConfirmNote => {
+            "Files and folders will not be deleted.\nOnly the Library registration will be removed."
+        }
+        TextKey::UnregisterFolderConfirmAction => "Remove",
         TextKey::GroupSettingsTitle => "Set Group",
         TextKey::GroupTargetsSentence => "Set group for {} files.",
         TextKey::ExistingGroups => "Choose from existing groups",
@@ -538,6 +554,12 @@ fn english_text(key: TextKey) -> &'static str {
         TextKey::DiskCache => "Disk cache",
         TextKey::CacheClear => "Clear thumbnail cache",
         TextKey::CacheClearTooltip => "Delete the disk cache and regenerate it when displayed",
+        TextKey::CacheClearConfirmTitle => "Clear Cache",
+        TextKey::CacheClearConfirmQuestion => "Clear all caches?",
+        TextKey::CacheClearConfirmDescription => {
+            "Thumbnail, page information, and other caches will be cleared\nand regenerated as needed.\n\nReading progress, display settings, favorites, and original files\nwill not be deleted."
+        }
+        TextKey::CacheClearConfirmAction => "Clear",
         TextKey::DangerZone => "Danger Zone",
         TextKey::Unavailable => "Unavailable",
         TextKey::MiB => "MiB",
@@ -657,6 +679,14 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::PropertiesTitle => Some("プロパティ"),
         TextKey::DeleteConfirmTitle => Some("削除の確認"),
         TextKey::DeleteQuestion => Some("「{}」を削除しますか？"),
+        TextKey::UnregisterFolderConfirmTitle => Some("ライブラリから解除"),
+        TextKey::UnregisterFolderConfirmQuestion => {
+            Some("このフォルダをライブラリから解除しますか？")
+        }
+        TextKey::UnregisterFolderConfirmNote => {
+            Some("実際のファイルやフォルダは削除されません。\nライブラリへの登録のみ解除されます。")
+        }
+        TextKey::UnregisterFolderConfirmAction => Some("解除"),
         TextKey::GroupSettingsTitle => Some("グループを設定"),
         TextKey::GroupTargetsSentence => Some("{}件のファイルのグループを設定します。"),
         TextKey::ExistingGroups => Some("既存グループから選択"),
@@ -839,6 +869,12 @@ fn japanese_text(key: TextKey) -> Option<&'static str> {
         TextKey::DiskCache => Some("ディスクキャッシュ"),
         TextKey::CacheClear => Some("サムネイルキャッシュをクリア"),
         TextKey::CacheClearTooltip => Some("ディスクキャッシュを削除し、表示時に再生成します"),
+        TextKey::CacheClearConfirmTitle => Some("キャッシュをクリア"),
+        TextKey::CacheClearConfirmQuestion => Some("キャッシュをすべてクリアしますか？"),
+        TextKey::CacheClearConfirmDescription => Some(
+            "サムネイル、ページ情報などのキャッシュが削除され、\n必要に応じて再生成されます。\n\n読書状態や表示設定、お気に入り、元のファイルは削除されません。",
+        ),
+        TextKey::CacheClearConfirmAction => Some("クリア"),
         TextKey::DangerZone => Some("Danger Zone"),
         TextKey::Unavailable => Some("取得不可"),
         TextKey::MiB => Some("MiB"),

@@ -12,10 +12,10 @@ name = "cbz-viewer"
 path = "src/main.rs"
 
 [dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 
 [build-dependencies]
-sha2 = "0.10"
+sha2 = "0.11"
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"

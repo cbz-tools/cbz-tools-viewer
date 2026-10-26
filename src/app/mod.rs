@@ -37,7 +37,7 @@ use crate::infra::worker::external_tool_worker::ExternalToolWorker;
 use crate::repaint::RepaintNotifier;
 use crate::session::{HistoryView, LeftPaneTab, SessionState, sort_key_to_str, sort_order_to_str};
 use crate::ui::{
-    about,
+    about, common,
     i18n::{TextKey, tr},
     icons,
     library::{self, LibraryAction, LibraryState, ReadingHudState},
@@ -59,6 +59,18 @@ mod viewer_ops;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeleteDialogChoice {
     Ok,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FavoriteDirUnregisterDialogChoice {
+    Unregister,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheClearDialogChoice {
+    Clear,
     Cancel,
 }
 
@@ -126,6 +138,10 @@ pub struct App {
     properties_dialog: Option<EntryProperties>,
     deleting: Option<Vec<usize>>,
     delete_dialog_choice: DeleteDialogChoice,
+    pending_favorite_dir_unregistration: Option<PathBuf>,
+    favorite_dir_unregistration_choice: FavoriteDirUnregisterDialogChoice,
+    cache_clear_confirmation_open: bool,
+    cache_clear_dialog_choice: CacheClearDialogChoice,
     book_settings_clearing: Option<Vec<usize>>,
     book_settings_clear_dialog_choice: BookSettingsClearDialogChoice,
     // グループ設定ダイアログ
@@ -282,6 +298,10 @@ impl App {
             properties_dialog: None,
             deleting: None,
             delete_dialog_choice: DeleteDialogChoice::Ok,
+            pending_favorite_dir_unregistration: None,
+            favorite_dir_unregistration_choice: FavoriteDirUnregisterDialogChoice::Unregister,
+            cache_clear_confirmation_open: false,
+            cache_clear_dialog_choice: CacheClearDialogChoice::Clear,
             book_settings_clearing: None,
             book_settings_clear_dialog_choice: BookSettingsClearDialogChoice::Reset,
             setting_group_targets: Vec::new(),
@@ -392,14 +412,27 @@ impl eframe::App for App {
             let ui_language = self.app_settings.ui_language;
             let prev_settings = self.app_settings.clone();
             let mut app_settings = self.app_settings.clone();
-            let event = settings::show(
+            let mut event = settings::show(
                 &ctx,
                 &mut self.settings_open,
                 ui_language,
                 &mut app_settings,
                 &self.performance_resources,
                 self.cache_size_mb,
+                !self.cache_clear_confirmation_open,
             );
+
+            let mut cache_clear_requested_this_frame = false;
+            if event == SettingsEvent::RequestClearCache && !self.cache_clear_confirmation_open {
+                self.cache_clear_confirmation_open = true;
+                self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
+                cache_clear_requested_this_frame = true;
+            }
+            if !cache_clear_requested_this_frame
+                && self.render_cache_clear_confirmation_dialog(&ctx, ui_language)
+            {
+                event = SettingsEvent::ClearCache;
+            }
 
             if app_settings.clamped_display_w() != prev_settings.clamped_display_w() {
                 self.app_settings = app_settings.clone();
@@ -429,7 +462,10 @@ impl eframe::App for App {
                     self.library
                         .apply_thumb_size(self.app_settings.thumb_w(), self.app_settings.thumb_h());
                 }
+                SettingsEvent::RequestClearCache => {}
                 SettingsEvent::ClearCache => {
+                    self.cache_clear_confirmation_open = false;
+                    self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
                     self.library.worker.clear_cache_state();
                     let mut clear_cache_failed = false;
                     {
@@ -511,6 +547,8 @@ impl eframe::App for App {
             }
 
             if !self.settings_open {
+                self.cache_clear_confirmation_open = false;
+                self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
                 self.cache_size_mb = -1.0;
                 self.app_settings
                     .save_with_resources(&self.performance_resources);
@@ -1633,13 +1671,16 @@ impl App {
         let modal_open = self.renaming.is_some()
             || self.properties_dialog.is_some()
             || self.deleting.is_some()
+            || self.pending_favorite_dir_unregistration.is_some()
+            || self.cache_clear_confirmation_open
             || self.book_settings_clearing.is_some()
             || self.setting_group_open
             || self.pending_error_dialog.is_some();
         let interaction_blocked = modal_open || self.suppress_pointer_until_release;
         let keyboard_blocked = self.library.is_path_editing
             || self.library.path_input_focused
-            || self.library.filter_input_focused;
+            || self.library.filter_input_focused
+            || self.cache_clear_confirmation_open;
 
         self.process_library_shortcuts(&ctx, interaction_blocked, keyboard_blocked);
         if !self.settings_open && !keyboard_blocked {
@@ -1673,18 +1714,22 @@ impl App {
         ui_language: crate::domain::app_settings::UiLanguage,
         topbar_height: f32,
     ) {
+        let interactions_enabled = !self.cache_clear_confirmation_open;
         let topbar_result = egui::Panel::top("topbar")
             .exact_size(topbar_height)
             .show(ui, |ui| {
-                ui.add_space(4.0);
-                topbar::show(
-                    ui,
-                    &mut self.library,
-                    self.left_pane_visible,
-                    ui_language,
-                    &mut self.app_settings.viewer_open_mode,
-                    self.suppress_next_dropped_files,
-                )
+                ui.add_enabled_ui(interactions_enabled, |ui| {
+                    ui.add_space(4.0);
+                    topbar::show(
+                        ui,
+                        &mut self.library,
+                        self.left_pane_visible,
+                        ui_language,
+                        &mut self.app_settings.viewer_open_mode,
+                        self.suppress_next_dropped_files,
+                    )
+                })
+                .inner
             })
             .inner;
         let _ = topbar_result.scan_dir.as_ref();
@@ -1696,6 +1741,9 @@ impl App {
     }
 
     fn apply_topbar_result(&mut self, ctx: &egui::Context, topbar_result: topbar::TopbarResult) {
+        if self.cache_clear_confirmation_open {
+            return;
+        }
         if let Some(path) = topbar_result.breadcrumb_nav {
             self.navigate_to_dir_with_history(path);
         }
@@ -1908,6 +1956,8 @@ impl App {
             let modal_open = self.renaming.is_some()
                 || self.properties_dialog.is_some()
                 || self.deleting.is_some()
+                || self.pending_favorite_dir_unregistration.is_some()
+                || self.cache_clear_confirmation_open
                 || self.book_settings_clearing.is_some()
                 || self.setting_group_open
                 || self.pending_error_dialog.is_some();
@@ -1961,10 +2011,11 @@ impl App {
             return;
         }
 
+        let interactions_enabled = !self.cache_clear_confirmation_open;
         let (min_width, max_width) = self.left_pane_size_range(root_ui.available_width());
-        let panel_id = egui::Id::new("library_left_pane");
+        let panel_id = egui::Id::unique("library_left_pane");
         let pane = egui::Panel::left(panel_id)
-            .resizable(true)
+            .resizable(interactions_enabled)
             .default_size(self.left_pane_width)
             .size_range(min_width..=max_width)
             .frame(
@@ -1974,33 +2025,37 @@ impl App {
                     .inner_margin(egui::Margin::same(theme::SIDEBAR_INNER_MARGIN as i8)),
             )
             .show(root_ui, |ui| {
-                // Nested Library, Tree, and History ScrollAreas inherit reserved scrollbar space.
-                ui.style_mut().spacing.scroll.floating = false;
-                let parent_clip = ui.clip_rect();
-                let content_size = ui.available_size();
-                let (content_rect, _) = ui.allocate_exact_size(content_size, egui::Sense::hover());
-                let mut content_ui = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(content_rect)
-                        .layout(egui::Layout::top_down(egui::Align::Min)),
-                );
-                content_ui.set_clip_rect(parent_clip.intersect(content_rect));
-                sidebar::show(
-                    &mut content_ui,
-                    sidebar::SidebarViewContext {
-                        state: &mut self.library,
-                        favorites: &mut self.favorites,
-                        left_pane_tab: &mut self.left_pane_tab,
-                        history_view: &mut self.history_view,
-                        folder_tree: &mut self.folder_tree,
-                        language: ui_language,
-                        read_history: self.open_history.make_contiguous(),
-                        added_history: self.added_history.entries_mut().make_contiguous(),
-                        history_reading_hud_states: &self.history_reading_hud_states,
-                        history_textures: &mut self.history_thumb_textures,
-                        disk_cache: self.sidebar_disk_cache.as_ref(),
-                    },
-                )
+                ui.add_enabled_ui(interactions_enabled, |ui| {
+                    // Nested Library, Tree, and History ScrollAreas inherit reserved scrollbar space.
+                    ui.style_mut().spacing.scroll.floating = false;
+                    let parent_clip = ui.clip_rect();
+                    let content_size = ui.available_size();
+                    let (content_rect, _) =
+                        ui.allocate_exact_size(content_size, egui::Sense::hover());
+                    let mut content_ui = ui.new_child(
+                        egui::UiBuilder::new()
+                            .max_rect(content_rect)
+                            .layout(egui::Layout::top_down(egui::Align::Min)),
+                    );
+                    content_ui.set_clip_rect(parent_clip.intersect(content_rect));
+                    sidebar::show(
+                        &mut content_ui,
+                        sidebar::SidebarViewContext {
+                            state: &mut self.library,
+                            favorites: &mut self.favorites,
+                            left_pane_tab: &mut self.left_pane_tab,
+                            history_view: &mut self.history_view,
+                            folder_tree: &mut self.folder_tree,
+                            language: ui_language,
+                            read_history: self.open_history.make_contiguous(),
+                            added_history: self.added_history.entries_mut().make_contiguous(),
+                            history_reading_hud_states: &self.history_reading_hud_states,
+                            history_textures: &mut self.history_thumb_textures,
+                            disk_cache: self.sidebar_disk_cache.as_ref(),
+                        },
+                    )
+                })
+                .inner
             });
         let action = pane.inner;
 
@@ -2021,7 +2076,7 @@ impl App {
         .expand2(egui::vec2(resize_grab_radius, 0.0));
         let reset_response = root_ui.interact(
             reset_rect,
-            root_ui.id().with("library_left_pane_reset"),
+            root_ui.scope_id().with("library_left_pane_reset"),
             egui::Sense::click(),
         );
         if reset_response.hovered() {
@@ -2029,7 +2084,7 @@ impl App {
                 .ctx()
                 .set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         }
-        if reset_response.double_clicked() {
+        if interactions_enabled && reset_response.double_clicked() {
             self.left_pane_width = theme::LIBRARY_LEFT_PANE_W;
             root_ui.ctx().data_mut(|data| {
                 data.remove::<egui::containers::panel::PanelState>(panel_id);
@@ -2053,6 +2108,12 @@ impl App {
                 }
                 sidebar::SidebarAction::OpenInExplorer(path) => {
                     self.open_in_explorer(path.as_path());
+                }
+                sidebar::SidebarAction::RequestUnregisterFavorite(path) => {
+                    self.pending_favorite_dir_unregistration = Some(path);
+                    self.favorite_dir_unregistration_choice =
+                        FavoriteDirUnregisterDialogChoice::Unregister;
+                    ctx.request_repaint();
                 }
                 sidebar::SidebarAction::OpenHistory(path) => {
                     if let Some(index) = self.library.prepare_history_open(path.as_path()) {
@@ -2086,7 +2147,7 @@ impl App {
         if let Some((message, at)) = self.pending_toast.as_ref() {
             let elapsed = at.elapsed();
             if elapsed < std::time::Duration::from_secs(2) {
-                egui::Area::new("path_toast".into())
+                egui::Area::new(egui::Id::unique("path_toast"))
                     .order(egui::Order::Foreground)
                     .anchor(egui::Align2::RIGHT_TOP, [-16.0, topbar_height + 10.0])
                     .show(ctx, |ui| {
@@ -2138,6 +2199,7 @@ impl App {
         self.render_rename_dialog(ctx, ui_language);
         self.render_properties_dialog(ctx, ui_language);
         self.render_delete_dialog(ctx, ui_language);
+        self.render_favorite_dir_unregistration_dialog(ctx, ui_language);
         self.render_clear_book_settings_dialog(ctx, ui_language);
         self.render_group_settings_dialog(ctx, ui_language);
     }
@@ -2216,13 +2278,13 @@ impl App {
                                 31.0,
                                 &[
                                     DialogButtonSpec {
-                                        id: ui.id().with(("rename_dialog", "confirm")),
+                                        id: ui.scope_id().with(("rename_dialog", "confirm")),
                                         label: tr(ui_language, TextKey::Confirm),
                                         width: 132.0,
                                         is_default: true,
                                     },
                                     DialogButtonSpec {
-                                        id: ui.id().with(("rename_dialog", "cancel")),
+                                        id: ui.scope_id().with(("rename_dialog", "cancel")),
                                         label: tr(ui_language, TextKey::Cancel),
                                         width: 132.0,
                                         is_default: false,
@@ -2323,7 +2385,16 @@ impl App {
                     }
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
-                        ui.label(icons::icon(icons::ICON_DELETE, 22.0).color(theme::DELETE_RED));
+                        let (_, delete_icon_slot) = ui.allocate_space(egui::vec2(22.0, 22.0));
+                        let delete_icon_rect = egui::Rect::from_center_size(
+                            delete_icon_slot.center(),
+                            egui::vec2(22.0, 22.0),
+                        );
+                        common::paint_delete_icon(
+                            ui.painter(),
+                            delete_icon_rect,
+                            theme::DELETE_RED,
+                        );
                         ui.add_space(6.0);
                         ui.label(
                             egui::RichText::new(
@@ -2344,13 +2415,13 @@ impl App {
                         31.0,
                         &[
                             DialogButtonSpec {
-                                id: ui.id().with(("library_delete_dialog", "ok")),
+                                id: ui.scope_id().with(("library_delete_dialog", "ok")),
                                 label: tr(ui_language, TextKey::Delete),
                                 width: 132.0,
                                 is_default: self.delete_dialog_choice == DeleteDialogChoice::Ok,
                             },
                             DialogButtonSpec {
-                                id: ui.id().with(("library_delete_dialog", "cancel")),
+                                id: ui.scope_id().with(("library_delete_dialog", "cancel")),
                                 label: tr(ui_language, TextKey::Cancel),
                                 width: 132.0,
                                 is_default: self.delete_dialog_choice == DeleteDialogChoice::Cancel,
@@ -2384,6 +2455,147 @@ impl App {
                 self.deleting = None;
                 self.delete_dialog_choice = DeleteDialogChoice::Ok;
             }
+        }
+    }
+
+    fn render_favorite_dir_unregistration_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        ui_language: crate::domain::app_settings::UiLanguage,
+    ) {
+        let Some(path) = self.pending_favorite_dir_unregistration.clone() else {
+            return;
+        };
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+        let path_display = path.to_string_lossy().into_owned();
+        let question = tr(ui_language, TextKey::UnregisterFolderConfirmQuestion);
+
+        egui::Window::new(tr(ui_language, TextKey::UnregisterFolderConfirmTitle))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .min_width(480.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(460.0);
+                let (left, right, enter, escape) = ui.input(|i| {
+                    (
+                        i.key_pressed(Key::ArrowLeft),
+                        i.key_pressed(Key::ArrowRight),
+                        i.key_pressed(Key::Enter),
+                        i.key_pressed(Key::Escape),
+                    )
+                });
+                if left {
+                    self.favorite_dir_unregistration_choice =
+                        FavoriteDirUnregisterDialogChoice::Unregister;
+                }
+                if right {
+                    self.favorite_dir_unregistration_choice =
+                        FavoriteDirUnregisterDialogChoice::Cancel;
+                }
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    let (_, icon_slot) = ui.allocate_space(egui::vec2(22.0, 22.0));
+                    ui.painter().text(
+                        icon_slot.center(),
+                        egui::Align2::CENTER_CENTER,
+                        icons::ICON_LINK_OFF.codepoint,
+                        egui::FontId::new(22.0, icons::ICON_LINK_OFF.font_family()),
+                        theme::DELETE_RED,
+                    );
+                    ui.add_space(6.0);
+                    ui.label(egui::RichText::new(question).color(theme::TEXT_MAIN));
+                });
+                ui.add_space(3.0);
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(path_display)
+                            .size(theme::FONT_SIZE_SMALL)
+                            .color(theme::TEXT_SUBTLE),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(tr(ui_language, TextKey::UnregisterFolderConfirmNote))
+                        .size(theme::FONT_SIZE_SMALL)
+                        .color(theme::TEXT_SUBTLE),
+                );
+                ui.add_space(20.0);
+                let buttons = dialog_button_row(
+                    ui,
+                    31.0,
+                    &[
+                        DialogButtonSpec {
+                            id: ui
+                                .scope_id()
+                                .with(("favorite_dir_unregister_dialog", "unregister")),
+                            label: tr(ui_language, TextKey::UnregisterFolderConfirmAction),
+                            width: 132.0,
+                            is_default: self.favorite_dir_unregistration_choice
+                                == FavoriteDirUnregisterDialogChoice::Unregister,
+                        },
+                        DialogButtonSpec {
+                            id: ui
+                                .scope_id()
+                                .with(("favorite_dir_unregister_dialog", "cancel")),
+                            label: tr(ui_language, TextKey::Cancel),
+                            width: 132.0,
+                            is_default: self.favorite_dir_unregistration_choice
+                                == FavoriteDirUnregisterDialogChoice::Cancel,
+                        },
+                    ],
+                );
+                if buttons[0].clicked {
+                    self.favorite_dir_unregistration_choice =
+                        FavoriteDirUnregisterDialogChoice::Unregister;
+                    confirmed = true;
+                }
+                if buttons[1].clicked {
+                    self.favorite_dir_unregistration_choice =
+                        FavoriteDirUnregisterDialogChoice::Cancel;
+                    cancelled = true;
+                }
+                ui.add_space(2.0);
+                if enter {
+                    match self.favorite_dir_unregistration_choice {
+                        FavoriteDirUnregisterDialogChoice::Unregister => confirmed = true,
+                        FavoriteDirUnregisterDialogChoice::Cancel => cancelled = true,
+                    }
+                }
+                if escape {
+                    cancelled = true;
+                }
+            });
+
+        if confirmed {
+            self.unregister_favorite_dir(&path, ctx);
+            self.pending_favorite_dir_unregistration = None;
+            self.favorite_dir_unregistration_choice = FavoriteDirUnregisterDialogChoice::Unregister;
+        } else if cancelled || !open {
+            self.pending_favorite_dir_unregistration = None;
+            self.favorite_dir_unregistration_choice = FavoriteDirUnregisterDialogChoice::Unregister;
+        }
+    }
+
+    fn unregister_favorite_dir(&mut self, path: &Path, ctx: &egui::Context) {
+        let target_key = normalize_path_for_selection(path);
+        let old_count = self.favorites.len();
+        self.favorites
+            .retain(|favorite| normalize_path_for_selection(favorite) != target_key);
+        let removed_count = old_count - self.favorites.len();
+        if removed_count > 0 {
+            tracing::info!(
+                path = %path.display(),
+                removed_count,
+                "library.folder_registration.removed"
+            );
+            self.save_session();
+            ctx.request_repaint();
         }
     }
 
@@ -2449,7 +2661,7 @@ impl App {
                         &[
                             DialogButtonSpec {
                                 id: ui
-                                    .id()
+                                    .scope_id()
                                     .with(("library_clear_book_settings_dialog", "reset")),
                                 label: tr(ui_language, TextKey::Reset),
                                 width: 132.0,
@@ -2458,7 +2670,7 @@ impl App {
                             },
                             DialogButtonSpec {
                                 id: ui
-                                    .id()
+                                    .scope_id()
                                     .with(("library_clear_book_settings_dialog", "cancel")),
                                 label: tr(ui_language, TextKey::Cancel),
                                 width: 132.0,
@@ -2496,6 +2708,113 @@ impl App {
                 self.book_settings_clearing = None;
                 self.book_settings_clear_dialog_choice = BookSettingsClearDialogChoice::Reset;
             }
+        }
+    }
+
+    fn render_cache_clear_confirmation_dialog(
+        &mut self,
+        ctx: &egui::Context,
+        ui_language: crate::domain::app_settings::UiLanguage,
+    ) -> bool {
+        if !self.cache_clear_confirmation_open {
+            return false;
+        }
+
+        let mut open = true;
+        let mut confirmed = false;
+        let mut cancelled = false;
+
+        egui::Window::new(tr(ui_language, TextKey::CacheClearConfirmTitle))
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .min_width(520.0)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(500.0);
+                let (left, right, enter, escape) = ui.input(|i| {
+                    (
+                        i.key_pressed(Key::ArrowLeft),
+                        i.key_pressed(Key::ArrowRight),
+                        i.key_pressed(Key::Enter),
+                        i.key_pressed(Key::Escape),
+                    )
+                });
+                if left {
+                    self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
+                }
+                if right {
+                    self.cache_clear_dialog_choice = CacheClearDialogChoice::Cancel;
+                }
+
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(icons::icon(icons::ICON_REFRESH, 22.0));
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(tr(ui_language, TextKey::CacheClearConfirmQuestion))
+                            .color(theme::TEXT_MAIN),
+                    );
+                });
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(tr(ui_language, TextKey::CacheClearConfirmDescription))
+                        .size(theme::FONT_SIZE_SMALL)
+                        .color(theme::TEXT_SUBTLE),
+                );
+                ui.add_space(20.0);
+                let buttons = dialog_button_row(
+                    ui,
+                    31.0,
+                    &[
+                        DialogButtonSpec {
+                            id: ui.scope_id().with(("settings_cache_clear_dialog", "clear")),
+                            label: tr(ui_language, TextKey::CacheClearConfirmAction),
+                            width: 132.0,
+                            is_default: self.cache_clear_dialog_choice
+                                == CacheClearDialogChoice::Clear,
+                        },
+                        DialogButtonSpec {
+                            id: ui
+                                .scope_id()
+                                .with(("settings_cache_clear_dialog", "cancel")),
+                            label: tr(ui_language, TextKey::Cancel),
+                            width: 132.0,
+                            is_default: self.cache_clear_dialog_choice
+                                == CacheClearDialogChoice::Cancel,
+                        },
+                    ],
+                );
+                if buttons[0].clicked {
+                    self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
+                    confirmed = true;
+                }
+                if buttons[1].clicked {
+                    self.cache_clear_dialog_choice = CacheClearDialogChoice::Cancel;
+                    cancelled = true;
+                }
+                ui.add_space(2.0);
+                if enter {
+                    match self.cache_clear_dialog_choice {
+                        CacheClearDialogChoice::Clear => confirmed = true,
+                        CacheClearDialogChoice::Cancel => cancelled = true,
+                    }
+                }
+                if escape {
+                    cancelled = true;
+                }
+            });
+
+        if confirmed {
+            self.cache_clear_confirmation_open = false;
+            self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
+            true
+        } else {
+            if cancelled || !open {
+                self.cache_clear_confirmation_open = false;
+                self.cache_clear_dialog_choice = CacheClearDialogChoice::Clear;
+            }
+            false
         }
     }
 
@@ -2605,19 +2924,19 @@ impl App {
                         31.0,
                         &[
                             DialogButtonSpec {
-                                id: ui.id().with(("group_settings_dialog", "confirm")),
+                                id: ui.scope_id().with(("group_settings_dialog", "confirm")),
                                 label: tr(ui_language, TextKey::Confirm),
                                 width: 100.0,
                                 is_default: true,
                             },
                             DialogButtonSpec {
-                                id: ui.id().with(("group_settings_dialog", "clear")),
+                                id: ui.scope_id().with(("group_settings_dialog", "clear")),
                                 label: tr(ui_language, TextKey::ReturnToUncategorized),
                                 width: 120.0,
                                 is_default: false,
                             },
                             DialogButtonSpec {
-                                id: ui.id().with(("group_settings_dialog", "cancel")),
+                                id: ui.scope_id().with(("group_settings_dialog", "cancel")),
                                 label: tr(ui_language, TextKey::Cancel),
                                 width: 100.0,
                                 is_default: false,

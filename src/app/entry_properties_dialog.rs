@@ -128,7 +128,7 @@ pub(super) fn render(
                             ui,
                             31.0,
                             &[DialogButtonSpec {
-                                id: ui.id().with(("properties_dialog", "close")),
+                                id: ui.scope_id().with(("properties_dialog", "close")),
                                 label: tr(ui_language, TextKey::Close),
                                 width: close_button_w,
                                 is_default: true,

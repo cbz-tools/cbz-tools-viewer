@@ -1,10 +1,9 @@
 use eframe::egui::{self, Key};
-use egui_material_icons::MaterialIcon;
 
 use crate::domain::app_settings::{ReadingDirection, UiLanguage, ViewerQuality};
 use crate::domain::archive_settings::{SLIDESHOW_INTERVAL_CHOICES, SpreadMode};
 use crate::domain::ipc_contract::ViewerFavoriteState;
-use crate::ui::common::reading_direction_label;
+use crate::ui::common::{DELETE_ICON_DRAW_SIZE, paint_delete_icon, reading_direction_label};
 use crate::ui::i18n::{TextKey, tr};
 
 use super::ExternalToolButtonModel;
@@ -28,17 +27,161 @@ pub(super) struct ViewerToolbarContext<'a> {
     pub(super) capabilities: ViewerUiCapabilities,
 }
 
+const VIEWER_TOOLBAR_ICON_BUTTON_BASE_WIDTH: f32 = 26.0;
 const VIEWER_TOOLBAR_ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(
-    26.0 + theme::ICON_BUTTON_HOVER_GUARD_X,
+    VIEWER_TOOLBAR_ICON_BUTTON_BASE_WIDTH + theme::ICON_BUTTON_HOVER_GUARD_X,
     theme::CONTROL_HEIGHT,
 );
-const FAVORITE_BUTTON_BASE_WIDTH: f32 = 26.0;
-const FAVORITE_BUTTON_SIZE: egui::Vec2 = egui::vec2(
-    FAVORITE_BUTTON_BASE_WIDTH + theme::ICON_BUTTON_HOVER_GUARD_X,
+const VIEWER_FAVORITE_BUTTON_SIZE: egui::Vec2 = egui::vec2(
+    VIEWER_TOOLBAR_ICON_BUTTON_BASE_WIDTH + theme::ICON_BUTTON_HOVER_GUARD_X,
     theme::CONTROL_HEIGHT,
 );
+const VIEWER_PLAY_BUTTON_SIZE: egui::Vec2 = egui::vec2(
+    VIEWER_TOOLBAR_ICON_BUTTON_BASE_WIDTH + theme::ICON_BUTTON_HOVER_GUARD_X,
+    theme::CONTROL_HEIGHT,
+);
+const VIEWER_FAVORITE_ICON_SIZE: f32 = 16.0;
+const VIEWER_PLAY_ICON_SIZE: f32 = 16.0;
+const VIEWER_ACTION_ICON_SIZE: f32 = 16.0;
+const VIEWER_TOOLBAR_EXTERNAL_TOOL_BUTTON_SIZE: egui::Vec2 =
+    egui::vec2(30.0, theme::CONTROL_HEIGHT);
 const VIEWER_TOOLBAR_TEXT_BUTTON_SIZE: egui::Vec2 = egui::vec2(88.0, 24.0);
-const FAVORITE_ICON_SIZE: f32 = 17.0;
+
+#[derive(Clone, Copy)]
+enum ViewerToolbarIcon {
+    FavoriteFilled,
+    FavoriteOutline,
+    Play,
+    Pause,
+    Fullscreen,
+    Delete,
+}
+
+fn paint_viewer_toolbar_icon(
+    ui: &egui::Ui,
+    button_rect: egui::Rect,
+    icon: ViewerToolbarIcon,
+    color: egui::Color32,
+) {
+    let icon_size = match icon {
+        ViewerToolbarIcon::FavoriteFilled | ViewerToolbarIcon::FavoriteOutline => {
+            VIEWER_FAVORITE_ICON_SIZE
+        }
+        ViewerToolbarIcon::Play | ViewerToolbarIcon::Pause => VIEWER_PLAY_ICON_SIZE,
+        ViewerToolbarIcon::Fullscreen => VIEWER_ACTION_ICON_SIZE,
+        ViewerToolbarIcon::Delete => DELETE_ICON_DRAW_SIZE,
+    };
+    let icon_rect =
+        egui::Rect::from_center_size(button_rect.center(), egui::vec2(icon_size, icon_size));
+    let painter = ui.painter();
+
+    match icon {
+        ViewerToolbarIcon::FavoriteOutline => {
+            painter.add(egui::Shape::closed_line(
+                star_points(icon_rect).to_vec(),
+                egui::Stroke::new(1.5, color),
+            ));
+        }
+        ViewerToolbarIcon::FavoriteFilled => {
+            let points = star_points(icon_rect);
+            let center = icon_rect.center();
+            for tip_index in (0..points.len()).step_by(2) {
+                let previous_inner = points[(tip_index + points.len() - 1) % points.len()];
+                let next_inner = points[(tip_index + 1) % points.len()];
+                painter.add(egui::Shape::convex_polygon(
+                    vec![center, previous_inner, points[tip_index], next_inner],
+                    color,
+                    egui::Stroke::NONE,
+                ));
+            }
+        }
+        ViewerToolbarIcon::Play => {
+            let center = icon_rect.center();
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    egui::pos2(icon_rect.left() + 4.0, icon_rect.top() + 2.5),
+                    egui::pos2(icon_rect.right() - 3.0, center.y),
+                    egui::pos2(icon_rect.left() + 4.0, icon_rect.bottom() - 2.5),
+                ],
+                color,
+                egui::Stroke::NONE,
+            ));
+        }
+        ViewerToolbarIcon::Pause => {
+            let bar_width = 3.0;
+            let bar_gap = 3.0;
+            let bar_height = 10.5;
+            let left = icon_rect.center().x - (bar_width * 2.0 + bar_gap) * 0.5;
+            let top = icon_rect.center().y - bar_height * 0.5;
+            for bar_index in 0..2 {
+                let bar_left = left + bar_index as f32 * (bar_width + bar_gap);
+                painter.rect_filled(
+                    egui::Rect::from_min_size(
+                        egui::pos2(bar_left, top),
+                        egui::vec2(bar_width, bar_height),
+                    ),
+                    egui::CornerRadius::ZERO,
+                    color,
+                );
+            }
+        }
+        ViewerToolbarIcon::Fullscreen => {
+            let inset = 3.0;
+            let corner_length = 3.0;
+            let left = icon_rect.left() + inset;
+            let top = icon_rect.top() + inset;
+            let right = icon_rect.right() - inset;
+            let bottom = icon_rect.bottom() - inset;
+            let stroke = egui::Stroke::new(1.5, color);
+            for (start, corner, end) in [
+                (
+                    egui::pos2(left, top + corner_length),
+                    egui::pos2(left, top),
+                    egui::pos2(left + corner_length, top),
+                ),
+                (
+                    egui::pos2(right - corner_length, top),
+                    egui::pos2(right, top),
+                    egui::pos2(right, top + corner_length),
+                ),
+                (
+                    egui::pos2(left, bottom - corner_length),
+                    egui::pos2(left, bottom),
+                    egui::pos2(left + corner_length, bottom),
+                ),
+                (
+                    egui::pos2(right - corner_length, bottom),
+                    egui::pos2(right, bottom),
+                    egui::pos2(right, bottom - corner_length),
+                ),
+            ] {
+                painter.line_segment([start, corner], stroke);
+                painter.line_segment([corner, end], stroke);
+            }
+        }
+        ViewerToolbarIcon::Delete => {
+            paint_delete_icon(painter, icon_rect, color);
+        }
+    }
+}
+
+fn star_points(rect: egui::Rect) -> [egui::Pos2; 10] {
+    let center = rect.center();
+    let outer_radius = rect.width() * 0.4375;
+    let inner_radius = outer_radius * 0.4;
+    std::array::from_fn(|index| {
+        let angle = -std::f32::consts::FRAC_PI_2 + index as f32 * std::f32::consts::TAU / 10.0;
+        let radius = if index % 2 == 0 {
+            outer_radius
+        } else {
+            inner_radius
+        };
+        egui::pos2(
+            center.x + angle.cos() * radius,
+            center.y + angle.sin() * radius,
+        )
+    })
+}
 
 fn favorite_button_and_hover(
     language: UiLanguage,
@@ -46,9 +189,7 @@ fn favorite_button_and_hover(
     favorite_toggle_pending: bool,
 ) -> (egui::widgets::Button<'static>, &'static str, bool) {
     // ON/OFF は色ではなく形で区別する。Unknown/Disabled は OFF と同じ枠線星を使う。
-    let icon = favorite_icon_for_state(favorite_state);
-    let label = egui::Button::new(icons::icon(icon, FAVORITE_ICON_SIZE))
-        .min_size(FAVORITE_BUTTON_SIZE)
+    let label = egui::Button::new("")
         .fill(if matches!(favorite_state, ViewerFavoriteState::On) {
             theme::BUTTON_ACTIVE
         } else {
@@ -71,11 +212,11 @@ fn favorite_button_and_hover(
     (label, hover, favorite_toggle_pending)
 }
 
-fn favorite_icon_for_state(favorite_state: ViewerFavoriteState) -> MaterialIcon {
+fn favorite_icon_for_state(favorite_state: ViewerFavoriteState) -> ViewerToolbarIcon {
     match favorite_state {
-        ViewerFavoriteState::On => icons::ICON_STAR,
+        ViewerFavoriteState::On => ViewerToolbarIcon::FavoriteFilled,
         ViewerFavoriteState::Off | ViewerFavoriteState::Unknown => {
-            icons::ICON_STAR_BORDER.outlined()
+            ViewerToolbarIcon::FavoriteOutline
         }
     }
 }
@@ -170,20 +311,31 @@ pub(super) fn render_viewer_toolbar(
     let selected_stroke = egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
     let current_book_path = state.persistent.entry.path.as_ref();
     ui.horizontal(|ui| {
+        let favorite_icon = favorite_icon_for_state(favorite_state);
         let (favorite_button, favorite_hover, favorite_disabled) =
             favorite_button_and_hover(language, favorite_state, favorite_toggle_pending);
         let favorite_enabled = capabilities.allow_favorite_toggle
             && !interaction_blocked
             && !favorite_disabled
             && !matches!(favorite_state, ViewerFavoriteState::Unknown);
-        let favorite_resp = ui.add_enabled(
-            favorite_enabled,
-            favorite_button.stroke(if matches!(favorite_state, ViewerFavoriteState::On) {
-                selected_stroke
-            } else {
-                quiet_stroke
-            }),
-        );
+        let favorite_resp = ui
+            .add_enabled_ui(favorite_enabled, |ui| {
+                ui.add_sized(
+                    VIEWER_FAVORITE_BUTTON_SIZE,
+                    favorite_button.stroke(if matches!(favorite_state, ViewerFavoriteState::On) {
+                        selected_stroke
+                    } else {
+                        quiet_stroke
+                    }),
+                )
+            })
+            .inner;
+        let favorite_icon_color = if favorite_enabled {
+            ui.visuals().widgets.style(&favorite_resp).text_color()
+        } else {
+            theme::TEXT_DISABLED
+        };
+        paint_viewer_toolbar_icon(ui, favorite_resp.rect, favorite_icon, favorite_icon_color);
         let _ = if favorite_enabled {
             favorite_resp.clone().on_hover_text(favorite_hover)
         } else {
@@ -214,16 +366,18 @@ pub(super) fn render_viewer_toolbar(
             ),
         };
         let spread_resp = ui
-            .add_enabled(
-                !interaction_blocked,
-                egui::Button::new(spread_label)
-                    .min_size(VIEWER_TOOLBAR_TEXT_BUTTON_SIZE)
-                    .fill(match state.persistent.spread_setting {
-                        SpreadMode::Auto => theme::ACCENT.linear_multiply(0.2),
-                        _ => theme::BUTTON_ACTIVE,
-                    })
-                    .stroke(selected_stroke),
-            )
+            .add_enabled_ui(!interaction_blocked, |ui| {
+                ui.add_sized(
+                    VIEWER_TOOLBAR_TEXT_BUTTON_SIZE,
+                    egui::Button::new(spread_label)
+                        .fill(match state.persistent.spread_setting {
+                            SpreadMode::Auto => theme::ACCENT.linear_multiply(0.2),
+                            _ => theme::BUTTON_ACTIVE,
+                        })
+                        .stroke(selected_stroke),
+                )
+            })
+            .inner
             .on_hover_text(format!(
                 "{}: {}",
                 tr(language, TextKey::DisplayMode),
@@ -286,21 +440,26 @@ pub(super) fn render_viewer_toolbar(
             state.persistent.spread_setting,
             SpreadMode::Auto | SpreadMode::Spread
         ) && !interaction_blocked;
-        let blank_resp = ui.add_enabled(
-            blank_enabled,
-            egui::Button::new(egui::RichText::new(blank_label).size(theme::FONT_SIZE_SMALL))
-                .min_size(VIEWER_TOOLBAR_TEXT_BUTTON_SIZE)
-                .fill(if state.persistent.cover_blank {
-                    theme::BUTTON_ACTIVE
-                } else {
-                    egui::Color32::TRANSPARENT
-                })
-                .stroke(if state.persistent.cover_blank {
-                    selected_stroke
-                } else {
-                    quiet_stroke
-                }),
-        );
+        let blank_resp = ui
+            .add_enabled_ui(blank_enabled, |ui| {
+                ui.add_sized(
+                    VIEWER_TOOLBAR_TEXT_BUTTON_SIZE,
+                    egui::Button::new(
+                        egui::RichText::new(blank_label).size(theme::FONT_SIZE_SMALL),
+                    )
+                    .fill(if state.persistent.cover_blank {
+                        theme::BUTTON_ACTIVE
+                    } else {
+                        egui::Color32::TRANSPARENT
+                    })
+                    .stroke(if state.persistent.cover_blank {
+                        selected_stroke
+                    } else {
+                        quiet_stroke
+                    }),
+                )
+            })
+            .inner;
         let _ = blank_resp.clone().on_hover_text(
             if matches!(state.persistent.spread_setting, SpreadMode::Auto) {
                 tr(language, TextKey::CoverBlankAutoHint)
@@ -388,31 +547,39 @@ pub(super) fn render_viewer_toolbar(
 
         ui.separator();
         let play_icon = if state.slideshow_active() {
-            icons::ICON_PAUSE
+            ViewerToolbarIcon::Pause
         } else {
-            icons::ICON_PLAY_ARROW
+            ViewerToolbarIcon::Play
         };
         let play_resp = ui
-            .add_enabled(
-                !interaction_blocked,
-                egui::Button::new(icons::icon(play_icon, 17.0))
-                    .min_size(VIEWER_TOOLBAR_ICON_BUTTON_SIZE)
-                    .fill(if state.slideshow_active() {
-                        theme::BUTTON_ACTIVE
-                    } else {
-                        egui::Color32::TRANSPARENT
-                    })
-                    .stroke(if state.slideshow_active() {
-                        selected_stroke
-                    } else {
-                        quiet_stroke
-                    }),
-            )
+            .add_enabled_ui(!interaction_blocked, |ui| {
+                ui.add_sized(
+                    VIEWER_PLAY_BUTTON_SIZE,
+                    egui::Button::new("")
+                        .fill(if state.slideshow_active() {
+                            theme::BUTTON_ACTIVE
+                        } else {
+                            egui::Color32::TRANSPARENT
+                        })
+                        .stroke(if state.slideshow_active() {
+                            selected_stroke
+                        } else {
+                            quiet_stroke
+                        }),
+                )
+            })
+            .inner
             .on_hover_text(if state.slideshow_active() {
                 tr(language, TextKey::SlideshowPause)
             } else {
                 tr(language, TextKey::SlideshowPlay)
             });
+        let play_icon_color = if interaction_blocked {
+            theme::TEXT_DISABLED
+        } else {
+            ui.visuals().widgets.style(&play_resp).text_color()
+        };
+        paint_viewer_toolbar_icon(ui, play_resp.rect, play_icon, play_icon_color);
         if !state.slideshow_active() {
             paint_quiet_hover_border(ui, &play_resp);
         }
@@ -478,7 +645,7 @@ pub(super) fn render_viewer_toolbar(
                 let resp = ui
                     .add_enabled_ui(!all_disabled, |ui| {
                         ui.add_sized(
-                            VIEWER_TOOLBAR_ICON_BUTTON_SIZE,
+                            VIEWER_TOOLBAR_EXTERNAL_TOOL_BUTTON_SIZE,
                             egui::Button::new(
                                 egui::RichText::new(label)
                                     .size(theme::FONT_SIZE_BODY)
@@ -529,14 +696,27 @@ pub(super) fn render_viewer_toolbar(
         ui.add_space(ui.available_width().max(0.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let fullscreen_resp = ui
-                .add_enabled(
-                    !interaction_blocked,
-                    egui::Button::new(icons::icon(icons::ICON_FULLSCREEN, 17.0))
-                        .min_size(VIEWER_TOOLBAR_ICON_BUTTON_SIZE)
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(quiet_stroke),
-                )
+                .add_enabled_ui(!interaction_blocked, |ui| {
+                    ui.add_sized(
+                        VIEWER_TOOLBAR_ICON_BUTTON_SIZE,
+                        egui::Button::new("")
+                            .fill(egui::Color32::TRANSPARENT)
+                            .stroke(quiet_stroke),
+                    )
+                })
+                .inner
                 .on_hover_text(tr(language, TextKey::Fullscreen));
+            let fullscreen_icon_color = if interaction_blocked {
+                theme::TEXT_DISABLED
+            } else {
+                ui.visuals().widgets.style(&fullscreen_resp).text_color()
+            };
+            paint_viewer_toolbar_icon(
+                ui,
+                fullscreen_resp.rect,
+                ViewerToolbarIcon::Fullscreen,
+                fullscreen_icon_color,
+            );
             paint_quiet_hover_border(ui, &fullscreen_resp);
             if fullscreen_resp.clicked() {
                 events.toggle_fullscreen = true;
@@ -544,16 +724,22 @@ pub(super) fn render_viewer_toolbar(
 
             if capabilities.allow_delete {
                 let delete_resp = ui
-                    .add_enabled(
-                        !interaction_blocked,
-                        egui::Button::new(
-                            icons::icon(icons::ICON_DELETE, 17.0).color(theme::DELETE_RED),
+                    .add_enabled_ui(!interaction_blocked, |ui| {
+                        ui.add_sized(
+                            VIEWER_TOOLBAR_ICON_BUTTON_SIZE,
+                            egui::Button::new("")
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(quiet_stroke),
                         )
-                        .min_size(VIEWER_TOOLBAR_ICON_BUTTON_SIZE)
-                        .fill(egui::Color32::TRANSPARENT)
-                        .stroke(quiet_stroke),
-                    )
+                    })
+                    .inner
                     .on_hover_text(tr(language, TextKey::Delete));
+                paint_viewer_toolbar_icon(
+                    ui,
+                    delete_resp.rect,
+                    ViewerToolbarIcon::Delete,
+                    theme::DELETE_RED,
+                );
                 paint_quiet_hover_border(ui, &delete_resp);
                 if delete_resp.clicked() {
                     events.delete = true;

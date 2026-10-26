@@ -299,8 +299,8 @@ fn parse_container_xml(xml: &[u8]) -> Result<String> {
 
     loop {
         match reader.read_event_into(&mut buf)? {
-            Event::Start(e) | Event::Empty(e) if local_name(e.name().as_ref()) == b"rootfile" => {
-                let Some(full_path) = attr_value(&e, b"full-path")? else {
+            Event::Start(e) | Event::Empty(e) if local_name(e.name().as_ref()) == "rootfile" => {
+                let Some(full_path) = attr_value(&e, "full-path")? else {
                     bail!("container.xml rootfile missing full-path");
                 };
                 return normalize_zip_entry_path(&full_path);
@@ -328,26 +328,26 @@ fn parse_opf(
     loop {
         match reader.read_event_into(&mut buf)? {
             Event::Start(e) => match local_name(e.name().as_ref()) {
-                b"manifest" => in_manifest = true,
-                b"spine" => in_spine = true,
-                b"item" if in_manifest => {
+                "manifest" => in_manifest = true,
+                "spine" => in_spine = true,
+                "item" if in_manifest => {
                     let resource = parse_manifest_item(&opf_dir, &e)?;
                     resources.insert(resource.id.clone(), resource);
                 }
-                b"itemref" if in_spine => spine.push(parse_spine_item(&e)?),
+                "itemref" if in_spine => spine.push(parse_spine_item(&e)?),
                 _ => {}
             },
             Event::Empty(e) => match local_name(e.name().as_ref()) {
-                b"item" if in_manifest => {
+                "item" if in_manifest => {
                     let resource = parse_manifest_item(&opf_dir, &e)?;
                     resources.insert(resource.id.clone(), resource);
                 }
-                b"itemref" if in_spine => spine.push(parse_spine_item(&e)?),
+                "itemref" if in_spine => spine.push(parse_spine_item(&e)?),
                 _ => {}
             },
             Event::End(e) => match local_name(e.name().as_ref()) {
-                b"manifest" => in_manifest = false,
-                b"spine" => in_spine = false,
+                "manifest" => in_manifest = false,
+                "spine" => in_spine = false,
                 _ => {}
             },
             Event::Eof => break,
@@ -367,10 +367,10 @@ fn parse_opf(
 }
 
 fn parse_manifest_item(opf_dir: &str, e: &BytesStart<'_>) -> Result<EpubResource> {
-    let id = attr_value(e, b"id")?.context("manifest item missing id")?;
-    let href = attr_value(e, b"href")?.context("manifest item missing href")?;
-    let media_type = attr_value(e, b"media-type")?.context("manifest item missing media-type")?;
-    let properties = attr_value(e, b"properties")?;
+    let id = attr_value(e, "id")?.context("manifest item missing id")?;
+    let href = attr_value(e, "href")?.context("manifest item missing href")?;
+    let media_type = attr_value(e, "media-type")?.context("manifest item missing media-type")?;
+    let properties = attr_value(e, "properties")?;
     let full_path = resolve_epub_path(opf_dir, &href)?;
 
     Ok(EpubResource {
@@ -383,9 +383,9 @@ fn parse_manifest_item(opf_dir: &str, e: &BytesStart<'_>) -> Result<EpubResource
 }
 
 fn parse_spine_item(e: &BytesStart<'_>) -> Result<EpubSpineItem> {
-    let idref = attr_value(e, b"idref")?.context("spine itemref missing idref")?;
+    let idref = attr_value(e, "idref")?.context("spine itemref missing idref")?;
     let linear = !matches!(
-        attr_value(e, b"linear")?.as_deref(),
+        attr_value(e, "linear")?.as_deref(),
         Some("no") | Some("false") | Some("0")
     );
     Ok(EpubSpineItem { idref, linear })
@@ -422,52 +422,47 @@ fn extract_xhtml_image_paths(xhtml_path: &str, xml: &[u8]) -> Result<Vec<String>
 
 fn extract_image_reference(e: &BytesStart<'_>) -> Result<Option<String>> {
     match local_name(e.name().as_ref()) {
-        b"img" => attr_value(e, b"src"),
-        b"image" => {
-            if let Some(href) = attr_value_exact_or_local(e, b"href")? {
+        "img" => attr_value(e, "src"),
+        "image" => {
+            if let Some(href) = attr_value_exact_or_local(e, "href")? {
                 return Ok(Some(href));
             }
-            attr_value_exact(e, b"xlink:href")
+            attr_value_exact(e, "xlink:href")
         }
         _ => Ok(None),
     }
 }
 
-fn attr_value(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>> {
+fn attr_value(e: &BytesStart<'_>, key: &str) -> Result<Option<String>> {
     for attr in e.attributes().with_checks(false) {
         let attr = attr?;
         if local_name(attr.key.as_ref()) == key {
-            return decode_attr_value(e, &attr).map(Some);
+            return decode_attr_value(&attr).map(Some);
         }
     }
     Ok(None)
 }
 
-fn attr_value_exact(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>> {
+fn attr_value_exact(e: &BytesStart<'_>, key: &str) -> Result<Option<String>> {
     for attr in e.attributes().with_checks(false) {
         let attr = attr?;
         if attr.key.as_ref() == key {
-            return decode_attr_value(e, &attr).map(Some);
+            return decode_attr_value(&attr).map(Some);
         }
     }
     Ok(None)
 }
 
-fn attr_value_exact_or_local(e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>> {
+fn attr_value_exact_or_local(e: &BytesStart<'_>, key: &str) -> Result<Option<String>> {
     if let Some(value) = attr_value_exact(e, key)? {
         return Ok(Some(value));
     }
     attr_value(e, key)
 }
 
-#[allow(deprecated)] // Keep the existing decode-and-unescape behavior without XML 1.0 normalization.
-fn decode_attr_value(
-    e: &BytesStart<'_>,
-    attr: &quick_xml::events::attributes::Attribute<'_>,
-) -> Result<String> {
-    let value = attr
-        .decode_and_unescape_value(e.decoder())
-        .context("xml attribute decode failed")?;
+fn decode_attr_value(attr: &quick_xml::events::attributes::Attribute<'_>) -> Result<String> {
+    let value =
+        quick_xml::escape::unescape(attr.value.as_ref()).context("xml attribute decode failed")?;
     Ok(value.into_owned())
 }
 
@@ -603,6 +598,6 @@ fn decode_hex(ch: u8) -> Result<u8> {
     }
 }
 
-fn local_name(name: &[u8]) -> &[u8] {
-    name.rsplit(|b| *b == b':').next().unwrap_or(name)
+fn local_name(name: &str) -> &str {
+    name.rsplit(':').next().unwrap_or(name)
 }

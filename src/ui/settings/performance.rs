@@ -8,7 +8,7 @@ use crate::domain::performance::{
 };
 
 use super::super::i18n::{TextKey, tr};
-use super::super::{icons, theme};
+use super::super::{common, icons, theme};
 use super::SettingsEvent;
 use super::widgets::{
     PERFORMANCE_SELECT_WIDTH, format_bytes_label, format_mib_label, inline_reset_button,
@@ -132,24 +132,28 @@ pub(super) fn show_performance_tab(
     });
 
     ui.add_space(4.0);
-    if ui
-        .add(
-            egui::Button::new(
-                icons::icon_label(
-                    ui,
-                    icons::ICON_DELETE,
-                    16.0,
-                    tr(language, TextKey::CacheClear),
-                )
-                .color(theme::DELETE_RED),
-            )
-            .fill(egui::Color32::TRANSPARENT)
-            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT)),
+    let cache_clear_label = tr(language, TextKey::CacheClear);
+    let cache_clear_button = ui.add(
+        egui::Button::new(
+            common::icon_button_text(cache_clear_label, 16.0).color(theme::DELETE_RED),
         )
+        .fill(egui::Color32::TRANSPARENT)
+        .stroke(egui::Stroke::new(1.0_f32, egui::Color32::TRANSPARENT)),
+    );
+    common::paint_icon_button_label(
+        ui,
+        &cache_clear_button,
+        icons::ICON_REFRESH,
+        cache_clear_label,
+        16.0,
+        16.0,
+        theme::DELETE_RED,
+    );
+    if cache_clear_button
         .on_hover_text(tr(language, TextKey::CacheClearTooltip))
         .clicked()
     {
-        *event = SettingsEvent::ClearCache;
+        *event = SettingsEvent::RequestClearCache;
     }
 
     subsection_header(ui, tr(language, TextKey::DangerZone));

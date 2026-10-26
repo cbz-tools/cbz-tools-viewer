@@ -28,7 +28,9 @@ pub enum SettingsEvent {
     None,
     /// カードサイズが変更された（表示グリッド再描画が必要）
     ThumbSizeChanged,
-    /// キャッシュクリアが要求された
+    /// キャッシュクリアの確認が要求された
+    RequestClearCache,
+    /// キャッシュクリアが確認された
     ClearCache,
 }
 
@@ -60,6 +62,7 @@ pub fn show(
     settings: &mut AppSettings,
     resources: &PerformanceResources,
     cache_size_mb: f32,
+    interactions_enabled: bool,
 ) -> SettingsEvent {
     let mut event = SettingsEvent::None;
 
@@ -84,66 +87,69 @@ pub fn show(
         .min_width(720.0)
         .max_width(SETTINGS_WINDOW_DEFAULT_SIZE.x)
         .show(ctx, |ui| {
-            ui.set_min_width(680.0);
-            ui.visuals_mut().widgets.inactive.bg_fill = theme::SEPARATOR_WEAK;
-            ui.visuals_mut().widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, theme::BORDER);
-            ui.visuals_mut().widgets.hovered.bg_fill = theme::BUTTON_HOVER;
-            ui.visuals_mut().widgets.hovered.bg_stroke =
-                egui::Stroke::new(1.0_f32, theme::HOVER_BORDER);
-            ui.visuals_mut().widgets.active.bg_fill = theme::BUTTON_ACTIVE;
-            ui.visuals_mut().widgets.active.bg_stroke =
-                egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
-            let mut selected_tab = ctx.memory_mut(|mem| {
-                mem.data
-                    .get_temp::<SettingsTab>(egui::Id::new("settings_selected_tab"))
-                    .unwrap_or(SettingsTab::Library)
-            });
-            tab_selector(ui, language, &mut selected_tab);
-            ctx.memory_mut(|mem| {
-                mem.data
-                    .insert_temp(egui::Id::new("settings_selected_tab"), selected_tab);
-            });
+            ui.add_enabled_ui(interactions_enabled, |ui| {
+                ui.set_min_width(680.0);
+                ui.visuals_mut().widgets.inactive.bg_fill = theme::SEPARATOR_WEAK;
+                ui.visuals_mut().widgets.inactive.bg_stroke =
+                    egui::Stroke::new(1.0_f32, theme::BORDER);
+                ui.visuals_mut().widgets.hovered.bg_fill = theme::BUTTON_HOVER;
+                ui.visuals_mut().widgets.hovered.bg_stroke =
+                    egui::Stroke::new(1.0_f32, theme::HOVER_BORDER);
+                ui.visuals_mut().widgets.active.bg_fill = theme::BUTTON_ACTIVE;
+                ui.visuals_mut().widgets.active.bg_stroke =
+                    egui::Stroke::new(1.0_f32, theme::ACCENT_ACTIVE);
+                let mut selected_tab = ctx.memory_mut(|mem| {
+                    mem.data
+                        .get_temp::<SettingsTab>(egui::Id::unique("settings_selected_tab"))
+                        .unwrap_or(SettingsTab::Library)
+                });
+                tab_selector(ui, language, &mut selected_tab);
+                ctx.memory_mut(|mem| {
+                    mem.data
+                        .insert_temp(egui::Id::unique("settings_selected_tab"), selected_tab);
+                });
 
-            ui.scope(|ui| {
-                ui.style_mut().spacing.scroll = egui::style::ScrollStyle {
-                    floating: false,
-                    bar_width: 10.0,
-                    handle_min_length: 40.0,
-                    bar_inner_margin: 2.0,
-                    bar_outer_margin: 2.0,
-                    foreground_color: true,
-                    ..egui::style::ScrollStyle::solid()
-                };
+                ui.scope(|ui| {
+                    ui.style_mut().spacing.scroll = egui::style::ScrollStyle {
+                        floating: false,
+                        bar_width: 10.0,
+                        handle_min_length: 40.0,
+                        bar_inner_margin: 2.0,
+                        bar_outer_margin: 2.0,
+                        foreground_color: true,
+                        ..egui::style::ScrollStyle::solid()
+                    };
 
-                egui::ScrollArea::vertical()
-                    .scroll_bar_visibility(
-                        egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                    )
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| match selected_tab {
-                        SettingsTab::Library => {
-                            cache::show_library_tab(ui, language, settings, &mut event);
-                        }
-                        SettingsTab::Viewer => {
-                            display::show_viewer_tab(ui, language, settings);
-                        }
-                        SettingsTab::Performance => {
-                            performance::show_performance_tab(
-                                ui,
-                                language,
-                                settings,
-                                resources,
-                                cache_size_mb,
-                                &mut event,
-                            );
-                        }
-                        SettingsTab::ExternalTools => {
-                            external_tools::show_external_tools_tab(ui, language, settings);
-                        }
-                        SettingsTab::WebSearch => {
-                            web_search::show_web_search_tab(ui, language, settings);
-                        }
-                    });
+                    egui::ScrollArea::vertical()
+                        .scroll_bar_visibility(
+                            egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                        )
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| match selected_tab {
+                            SettingsTab::Library => {
+                                cache::show_library_tab(ui, language, settings, &mut event);
+                            }
+                            SettingsTab::Viewer => {
+                                display::show_viewer_tab(ui, language, settings);
+                            }
+                            SettingsTab::Performance => {
+                                performance::show_performance_tab(
+                                    ui,
+                                    language,
+                                    settings,
+                                    resources,
+                                    cache_size_mb,
+                                    &mut event,
+                                );
+                            }
+                            SettingsTab::ExternalTools => {
+                                external_tools::show_external_tools_tab(ui, language, settings);
+                            }
+                            SettingsTab::WebSearch => {
+                                web_search::show_web_search_tab(ui, language, settings);
+                            }
+                        });
+                });
             });
         });
 

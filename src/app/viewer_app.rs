@@ -38,7 +38,7 @@ use crate::util::archive_path::is_supported_archive_path;
 use crate::{LaunchOptions, StartupMode};
 
 use super::ui_helpers::{DialogButtonSpec, dialog_button_row, setup_style};
-use crate::ui::{icons, theme};
+use crate::ui::{common, theme};
 
 #[cfg(windows)]
 use crate::platform::windows_window::StartupRestoreRectAdjustment;
@@ -1814,7 +1814,7 @@ impl ViewerApp {
         let delete_label = tr(language, TextKey::Delete);
         let delete_and_next_label = tr(language, TextKey::DeleteAndNextBook);
         let cancel_label = tr(language, TextKey::Cancel);
-        let window_id = egui::Id::new((
+        let window_id = egui::Id::unique((
             "viewer_delete_dialog",
             BookId::from_path(self.state.entry().path.as_ref()),
         ));
@@ -1861,7 +1861,12 @@ impl ViewerApp {
 
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(icons::icon(icons::ICON_DELETE, 22.0).color(theme::DELETE_RED));
+                    let (_, delete_icon_slot) = ui.allocate_space(egui::vec2(22.0, 22.0));
+                    let delete_icon_rect = egui::Rect::from_center_size(
+                        delete_icon_slot.center(),
+                        egui::vec2(common::DELETE_ICON_DRAW_SIZE, common::DELETE_ICON_DRAW_SIZE),
+                    );
+                    common::paint_delete_icon(ui.painter(), delete_icon_rect, theme::DELETE_RED);
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new(question).color(theme::TEXT_MAIN));
                 });
@@ -1877,21 +1882,25 @@ impl ViewerApp {
                     31.0,
                     &[
                         DialogButtonSpec {
-                            id: ui.id().with(("viewer_delete_dialog", "delete_and_close")),
+                            id: ui
+                                .scope_id()
+                                .with(("viewer_delete_dialog", "delete_and_close")),
                             label: delete_label,
                             width: 116.0,
                             is_default: self.delete_dialog_choice
                                 == ViewerDeleteDialogChoice::DeleteAndClose,
                         },
                         DialogButtonSpec {
-                            id: ui.id().with(("viewer_delete_dialog", "delete_and_next")),
+                            id: ui
+                                .scope_id()
+                                .with(("viewer_delete_dialog", "delete_and_next")),
                             label: delete_and_next_label,
                             width: 180.0,
                             is_default: self.delete_dialog_choice
                                 == ViewerDeleteDialogChoice::DeleteAndNext,
                         },
                         DialogButtonSpec {
-                            id: ui.id().with(("viewer_delete_dialog", "cancel")),
+                            id: ui.scope_id().with(("viewer_delete_dialog", "cancel")),
                             label: cancel_label,
                             width: 116.0,
                             is_default: self.delete_dialog_choice
@@ -1994,7 +2003,12 @@ impl ViewerApp {
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(icons::icon(icons::ICON_DELETE, 22.0).color(theme::DELETE_RED));
+                    let (_, delete_icon_slot) = ui.allocate_space(egui::vec2(22.0, 22.0));
+                    let delete_icon_rect = egui::Rect::from_center_size(
+                        delete_icon_slot.center(),
+                        egui::vec2(common::DELETE_ICON_DRAW_SIZE, common::DELETE_ICON_DRAW_SIZE),
+                    );
+                    common::paint_delete_icon(ui.painter(), delete_icon_rect, theme::DELETE_RED);
                     ui.add_space(6.0);
                     ui.label(egui::RichText::new(question).color(theme::TEXT_MAIN));
                 });
@@ -2023,7 +2037,9 @@ impl ViewerApp {
                             ui,
                             31.0,
                             &[DialogButtonSpec {
-                                id: ui.id().with(("viewer_page_range_delete_dialog", "confirm")),
+                                id: ui
+                                    .scope_id()
+                                    .with(("viewer_page_range_delete_dialog", "confirm")),
                                 label: delete_label,
                                 width: 260.0,
                                 is_default: self.page_range_delete_dialog_choice
@@ -2041,7 +2057,9 @@ impl ViewerApp {
                             ui,
                             31.0,
                             &[DialogButtonSpec {
-                                id: ui.id().with(("viewer_page_range_delete_dialog", "cancel")),
+                                id: ui
+                                    .scope_id()
+                                    .with(("viewer_page_range_delete_dialog", "cancel")),
                                 label: cancel_label,
                                 width: 116.0,
                                 is_default: self.page_range_delete_dialog_choice

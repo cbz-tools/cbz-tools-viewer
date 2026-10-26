@@ -23,7 +23,6 @@ const FILTER_INPUT_WIDTH: f32 = 200.0;
 const FILTER_INPUT_HEIGHT: f32 = 24.0;
 const TOPBAR_HEIGHT: f32 = 32.0;
 const TOPBAR_GAP_SMALL: f32 = 2.0;
-const ICON_SIZE_MENU_SETTINGS: f32 = 18.0;
 const ICON_SIZE_NAV: f32 = 16.0;
 const ICON_SIZE_SEARCH: f32 = 15.0;
 const ICON_SIZE_FILTER_CLEAR: f32 = 14.0;
@@ -32,13 +31,67 @@ const TOPBAR_ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(
     TOPBAR_ICON_BUTTON_BASE_WIDTH + theme::ICON_BUTTON_HOVER_GUARD_X,
     theme::CONTROL_HEIGHT,
 );
+const TOPBAR_HOVER_STABLE_ICON_BUTTON_SIZE: egui::Vec2 = egui::vec2(
+    TOPBAR_ICON_BUTTON_BASE_WIDTH + theme::HOVER_STABLE_ICON_BUTTON_GUARD_X,
+    theme::CONTROL_HEIGHT,
+);
+const TOPBAR_SETTINGS_ICON_SIZE: f32 = theme::ICON_SIZE_HOVER_STABLE;
 const TOPBAR_SMALL_TEXT_BUTTON_SIZE: egui::Vec2 = egui::vec2(44.0, 24.0);
 const TOPBAR_MODE_BUTTON_SIZE: egui::Vec2 = egui::vec2(88.0, 24.0);
-const TOPBAR_SORT_BUTTON_SIZE: egui::Vec2 = egui::vec2(34.0, 24.0);
 const LABEL_FONT_SIZE: f32 = theme::FONT_SIZE_BODY;
 const SORT_COMBO_WIDTH: f32 = 90.0;
 const FILTER_CLEAR_BUTTON_SIZE: f32 = 18.0;
 const FILTER_CLEAR_BUTTON_RIGHT_PADDING: f32 = 4.0;
+
+fn paint_settings_icon(ui: &egui::Ui, button_rect: egui::Rect, color: egui::Color32) {
+    let icon_rect = egui::Rect::from_center_size(
+        button_rect.center(),
+        egui::vec2(TOPBAR_SETTINGS_ICON_SIZE, TOPBAR_SETTINGS_ICON_SIZE),
+    );
+    let center = icon_rect.center();
+    let painter = ui.painter();
+    let inner_radius = 2.4;
+    let root_radius = 5.3;
+    let segment_count = 32;
+    let segment_angle = std::f32::consts::TAU / segment_count as f32;
+    let segment_overlap = 0.006;
+
+    for segment_index in 0..segment_count {
+        let start_angle = segment_index as f32 * segment_angle - segment_overlap;
+        let end_angle = (segment_index + 1) as f32 * segment_angle + segment_overlap;
+        let start_direction = egui::vec2(start_angle.cos(), start_angle.sin());
+        let end_direction = egui::vec2(end_angle.cos(), end_angle.sin());
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                center + start_direction * inner_radius,
+                center + start_direction * root_radius,
+                center + end_direction * root_radius,
+                center + end_direction * inner_radius,
+            ],
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+
+    for tooth_index in 0..8 {
+        let angle = tooth_index as f32 * std::f32::consts::TAU / 8.0;
+        let radial = egui::vec2(angle.cos(), angle.sin());
+        let tangent = egui::vec2(-radial.y, radial.x);
+        let inner = center + radial * 4.8;
+        let outer = center + radial * 7.2;
+        let half_width = 1.25;
+        painter.add(egui::Shape::convex_polygon(
+            vec![
+                inner - tangent * half_width,
+                outer - tangent * half_width,
+                outer + tangent * half_width,
+                inner + tangent * half_width,
+            ],
+            color,
+            egui::Stroke::NONE,
+        ));
+    }
+}
 
 /// トップバーの描画結果
 pub struct TopbarResult {
@@ -99,18 +152,26 @@ pub fn show(
 
         // ── パス直接入力 ──────────────────────────────────────────────────────
         let (menu_fill, menu_stroke) = selected_button_colors(left_pane_visible);
-        let menu_content_id = ui.make_persistent_id("library_menu_content");
-        let menu_layout_resp =
-            egui::Button::new(egui::Atom::custom(menu_content_id, egui::vec2(17.0, 18.0)))
-                .min_size(TOPBAR_ICON_BUTTON_SIZE)
+        let menu_content_id = egui::IdSalt::new("library_menu_content");
+        let menu_layout = egui::Layout::centered_and_justified(ui.layout().main_dir());
+        let menu_layout_resp = ui
+            .allocate_ui_with_layout(TOPBAR_HOVER_STABLE_ICON_BUTTON_SIZE, menu_layout, |ui| {
+                egui::Button::new(egui::Atom::custom(
+                    menu_content_id,
+                    egui::vec2(theme::ICON_SIZE_HOVER_STABLE, theme::ICON_SIZE_HOVER_STABLE),
+                ))
                 .fill(menu_fill)
                 .stroke(menu_stroke)
-                .atom_ui(ui);
+                .atom_ui(ui)
+            })
+            .inner;
         if let Some(menu_content_rect) = menu_layout_resp.rect(menu_content_id) {
             let menu_icon_stroke =
                 egui::Stroke::new(1.5, ui.visuals().widgets.inactive.fg_stroke.color);
-            let icon_rect =
-                egui::Rect::from_center_size(menu_content_rect.center(), egui::vec2(17.0, 16.0));
+            let icon_rect = egui::Rect::from_center_size(
+                menu_content_rect.center(),
+                egui::vec2(theme::ICON_SIZE_HOVER_STABLE, theme::ICON_SIZE_HOVER_STABLE),
+            );
             ui.painter().rect_stroke(
                 icon_rect,
                 egui::CornerRadius::same(3),
@@ -202,29 +263,40 @@ pub fn show(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             // 設定メニュー
-            let (settings_resp, _) = egui::containers::menu::MenuButton::from_button(
-                egui::Button::new(icons::icon(icons::ICON_SETTINGS, ICON_SIZE_MENU_SETTINGS))
-                    .min_size(TOPBAR_ICON_BUTTON_SIZE)
-                    .fill(egui::Color32::TRANSPARENT)
-                    .stroke(quiet_stroke),
-            )
-            .ui(ui, |ui| {
-                ui.set_min_width(220.0);
-                if ui.button(tr(language, TextKey::PreferencesMenu)).clicked() {
-                    settings_requested = true;
-                    ui.close();
-                }
-                if ui.button(tr(language, TextKey::LanguageMenu)).clicked() {
-                    language_toggle_requested = true;
-                    ui.close();
-                }
-                ui.separator();
-                if ui.button(tr(language, TextKey::AboutMenu)).clicked() {
-                    about_requested = true;
-                    ui.close();
-                }
-            });
+            let settings_button_layout =
+                egui::Layout::centered_and_justified(ui.layout().main_dir());
+            let (settings_resp, _) = ui
+                .allocate_ui_with_layout(
+                    TOPBAR_HOVER_STABLE_ICON_BUTTON_SIZE,
+                    settings_button_layout,
+                    |ui| {
+                        egui::containers::menu::MenuButton::from_button(
+                            egui::Button::new("")
+                                .fill(egui::Color32::TRANSPARENT)
+                                .stroke(quiet_stroke),
+                        )
+                        .ui(ui, |ui| {
+                            ui.set_min_width(220.0);
+                            if ui.button(tr(language, TextKey::PreferencesMenu)).clicked() {
+                                settings_requested = true;
+                                ui.close();
+                            }
+                            if ui.button(tr(language, TextKey::LanguageMenu)).clicked() {
+                                language_toggle_requested = true;
+                                ui.close();
+                            }
+                            ui.separator();
+                            if ui.button(tr(language, TextKey::AboutMenu)).clicked() {
+                                about_requested = true;
+                                ui.close();
+                            }
+                        })
+                    },
+                )
+                .inner;
             let settings_resp = settings_resp.on_hover_text(tr(language, TextKey::Settings));
+            let settings_icon_color = ui.visuals().widgets.style(&settings_resp).text_color();
+            paint_settings_icon(ui, settings_resp.rect, settings_icon_color);
             paint_quiet_hover_border(ui, &settings_resp);
 
             let prev = state.filter.keyword().to_owned();
@@ -287,7 +359,7 @@ pub fn show(
             };
             if ui
                 .add_sized(
-                    TOPBAR_SORT_BUTTON_SIZE,
+                    TOPBAR_ICON_BUTTON_SIZE,
                     egui::Button::new(order_label)
                         .fill(theme::BUTTON_ACTIVE)
                         .stroke(selected_stroke),
@@ -405,7 +477,7 @@ pub fn show(
                 egui::Layout::left_to_right(egui::Align::Center),
                 |ui| {
                     if state.is_path_editing {
-                        let textedit_id = ui.id().with("path_edit_buffer");
+                        let textedit_id = ui.scope_id().with("path_edit_buffer");
                         let path_resp = ui.add_sized(
                             [path_width, FILTER_INPUT_HEIGHT],
                             egui::TextEdit::singleline(&mut state.path_edit_buffer)
@@ -500,7 +572,7 @@ pub fn show(
                                     .size(theme::FONT_SIZE_BODY)
                                     .color(theme::TEXT_MAIN),
                             );
-                            let close_id = ui.id().with("group_filter_clear");
+                            let close_id = ui.scope_id().with("group_filter_clear");
                             let close_rect = egui::Rect::from_center_size(
                                 ui.cursor().left_center() + egui::vec2(6.0, 0.0),
                                 egui::vec2(12.0, 12.0),

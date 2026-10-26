@@ -1160,7 +1160,9 @@ fn draw_boundary_preview_header(
         pos2(card_rect.max.x - 16.0, header_rect.center().y),
         close_size,
     );
-    let close_id = ui.id().with(("boundary_preview_close", title, direction));
+    let close_id = ui
+        .scope_id()
+        .with(("boundary_preview_close", title, direction));
     let close_resp = ui.interact(close_rect, close_id, egui::Sense::click());
     painter.text(
         close_rect.center(),

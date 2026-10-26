@@ -177,7 +177,7 @@ pub(super) fn setup_style(ctx: &egui::Context) {
         fonts.font_data.insert(
             (*font_name).to_owned(),
             std::sync::Arc::new(egui::FontData {
-                font: std::borrow::Cow::Owned(data),
+                font: std::sync::Arc::new(data),
                 index: *index,
                 tweak: egui::FontTweak::default(),
             }),

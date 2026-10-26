@@ -73,6 +73,7 @@ pub struct FolderTreeState {
 
 pub enum FolderTreeAction {
     Navigate(PathBuf),
+    RequestUnregister(PathBuf),
 }
 
 impl Default for FolderTreeState {
@@ -392,11 +393,17 @@ pub fn show_rows(
     let active_normalized = current_dir.map(normalize_path_for_selection);
     let mut roots = state.roots.clone();
     roots.sort_by(|left, right| compare_paths(left, right));
+    let mut action = None;
     for root in roots {
-        show_node(ui, state, &root, &active_normalized, 0, favorites, language);
+        if let Some(node_action) =
+            show_node(ui, state, &root, &active_normalized, 0, favorites, language)
+        {
+            action = Some(node_action);
+        }
     }
 
-    finish(ui, state)
+    let navigation_action = finish(ui, state);
+    action.or(navigation_action)
 }
 
 fn prepare(state: &mut FolderTreeState, current_dir: Option<&Path>) {
@@ -441,13 +448,11 @@ fn show_node(
     depth: usize,
     favorites: &mut Vec<PathBuf>,
     language: UiLanguage,
-) {
+) -> Option<FolderTreeAction> {
     if depth > MAX_RENDER_DEPTH {
-        return;
+        return None;
     }
-    let Some(node) = state.nodes.get(path).cloned() else {
-        return;
-    };
+    let node = state.nodes.get(path).cloned()?;
     let expanded = state.expanded.contains(path);
     let is_active = active_normalized
         .as_ref()
@@ -463,7 +468,7 @@ fn show_node(
     );
     let arrow_response = ui.interact(
         arrow_rect,
-        ui.id().with(("folder_tree_arrow", path)),
+        ui.scope_id().with(("folder_tree_arrow", path)),
         egui::Sense::click(),
     );
     let arrow = if expanded { "▼" } else { "▶" };
@@ -484,7 +489,7 @@ fn show_node(
     let label_response = ui
         .interact(
             label_rect,
-            ui.id().with(("folder_tree_label", path)),
+            ui.scope_id().with(("folder_tree_label", path)),
             egui::Sense::click(),
         )
         .on_hover_text(path.to_string_lossy());
@@ -519,16 +524,26 @@ fn show_node(
         state.navigation_ready = None;
     }
 
+    let mut requested_action = None;
     label_response.clone().context_menu(|menu_ui| {
         let registration_key = if registered {
             TextKey::RemoveTreeFolderFromLibrary
         } else {
             TextKey::AddTreeFolderToLibrary
         };
-        if menu_ui.button(tr(language, registration_key)).clicked() {
+        let registration_response = if registered {
+            menu_ui.button(crate::ui::icons::icon_label(
+                menu_ui,
+                crate::ui::icons::ICON_LINK_OFF,
+                15.0,
+                tr(language, registration_key),
+            ))
+        } else {
+            menu_ui.button(format!("＋ {}", tr(language, registration_key)))
+        };
+        if registration_response.clicked() {
             if registered {
-                let path_key = normalize_path_for_selection(path);
-                favorites.retain(|favorite| normalize_path_for_selection(favorite) != path_key);
+                requested_action = Some(FolderTreeAction::RequestUnregister(path.to_path_buf()));
             } else if !favorites.iter().any(|favorite| paths_match(favorite, path)) {
                 favorites.push(path.to_path_buf());
             }
@@ -546,7 +561,7 @@ fn show_node(
         );
         let marker_response = ui.interact(
             marker_rect,
-            ui.id().with(("folder_tree_registered", path)),
+            ui.scope_id().with(("folder_tree_registered", path)),
             egui::Sense::hover(),
         );
         ui.painter()
@@ -596,7 +611,7 @@ fn show_node(
 
     if expanded && node.loaded {
         for child in node.children {
-            show_node(
+            if let Some(child_action) = show_node(
                 ui,
                 state,
                 &child,
@@ -604,9 +619,13 @@ fn show_node(
                 depth + 1,
                 favorites,
                 language,
-            );
+            ) {
+                requested_action = Some(child_action);
+            }
         }
     }
+
+    requested_action
 }
 
 fn paint_tree_row_state(ui: &egui::Ui, content_rect: egui::Rect, active: bool, hovered: bool) {

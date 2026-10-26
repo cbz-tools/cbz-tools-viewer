@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.15] - 2026-10-26
+
+### Maintenance
+
+- Updated dependencies and improved compatibility with egui 0.37.
+
 ## [0.5.14] - 2026-10-11
 
 ### Added

@@ -65,7 +65,7 @@ pub(crate) fn show_filename_token_menu_frame(
     }
 
     let state_key = ui
-        .id()
+        .scope_id()
         .with("filename-token-selected")
         .with(entry.id.0.to_hex().to_string());
     let mut selected_idx = ui
@@ -261,7 +261,7 @@ fn draw_context_menu_submenu_button<R>(
     ui.spacing_mut().button_padding.x = CONTEXT_MENU_ROW_PADDING_X;
     let _ = egui::menu::SubMenuButton::from_button(
         egui::Button::new(label)
-            .right_text(egui::menu::SubMenuButton::RIGHT_ARROW)
+            .right_text(egui::menu::SubMenuButton::arrow_atom(None))
             .min_size(egui::vec2(width, height)),
     )
     .ui(ui, add_contents);

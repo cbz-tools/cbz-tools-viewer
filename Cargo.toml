@@ -15,7 +15,7 @@ members = ["launcher"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.14"
+version = "0.5.15"
 edition = "2024"
 authors = []
 description = "High-performance CBZ/ZIP/RAR manga viewer"
@@ -56,32 +56,32 @@ toml              = "1"
 chrono            = { version = "0.4", features = ["serde"] }
 
 # --- UI (§11) ---
-eframe            = { version = "0.35", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "default_fonts", "web_screen_reader"] }
-egui_material_icons = { version = "0.7", features = ["outline"] }
+eframe            = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "default_fonts", "web_screen_reader"] }
+egui_material_icons = { version = "0.9", features = ["outline"] }
 
 # --- Async / 並列 (§11) ---
 tokio             = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-parking_lot       = "0.12"
+parking_lot       = "0.13"
 
 # --- ZIP / RAR (§11, §7) ---
 memmap2           = "0.9"
 flate2            = "1"   # 本番: --features zlib-ng で 2x 高速（cmake+cl.exe 必要）
-zip_writer        = { package = "zip", version = "8.6", default-features = false }
+zip_writer        = { package = "zip", version = "9", default-features = false }
 unrar             = { version = "0.5", optional = true }   # feature "rar" で有効化
 unrar_sys         = { version = "0.5", optional = true }   # feature "rar" で有効化
 
 # --- 画像 (§11, §8) ---
 image             = { version = "0.25", default-features = false, features = ["png", "bmp", "tiff"] }
-zengif            = { version = "=0.7.3", default-features = false, features = ["std"] }
+zengif            = { version = "0.7", default-features = false, features = ["std"] }
 webp              = { version = "0.3", default-features = false }   # libwebp-sys（bundled C）経由の WebP デコード／エンコード
-webp-anim         = "0.1.1"                      # crates.io animated WebP inspect / decoder API
-ff-decode         = { version = "=0.15.1", default-features = false } # Software FFmpeg frame decode for VideoFile thumbnails
-ff-format         = "=0.15.1" # FFmpeg video frame/pixel format types
-turbojpeg         = { version = "=1.5.1", default-features = false, features = ["cmake", "require-simd"] } # libjpeg-turbo vendor/static のJPEG decode
-fast_image_resize = "6"
+webp-anim         = "0.1.2" # crates.io animated WebP inspect / decoder API
+ff-decode         = { version = "0.18", default-features = false } # Software FFmpeg frame decode for VideoFile thumbnails
+ff-format         = "0.18" # FFmpeg video frame/pixel format types
+turbojpeg         = { version = "1.5", default-features = false, features = ["cmake", "require-simd"] } # libjpeg-turbo vendor/static のJPEG decode
+fast_image_resize = "6.1"
 
 # --- キャッシュ (§11, §6) ---
-lru               = "0.18"
+lru               = "0.19"
 
 # --- ユーティリティ (§11) ---
 blake3            = "1"
@@ -90,7 +90,7 @@ encoding_rs       = "0.8"     # Shift-JIS / CP932 ZIP ファイル名デコー�
 natord            = "1"       # 自然順ソート
 anyhow            = "1"
 regex             = "1"
-quick-xml         = "0.41"
+quick-xml         = "0.42"
 tracing           = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 log               = "0.4"

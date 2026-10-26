@@ -11,7 +11,11 @@ pub const SIDEBAR_SELECTED_BG: Color32 = Color32::from_rgb(216, 216, 216); // #D
 pub const HOVER_BORDER: Color32 = Color32::from_rgb(176, 176, 176); // hover 境界（標準）
 pub const HOVER_BORDER_WEAK: Color32 = Color32::from_rgb(198, 198, 198); // hover 境界（弱）
 // hover 時の style / font metrics 差分を吸収し、レイアウト揺れを防ぐ横方向余白。
-pub const ICON_BUTTON_HOVER_GUARD_X: f32 = 4.0;
+pub const ICON_BUTTON_HOVER_GUARD_X: f32 = 8.0;
+// 個別に調整するアイコンボタン専用の追加余白。共通ガードに一度だけ加算する。
+pub const HOVER_STABLE_ICON_BUTTON_EXTRA_PAD_X: f32 = 1.0;
+pub const HOVER_STABLE_ICON_BUTTON_GUARD_X: f32 =
+    ICON_BUTTON_HOVER_GUARD_X + HOVER_STABLE_ICON_BUTTON_EXTRA_PAD_X;
 pub const ACCENT: Color32 = Color32::from_rgb(74, 144, 226); // #4A90E2
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(107, 170, 239); // #6BAAEF
 pub const ACCENT_ACTIVE: Color32 = Color32::from_rgb(47, 117, 209); // #2F75D1
@@ -67,6 +71,8 @@ pub const LIBRARY_GRID_MIN_WIDTH: f32 = 320.0;
 pub const SIDEBAR_INNER_MARGIN: f32 = 10.0;
 // 標準コントロール高さ。
 pub const CONTROL_HEIGHT: f32 = 24.0;
+/// Shared size for the three hover-stable toolbar icons.
+pub const ICON_SIZE_HOVER_STABLE: f32 = 17.0;
 pub const FONT_SIZE_TINY: f32 = 10.0;
 pub const FONT_SIZE_SMALL: f32 = 11.5;
 pub const FONT_SIZE_BODY: f32 = 12.0;

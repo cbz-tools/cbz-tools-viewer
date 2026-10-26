@@ -273,15 +273,15 @@ impl App {
         }
 
         let first = &files[0];
-        match Self::classify_dropped_item(first.path.as_deref()) {
+        let dropped_path = first.path();
+        let path_if_present = (!dropped_path.as_os_str().is_empty()).then_some(dropped_path);
+        match Self::classify_dropped_item(path_if_present) {
             DroppedItemKind::NoPath => {
                 self.pending_drop_select = None;
             }
             DroppedItemKind::Folder => {
                 self.pending_drop_select = None;
-                let Some(path) = first.path.clone() else {
-                    return;
-                };
+                let path = dropped_path.to_path_buf();
                 log::debug!("[drop] kind=folder path={}", path.display());
                 log::debug!("[drop] navigate dir={}", path.display());
                 self.library.history_back.clear();
@@ -289,9 +289,7 @@ impl App {
                 self.load_library_dir(path);
             }
             DroppedItemKind::Book => {
-                let Some(path) = first.path.clone() else {
-                    return;
-                };
+                let path = dropped_path.to_path_buf();
                 let target = normalize_drop_select_path(path.clone());
                 let parent = path
                     .parent()
@@ -311,9 +309,7 @@ impl App {
             }
             DroppedItemKind::UnsupportedFile => {
                 self.pending_drop_select = None;
-                let Some(path) = first.path.clone() else {
-                    return;
-                };
+                let path = dropped_path.to_path_buf();
                 let Some(parent) = path.parent().map(PathBuf::from) else {
                     log::debug!("[drop] ignored reason=no_parent path={}", path.display());
                     return;

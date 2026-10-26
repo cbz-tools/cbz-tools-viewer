@@ -511,7 +511,7 @@ pub fn show_grid(
         key_selected.as_ref(),
         layout.cols,
         layout.row_h,
-        scroll_out.state.offset.y,
+        scroll_out.state.unclamped_offset().y,
         scroll_out.inner_rect.height(),
     )
     .or_else(|| {
@@ -521,7 +521,7 @@ pub fn show_grid(
                     selected_idx,
                     layout.cols,
                     layout.row_h,
-                    scroll_out.state.offset.y,
+                    scroll_out.state.unclamped_offset().y,
                     scroll_out.inner_rect.height(),
                 )
             })
@@ -541,7 +541,7 @@ pub fn show_grid(
             click_opened,
             key_selected,
             keyboard_opened,
-            scroll_y: scroll_out.state.offset.y,
+            scroll_y: scroll_out.state.unclamped_offset().y,
             request_scroll_y,
             visible_range: visible_start
                 .zip(visible_end)
@@ -881,7 +881,7 @@ fn take_popup_key_input(
     ui: &mut egui::Ui,
     reset_context_menu_cache: bool,
 ) -> (egui::Id, bool, PopupKeyInput) {
-    let popup_open_state_id = ui.id().with("virtual-grid-context-menu-open");
+    let popup_open_state_id = ui.scope_id().with("virtual-grid-context-menu-open");
     if reset_context_menu_cache {
         ui.ctx().data_mut(|data| {
             data.insert_temp(popup_open_state_id, false);
@@ -978,8 +978,9 @@ fn consume_ctrl_wheel_for_thumb_size(
         return None;
     }
 
-    // egui 0.35 treats Ctrl+Wheel as zoom before exposing smooth_scroll_delta,
-    // so inspect the raw Wheel events to detect the intended grid action.
+    // egui treats Ctrl+Wheel as a zoom input, so its raw event may not appear in
+    // smooth_scroll_delta. Read Event::MouseWheel directly for the grid action's
+    // Ctrl modifier and vertical delta.
     let thumb_size_delta = ui.input(|input| {
         input.raw.events.iter().fold(0i8, |delta, event| {
             let egui::Event::MouseWheel {
@@ -1000,9 +1001,8 @@ fn consume_ctrl_wheel_for_thumb_size(
         return None;
     }
 
-    // Keep the same input from reaching the ScrollArea. Ctrl+Wheel is already
-    // removed from smooth_scroll_delta by egui's zoom handling, but clear the
-    // public field defensively for integrations that leave it there.
+    // The raw event has already driven the thumbnail-size change. Clear any
+    // remaining vertical smooth_scroll_delta before the ScrollArea reads it.
     ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
     Some(thumb_size_delta)
 }
@@ -1541,7 +1541,7 @@ fn render_context_menu_favorite_group_section(
         let favorite_icon = if section.is_favorite {
             icons::ICON_STAR
         } else {
-            icons::ICON_STAR_BORDER.outlined()
+            icons::ICON_STAR.outlined()
         };
         if context_menu_item(
             ui,
@@ -1662,7 +1662,7 @@ fn render_context_menu_rename_copy_delete_section(
     }
     if context_menu_item(
         ui,
-        icons::ICON_DELETE,
+        ContextMenuIcon::Delete,
         tr(language, TextKey::Delete),
         Some("Del"),
         true,
@@ -1725,7 +1725,7 @@ fn draw_context_menu_submenu_button<R>(
     ui.spacing_mut().button_padding.x = CONTEXT_MENU_ROW_PADDING_X;
     let _ = egui::menu::SubMenuButton::from_button(
         egui::Button::new(label)
-            .right_text(egui::menu::SubMenuButton::RIGHT_ARROW)
+            .right_text(egui::menu::SubMenuButton::arrow_atom(None))
             .min_size(egui::vec2(width, height)),
     )
     .ui(ui, add_contents);
@@ -2490,7 +2490,7 @@ fn aspect_fit(tex: Vec2, cell: Rect) -> Rect {
 
 fn context_menu_item(
     ui: &mut egui::Ui,
-    icon: egui_material_icons::MaterialIcon,
+    icon: impl Into<ContextMenuIcon>,
     label: &str,
     shortcut: Option<&str>,
     enabled: bool,
@@ -2509,7 +2509,7 @@ fn context_menu_item(
         label,
         shortcut: shortcut.unwrap_or(""),
         enabled,
-        icon: Some(icon),
+        icon: Some(icon.into()),
         label_color: if enabled {
             theme::TEXT_MAIN
         } else {
@@ -2557,10 +2557,22 @@ struct ContextMenuRowSpec<'a> {
     label: &'a str,
     shortcut: &'a str,
     enabled: bool,
-    icon: Option<egui_material_icons::MaterialIcon>,
+    icon: Option<ContextMenuIcon>,
     label_color: Color32,
     shortcut_color: Color32,
     icon_color: Color32,
+}
+
+#[derive(Clone, Copy)]
+enum ContextMenuIcon {
+    Material(egui_material_icons::MaterialIcon),
+    Delete,
+}
+
+impl From<egui_material_icons::MaterialIcon> for ContextMenuIcon {
+    fn from(icon: egui_material_icons::MaterialIcon) -> Self {
+        Self::Material(icon)
+    }
 }
 
 fn draw_context_menu_row(ui: &mut egui::Ui, row: &ContextMenuRowSpec<'_>) -> bool {
@@ -2591,13 +2603,27 @@ fn draw_context_menu_row(ui: &mut egui::Ui, row: &ContextMenuRowSpec<'_>) -> boo
             rect.min + egui::vec2(CONTEXT_MENU_ROW_PADDING_X, 0.0),
             egui::vec2(CONTEXT_MENU_ROW_ICON_WIDTH, rect.height()),
         );
-        ui.painter().text(
-            icon_rect.center(),
-            egui::Align2::CENTER_CENTER,
-            icon.codepoint,
-            egui::FontId::new(CONTEXT_MENU_ROW_ICON_FONT_SIZE, icon.font_family()),
-            row.icon_color,
-        );
+        match icon {
+            ContextMenuIcon::Material(icon) => {
+                ui.painter().text(
+                    icon_rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    icon.codepoint,
+                    egui::FontId::new(CONTEXT_MENU_ROW_ICON_FONT_SIZE, icon.font_family()),
+                    row.icon_color,
+                );
+            }
+            ContextMenuIcon::Delete => {
+                let icon_rect = egui::Rect::from_center_size(
+                    icon_rect.center(),
+                    vec2(
+                        CONTEXT_MENU_ROW_ICON_FONT_SIZE,
+                        CONTEXT_MENU_ROW_ICON_FONT_SIZE,
+                    ),
+                );
+                super::common::paint_delete_icon(ui.painter(), icon_rect, row.icon_color);
+            }
+        }
     }
 
     if !row.shortcut.is_empty() {

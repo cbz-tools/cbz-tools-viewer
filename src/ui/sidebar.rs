@@ -34,6 +34,7 @@ pub enum SidebarAction {
     NavigateTree(PathBuf),
     OpenInExplorer(PathBuf),
     OpenHistory(PathBuf),
+    RequestUnregisterFavorite(PathBuf),
 }
 
 pub struct SidebarViewContext<'a> {
@@ -412,9 +413,9 @@ fn show_history_entries(
             let row_width = ui.available_width().max(0.0);
             let (_, row_rect) =
                 ui.allocate_space(egui::vec2(row_width, SIDEBAR_HISTORY_ROW_HEIGHT));
-            let row_id = ui
-                .id()
-                .with(("history_row", &entry.normalized_path, entry.opened_at_ms));
+            let row_id =
+                ui.scope_id()
+                    .with(("history_row", &entry.normalized_path, entry.opened_at_ms));
             let row_resp = ui.interact(row_rect, row_id, egui::Sense::click());
             if row_resp.hovered() {
                 ui.painter().rect_filled(
@@ -583,11 +584,10 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         );
     }
 
-    let mut remove_idx: Option<usize> = None;
     let mut tree_action = None;
-    let favorite_drag_id = ui.id().with("library_favorite_drag");
-    let extensions_collapsed_id = ui.id().with("library_extensions_collapsed");
-    let groups_collapsed_id = ui.id().with("library_groups_collapsed");
+    let favorite_drag_id = ui.scope_id().with("library_favorite_drag");
+    let extensions_collapsed_id = ui.scope_id().with("library_extensions_collapsed");
+    let groups_collapsed_id = ui.scope_id().with("library_groups_collapsed");
     let mut extensions_collapsed = ui
         .ctx()
         .data(|data| data.get_temp::<bool>(extensions_collapsed_id))
@@ -601,14 +601,26 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
         .data(|data| data.get_temp::<usize>(favorite_drag_id));
     let mut favorite_drop_index: Option<usize> = None;
     if *left_pane_tab == LeftPaneTab::Library {
+        let add_label = tr(language, TextKey::AddFolder);
         let add_resp = ui
             .add_sized(
-                egui::vec2(ui.available_width().min(112.0), 24.0),
-                egui::Button::new(tr(language, TextKey::AddFolder))
+                egui::vec2(ui.available_width().min(148.0), 24.0),
+                egui::Button::new("")
                     .fill(egui::Color32::TRANSPARENT)
                     .stroke(quiet_stroke),
             )
             .on_hover_text(tr(language, TextKey::AddFolderHint));
+        let button_padding = ui.spacing().button_padding;
+        let add_text_color = ui.visuals().widgets.style(&add_resp).text_color();
+        ui.painter()
+            .with_clip_rect(add_resp.rect.shrink2(button_padding))
+            .text(
+                add_resp.rect.left_center() + egui::vec2(button_padding.x, 0.0),
+                egui::Align2::LEFT_CENTER,
+                add_label,
+                egui::TextStyle::Button.resolve(ui.style()),
+                add_text_color,
+            );
         paint_quiet_hover_border(ui, &add_resp);
         if add_resp.clicked() {
             if let Some(dir) = &state.current_dir {
@@ -714,13 +726,13 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
                     if ui
                         .button(icons::icon_label(
                             ui,
-                            icons::ICON_DELETE,
+                            icons::ICON_LINK_OFF,
                             15.0,
                             tr(language, TextKey::RemoveTreeFolderFromLibrary),
                         ))
                         .clicked()
                     {
-                        remove_idx = Some(i);
+                        action = Some(SidebarAction::RequestUnregisterFavorite(path.clone()));
                         ui.close();
                     }
                 });
@@ -1012,20 +1024,12 @@ pub fn show(ui: &mut egui::Ui, context: SidebarViewContext<'_>) -> Option<Sideba
             .data_mut(|data| data.remove::<usize>(favorite_drag_id));
     }
 
-    if let Some(i) = remove_idx {
-        let removed = favorites.get(i).map(|p| p.display().to_string());
-        favorites.remove(i);
-        tracing::debug!(
-            removed = ?removed,
-            count = favorites.len(),
-            favorites = ?favorites.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
-            "sidebar: favorite removed"
-        );
-    }
-
     if let Some(tree_action) = tree_action {
         action = Some(match tree_action {
             folder_tree::FolderTreeAction::Navigate(path) => SidebarAction::NavigateTree(path),
+            folder_tree::FolderTreeAction::RequestUnregister(path) => {
+                SidebarAction::RequestUnregisterFavorite(path)
+            }
         });
     }
 
