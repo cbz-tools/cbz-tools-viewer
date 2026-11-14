@@ -864,6 +864,11 @@ fn main() -> anyhow::Result<()> {
         // セッション管理は自前で行う（eframe の自動保存は無効）
         persist_window: false,
 
+        glow_options: eframe::egui_glow::GlowConfiguration {
+            vsync: false,
+            ..Default::default()
+        },
+
         renderer: eframe::Renderer::Glow,
 
         ..Default::default()

@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.16] - 2026-11-14
+
+### Fixed
+
+- Fixed screen flickering in the library.
+
 ## [0.5.15] - 2026-10-26
 
 ### Maintenance
