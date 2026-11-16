@@ -15,7 +15,7 @@ members = ["launcher"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.16"
+version = "0.5.17"
 edition = "2024"
 authors = []
 description = "High-performance CBZ/ZIP/RAR manga viewer"
@@ -56,7 +56,7 @@ toml              = "1"
 chrono            = { version = "0.4", features = ["serde"] }
 
 # --- UI (§11) ---
-eframe            = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "default_fonts", "web_screen_reader"] }
+eframe            = { version = "0.37", default-features = false, features = ["glow", "x11", "wayland", "accesskit", "default_fonts", "web_screen_reader", "clipboard"] }
 egui_material_icons = { version = "0.9", features = ["outline"] }
 
 # --- Async / 並列 (§11) ---

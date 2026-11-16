@@ -2,6 +2,12 @@
 
 All notable changes to **CBZ Viewer** are documented in this file.
 
+## [0.5.17] - 2026-11-16
+
+### Fixed
+
+- Fixed clipboard functionality.
+
 ## [0.5.16] - 2026-11-14
 
 ### Fixed
