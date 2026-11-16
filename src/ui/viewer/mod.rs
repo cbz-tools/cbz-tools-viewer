@@ -426,6 +426,7 @@ pub struct ViewerShowContext<'a> {
     pub language: UiLanguage,
     pub favorite_state: ViewerFavoriteState,
     pub favorite_toggle_pending: bool,
+    pub page_turn_wheel_delta: f32,
     pub interaction_blocked: bool,
     pub is_fullscreen: bool,
     pub external_tools: &'a [ExternalToolButtonModel],
@@ -465,6 +466,7 @@ struct ViewerInputParams {
     interaction_blocked: bool,
     in_viewport_transition: bool,
     is_fullscreen: bool,
+    page_turn_wheel_delta: f32,
     capabilities: ViewerUiCapabilities,
     page_range_delete_enabled: bool,
     now: Instant,
@@ -803,6 +805,7 @@ pub fn show(
         language,
         favorite_state,
         favorite_toggle_pending,
+        page_turn_wheel_delta,
         interaction_blocked,
         is_fullscreen,
         external_tools,
@@ -1041,7 +1044,6 @@ pub fn show(
     }
 
     let (boundary_preview_visible, mut action) = handle_keyboard_and_wheel_input(
-        ui,
         &ctx,
         state,
         external_tools,
@@ -1049,6 +1051,7 @@ pub fn show(
             interaction_blocked,
             in_viewport_transition,
             is_fullscreen,
+            page_turn_wheel_delta,
             capabilities,
             page_range_delete_enabled,
             now,
@@ -1479,7 +1482,6 @@ pub fn show(
 }
 
 fn handle_keyboard_and_wheel_input(
-    ui: &mut egui::Ui,
     ctx: &egui::Context,
     state: &mut ViewerState,
     external_tools: &[ExternalToolButtonModel],
@@ -1490,6 +1492,7 @@ fn handle_keyboard_and_wheel_input(
         interaction_blocked,
         in_viewport_transition,
         is_fullscreen,
+        page_turn_wheel_delta,
         capabilities,
         page_range_delete_enabled,
         now,
@@ -1501,7 +1504,7 @@ fn handle_keyboard_and_wheel_input(
     const WHEEL_STEP: f32 = 12.0;
     const WHEEL_COOLDOWN: Duration = Duration::from_millis(120);
     // ── キーボード / ホイール ─────────────────────────────────────────────────
-    // スクロール入力は smooth_scroll_delta を正規ルートにする。
+    // raw_input_hook から渡された平滑化前のホイール値をページ送りに使う。
     let boundary_preview_visible =
         state.boundary_preview_visible(capabilities.allow_book_navigation, is_fullscreen);
     if !in_viewport_transition && !interaction_blocked {
@@ -1547,7 +1550,7 @@ fn handle_keyboard_and_wheel_input(
             }
         }
 
-        let wheel = ui.input(|i| i.smooth_scroll_delta.y);
+        let wheel = page_turn_wheel_delta;
         if let Some(until) = state.ui_runtime.wheel_cooldown_until {
             if now < until {
                 state.ui_runtime.scroll_accum = 0.0;

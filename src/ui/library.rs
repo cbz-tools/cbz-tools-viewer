@@ -284,6 +284,10 @@ pub struct LibraryState {
     pub scroll_restore_pending: bool,
     /// キーナビ後のスクロール追従要求（次フレームに適用して消費）
     pub scroll_to_pending: Option<f32>,
+    /// raw_input_hook が参照する、直近フレームのグリッド入力領域。
+    pub(crate) ctrl_wheel_capture_target: Option<virtual_grid::CtrlWheelCaptureTarget>,
+    /// raw_input_hook でスムーズスクロール処理前に取得したCtrl+ホイール量。
+    pub(crate) pending_ctrl_wheel_thumb_size_delta: i8,
     /// 選択済み要素を次フレームで可視範囲へ寄せる 1 回限りの要求
     pub scroll_selected_into_view_pending: bool,
     /// サイドバー操作後にグリッドのコンテキストメニューキャッシュをリセットする
@@ -2262,6 +2266,8 @@ impl LibraryState {
             initial_scroll_y: 0.0,
             scroll_restore_pending: false,
             scroll_to_pending: None,
+            ctrl_wheel_capture_target: None,
+            pending_ctrl_wheel_thumb_size_delta: 0,
             scroll_selected_into_view_pending: false,
             reset_context_menu_cache: false,
             reading_hud_states: HashMap::new(),
@@ -4838,12 +4844,16 @@ pub fn show(
     external_tool_busy: bool,
     web_searches: &[WebSearchMenuItem],
 ) -> LibraryAction {
+    let preconsumed_ctrl_wheel_delta =
+        std::mem::take(&mut state.pending_ctrl_wheel_thumb_size_delta);
+
     // フィルタ / ソートが変更されていれば再構築
     if state.filter_dirty {
         state.rebuild_entries();
     }
 
     if state.show_empty_library_message(ui, language) {
+        state.ctrl_wheel_capture_target = None;
         state.clear_display_tasks_if_needed();
         if state.preview.target.is_some() {
             state.invalidate_preview();
@@ -4909,6 +4919,7 @@ pub fn show(
             external_tool_busy,
             language,
             show_clear_filter: !state.filter.keyword().is_empty(),
+            preconsumed_ctrl_wheel_delta,
         },
         virtual_grid::GridViewConfig {
             restore_scroll,
@@ -4922,6 +4933,7 @@ pub fn show(
             reset_context_menu_cache: reset_cache,
         },
     );
+    state.ctrl_wheel_capture_target = Some(result.ctrl_wheel_capture_target);
 
     state.update_preview(
         ui.ctx(),

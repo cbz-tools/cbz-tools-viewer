@@ -97,6 +97,18 @@ pub struct GridResult {
     pub hovered_preview: Option<HoveredPreviewCell>,
     /// Ctrl+ホイールによるサムネイル表示サイズ変更（+1: 拡大、-1: 縮小）
     pub thumb_size_delta: Option<i8>,
+    pub(crate) ctrl_wheel_capture_target: CtrlWheelCaptureTarget,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CtrlWheelCaptureTarget {
+    rect: Rect,
+    clip_rect: Rect,
+    layer_id: egui::LayerId,
+    viewport_id: egui::ViewportId,
+    screen_rect: Option<Rect>,
+    interaction_enabled: bool,
+    context_menu_open: bool,
 }
 
 #[derive(Clone)]
@@ -156,6 +168,7 @@ pub struct GridViewContext<'a> {
     pub external_tool_busy: bool,
     pub language: UiLanguage,
     pub show_clear_filter: bool,
+    pub preconsumed_ctrl_wheel_delta: i8,
 }
 
 pub struct GridViewConfig {
@@ -264,6 +277,7 @@ pub fn show_grid(
         external_tool_busy,
         language,
         show_clear_filter,
+        preconsumed_ctrl_wheel_delta,
     } = context;
     let GridViewConfig {
         restore_scroll,
@@ -284,8 +298,12 @@ pub fn show_grid(
         popup_input_blocked,
         !entries.is_empty(),
     );
-    let thumb_size_delta =
-        consume_ctrl_wheel_for_thumb_size(ui, interaction_enabled, popup_input_blocked);
+    let thumb_size_delta = consume_ctrl_wheel_for_thumb_size(
+        ui,
+        interaction_enabled,
+        popup_input_blocked,
+        preconsumed_ctrl_wheel_delta,
+    );
 
     let count = entries.len();
     let any_nav = nav_input.left
@@ -530,10 +548,21 @@ pub fn show_grid(
         }
     });
 
+    let ctrl_wheel_capture_target = CtrlWheelCaptureTarget {
+        rect: ui.max_rect(),
+        clip_rect: ui.clip_rect(),
+        layer_id: ui.layer_id(),
+        viewport_id: ui.ctx().input(|input| input.raw.viewport_id),
+        screen_rect: ui.ctx().input(|input| input.raw.screen_rect),
+        interaction_enabled,
+        context_menu_open: any_context_menu_open,
+    };
+
     assemble_grid_result(
         ui,
         popup_open_state_id,
         any_context_menu_open,
+        ctrl_wheel_capture_target,
         GridResultParts {
             click_selected,
             click_ctrl,
@@ -969,6 +998,7 @@ fn consume_ctrl_wheel_for_thumb_size(
     ui: &mut egui::Ui,
     interaction_enabled: bool,
     popup_input_blocked: bool,
+    preconsumed_delta: i8,
 ) -> Option<i8> {
     if !interaction_enabled
         || popup_input_blocked
@@ -982,20 +1012,24 @@ fn consume_ctrl_wheel_for_thumb_size(
     // smooth_scroll_delta. Read Event::MouseWheel directly for the grid action's
     // Ctrl modifier and vertical delta.
     let thumb_size_delta = ui.input(|input| {
-        input.raw.events.iter().fold(0i8, |delta, event| {
-            let egui::Event::MouseWheel {
-                delta: wheel_delta,
-                modifiers,
-                ..
-            } = event
-            else {
-                return delta;
-            };
-            if !modifiers.ctrl || wheel_delta.y.abs() <= f32::EPSILON {
-                return delta;
-            }
-            delta.saturating_add(if wheel_delta.y > 0.0 { 1 } else { -1 })
-        })
+        input
+            .raw
+            .events
+            .iter()
+            .fold(preconsumed_delta, |delta, event| {
+                let egui::Event::MouseWheel {
+                    delta: wheel_delta,
+                    modifiers,
+                    ..
+                } = event
+                else {
+                    return delta;
+                };
+                if !modifiers.ctrl || wheel_delta.y.abs() <= f32::EPSILON {
+                    return delta;
+                }
+                delta.saturating_add(if wheel_delta.y > 0.0 { 1 } else { -1 })
+            })
     });
     if thumb_size_delta == 0 {
         return None;
@@ -1005,6 +1039,70 @@ fn consume_ctrl_wheel_for_thumb_size(
     // remaining vertical smooth_scroll_delta before the ScrollArea reads it.
     ui.input_mut(|input| input.smooth_scroll_delta.y = 0.0);
     Some(thumb_size_delta)
+}
+
+pub(crate) fn filter_ctrl_wheel_for_thumb_size(
+    ctx: &egui::Context,
+    raw_input: &mut egui::RawInput,
+    target: Option<CtrlWheelCaptureTarget>,
+    interaction_blocked: bool,
+    text_input_focused: bool,
+) -> i8 {
+    let Some(target) = target else {
+        return 0;
+    };
+    if !target.interaction_enabled
+        || target.context_menu_open
+        || interaction_blocked
+        || text_input_focused
+        || ctx.any_popup_open()
+        || !raw_input.focused
+        || raw_input.viewport_id != target.viewport_id
+        || raw_input.screen_rect != target.screen_rect
+    {
+        return 0;
+    }
+    if raw_input.events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::PointerButton { pressed: true, .. }
+                | egui::Event::Key { pressed: true, .. }
+        )
+    }) {
+        return 0;
+    }
+
+    let mut pointer_pos = ctx.input(|input| input.pointer.interact_pos());
+    for event in &raw_input.events {
+        match event {
+            egui::Event::PointerMoved(pos) | egui::Event::PointerButton { pos, .. } => {
+                pointer_pos = Some(*pos);
+            }
+            egui::Event::PointerGone => pointer_pos = None,
+            _ => {}
+        }
+    }
+    let pointer_over_grid = pointer_pos.is_some_and(|pos| {
+        target.clip_rect.intersect(target.rect).contains(pos)
+            && ctx.layer_id_at(pos) == Some(target.layer_id)
+    });
+    if !pointer_over_grid {
+        return 0;
+    }
+
+    let mut thumb_size_delta = 0i8;
+
+    raw_input.events.retain_mut(|event| match event {
+        egui::Event::MouseWheel {
+            delta, modifiers, ..
+        } if modifiers.ctrl && delta.y.abs() > f32::EPSILON && pointer_over_grid => {
+            thumb_size_delta = thumb_size_delta.saturating_add(if delta.y > 0.0 { 1 } else { -1 });
+            false
+        }
+        _ => true,
+    });
+
+    thumb_size_delta
 }
 
 fn compute_request_scroll_y(
@@ -1045,6 +1143,7 @@ fn assemble_grid_result(
     ui: &egui::Ui,
     popup_open_state_id: egui::Id,
     any_context_menu_open: bool,
+    ctrl_wheel_capture_target: CtrlWheelCaptureTarget,
     parts: GridResultParts,
 ) -> GridResult {
     let multi_select = parts
@@ -1068,6 +1167,7 @@ fn assemble_grid_result(
         drag_started: parts.drag_started,
         hovered_preview: parts.hovered_preview,
         thumb_size_delta: parts.thumb_size_delta,
+        ctrl_wheel_capture_target,
     }
 }
 

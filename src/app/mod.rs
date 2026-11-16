@@ -337,6 +337,19 @@ impl App {
 }
 
 impl eframe::App for App {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.library.pending_ctrl_wheel_thumb_size_delta = 0;
+        let text_input_focused = ctx.memory(|memory| memory.focused().is_some());
+        self.library.pending_ctrl_wheel_thumb_size_delta =
+            crate::ui::virtual_grid::filter_ctrl_wheel_for_thumb_size(
+                ctx,
+                raw_input,
+                self.library.ctrl_wheel_capture_target,
+                self.library_grid_interaction_blocked(),
+                text_input_focused,
+            );
+    }
+
     // eframe 0.35 では状態更新と描画が分離される。IPC の状態反映は logic が担い、
     // ui はその時点の Library 状態を描画して navigation 順序を公開する。
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -611,6 +624,19 @@ impl eframe::App for App {
 // ── 内部メソッド ─────────────────────────────────────────────────────────────
 
 impl App {
+    fn library_grid_interaction_blocked(&self) -> bool {
+        self.settings_open
+            || self.suppress_pointer_until_release
+            || self.renaming.is_some()
+            || self.properties_dialog.is_some()
+            || self.deleting.is_some()
+            || self.pending_favorite_dir_unregistration.is_some()
+            || self.cache_clear_confirmation_open
+            || self.book_settings_clearing.is_some()
+            || self.setting_group_open
+            || self.pending_error_dialog.is_some()
+    }
+
     fn refresh_library_book_order(&self) {
         let ordered_books: Vec<PathBuf> = self
             .library
@@ -1953,16 +1979,7 @@ impl App {
     ) {
         let web_searches = crate::infra::web_search::menu_items(&self.app_settings.web_searches);
         egui::CentralPanel::default().show(root_ui, |ui| {
-            let modal_open = self.renaming.is_some()
-                || self.properties_dialog.is_some()
-                || self.deleting.is_some()
-                || self.pending_favorite_dir_unregistration.is_some()
-                || self.cache_clear_confirmation_open
-                || self.book_settings_clearing.is_some()
-                || self.setting_group_open
-                || self.pending_error_dialog.is_some();
-            let interaction_blocked =
-                modal_open || self.suppress_pointer_until_release || self.settings_open;
+            let interaction_blocked = self.library_grid_interaction_blocked();
             let action = library::show(
                 ui,
                 &mut self.library,

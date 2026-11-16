@@ -5,7 +5,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 use std::time::{Instant, SystemTime};
 
-use eframe::egui::{self, Key};
+use eframe::egui::{self, Key, MouseWheelUnit, TouchPhase};
 
 use crate::domain::app_settings::{
     AppSettings, ReadingDirection, ViewerQuality, normalize_external_tool_executable,
@@ -89,6 +89,7 @@ pub struct ViewerApp {
     image_order_snapshot_applied: bool,
     spad_session_id: u64,
     spad_early_start_threshold_percent: Option<usize>,
+    page_turn_wheel_delta: f32,
 }
 
 enum ViewerMode {
@@ -789,6 +790,7 @@ impl ViewerApp {
             image_order_snapshot_applied: false,
             spad_session_id: 1,
             spad_early_start_threshold_percent: None,
+            page_turn_wheel_delta: 0.0,
         };
         app.send_spad_request();
         Ok(app)
@@ -2464,6 +2466,19 @@ fn validate_image_order_snapshot(snapshot: &ImageOrderSnapshot) -> Option<usize>
 }
 
 impl eframe::App for ViewerApp {
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.page_turn_wheel_delta = 0.0;
+        if self.delete_dialog_open
+            || self.page_range_delete_dialog_open
+            || ctx.egui_wants_keyboard_input()
+            || ctx.any_popup_open()
+        {
+            return;
+        }
+
+        self.page_turn_wheel_delta = extract_viewer_page_turn_wheel_delta(ctx, raw_input);
+    }
+
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.skip_ui_this_frame = false;
         if self.pending_startup_maximize && !self.startup_maximize_sent {
@@ -2559,6 +2574,7 @@ impl eframe::App for ViewerApp {
                         favorite_toggle_pending: self
                             .pending_favorite_toggle_previous_state
                             .is_some(),
+                        page_turn_wheel_delta: std::mem::take(&mut self.page_turn_wheel_delta),
                         interaction_blocked: self.delete_dialog_open
                             || self.page_range_delete_dialog_open,
                         is_fullscreen: self.is_fullscreen,
@@ -2714,6 +2730,54 @@ impl eframe::App for ViewerApp {
         self.send_reading_session_finished(true);
         self.save_viewer_window_geometry();
     }
+}
+
+fn extract_viewer_page_turn_wheel_delta(
+    ctx: &egui::Context,
+    raw_input: &mut egui::RawInput,
+) -> f32 {
+    let input_options = ctx.options(|options| options.input_options);
+    let viewport_height = raw_input
+        .screen_rect
+        .map(|rect| rect.height())
+        .unwrap_or_else(|| ctx.input(|input| input.viewport_rect().height()));
+    let mut wheel_delta_y = 0.0;
+
+    raw_input.events.retain(|event| {
+        let egui::Event::MouseWheel {
+            unit,
+            delta,
+            phase: TouchPhase::Move,
+            modifiers,
+            ..
+        } = event
+        else {
+            return true;
+        };
+
+        let horizontal = modifiers.matches_any(input_options.horizontal_scroll_modifier);
+        let vertical = modifiers.matches_any(input_options.vertical_scroll_modifier);
+        if modifiers.matches_any(input_options.zoom_modifier) || (horizontal && !vertical) {
+            return true;
+        }
+
+        let mut delta = match unit {
+            MouseWheelUnit::Point => *delta,
+            MouseWheelUnit::Line => input_options.line_scroll_speed * *delta,
+            MouseWheelUnit::Page => viewport_height * *delta,
+        };
+        if !horizontal && vertical {
+            delta = egui::vec2(0.0, delta.x + delta.y);
+        }
+        if delta.y.abs() <= f32::EPSILON {
+            return true;
+        }
+
+        wheel_delta_y += delta.y;
+        false
+    });
+
+    wheel_delta_y
 }
 
 fn book_meta_from_path(path: &Path) -> BookMeta {
